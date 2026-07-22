@@ -132,6 +132,7 @@ models/mobileclip_onnx/
 # SCUNet denoise checkpoint + its ONNX export (large); export with scripts/models/export_scunet_onnx.py
 models/scunet_color_real_psnr.pth
 models/restormer.onnx
+models/scunet.onnx
 
 # NAFNet denoise checkpoint(s) + ONNX export(s) (large); export with scripts/models/export_nafnet_onnx.py
 models/NAFNet-SIDD-width32.pth

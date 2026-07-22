@@ -2421,16 +2421,22 @@ class _AdjustExportWorker(QRunnable):
                     "If the app vanished mid-export, the Mac may have run out of memory "
                     "on a large full-res demosaic."
                 )
-            # Remaining work (tonemap + encode) is one opaque call, so the bar
-            # steps to a "working" milestone rather than faking granularity
-            # nothing backs -- except AI denoise, which is 50-200+ ONNX tiles
-            # on a full-res photo and previously reported no progress at all
-            # for that whole span (looked hung) and ignored Cancel entirely.
-            emit_progress(70, "Encoding…")
+            emit_progress(40, "Denoising (AI)…" if self.use_ai_denoise else "Processing…")
 
-            def _denoise_progress(frac: float) -> None:
-                pct = 70 + int(max(0.0, min(1.0, frac)) * 25)
-                emit_progress(pct, "Denoising (AI)…")
+            def _export_progress(frac: float, stage: str = "denoise") -> None:
+                stage_str = str(stage).lower()
+                frac_val = max(0.0, min(1.0, float(frac)))
+                if stage_str == "tonemap":
+                    pct = 80 + int(frac_val * 10)
+                    emit_progress(pct, "Applying Tone & Color…")
+                elif stage_str == "encode":
+                    pct = 90 + int(frac_val * 9)
+                    fmt_name = (self.export_format or "JPEG").upper()
+                    emit_progress(pct, f"Encoding {fmt_name}…")
+                else:  # denoise
+                    pct = 40 + int(frac_val * 40)
+                    msg = "Denoising (AI)…" if self.use_ai_denoise else "Denoising…"
+                    emit_progress(pct, msg)
 
             export_adjusted_image(
                 self.export_format,
@@ -2439,7 +2445,7 @@ class _AdjustExportWorker(QRunnable):
                 adj=self.adj,
                 embed_xmp_path=embed_xmp,
                 cancel_check=self.cancel_event.is_set,
-                progress_cb=_denoise_progress,
+                progress_cb=_export_progress,
                 use_ai_denoise=self.use_ai_denoise,
             )
             emit_progress(100, "Done")

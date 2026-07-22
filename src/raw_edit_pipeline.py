@@ -10,6 +10,7 @@ from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+_scunet_availability_logged = False
 _restormer_availability_logged = False
 
 from raw_adjustments import (
@@ -282,43 +283,44 @@ def _process_linear_edit_tail(
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     method = int(float(merged.get("DenoiseMethod", 0.0)))
 
-    restormer_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models", "restormer.onnx")
-    restormer_enabled_env = os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1") == "1"
-    restormer_model_present = os.path.exists(restormer_model_path)
+    from onnx_scunet import SCUNetONNX, scunet_model_path
+
+    model_path = scunet_model_path()
+    scunet_enabled_env = (
+        os.environ.get("RAWVIEWER_EXPORT_SCUNET_ONNX", os.environ.get("RAWVIEWER_EXPORT_RESTORMER_ONNX", "1")) == "1"
+    )
+    scunet_model_present = os.path.exists(model_path)
     # AI denoise is export-only and opt-in: the Adjust panel's Chroma NR
     # dropdown (Bilateral/Guided/Off) always applies as selected, live in
     # preview and by default at export -- use_ai_denoise (set by the Export
     # menu's "AI Denoise" toggle) is what additionally switches the export
-    # pass over to Restormer/SCUNet instead of the legacy method. It used to
-    # silently override the chosen method on every export whenever the model
-    # was present, with no UI control and no way to tell it had happened.
-    use_restormer = not preview and use_ai_denoise and restormer_enabled_env and restormer_model_present
+    # pass over to SCUNet instead of the legacy method.
+    use_scunet = not preview and use_ai_denoise and scunet_enabled_env and scunet_model_present
 
-    global _restormer_availability_logged
-    if not preview and use_ai_denoise and not _restormer_availability_logged:
-        _restormer_availability_logged = True
-        if not restormer_enabled_env:
-            logger.info("[DENOISE] AI denoise (Restormer/SCUNet ONNX) disabled via RAWVIEWER_EXPORT_RESTORMER_ONNX=0")
-        elif not restormer_model_present:
+    global _scunet_availability_logged
+    if not preview and use_ai_denoise and not _scunet_availability_logged:
+        _scunet_availability_logged = True
+        if not scunet_enabled_env:
+            logger.info("[DENOISE] AI denoise (SCUNet ONNX) disabled via RAWVIEWER_EXPORT_SCUNET_ONNX=0")
+        elif not scunet_model_present:
             logger.warning(
                 "[DENOISE] AI denoise model not found at %s -- falling back to legacy chroma/luma "
                 "noise reduction. Run scripts/models/download_mobileclip_onnx.py (Plus install step) "
                 "to fetch it.",
-                restormer_model_path,
+                model_path,
             )
         else:
-            logger.info("[DENOISE] AI denoise model found at %s", restormer_model_path)
+            logger.info("[DENOISE] AI denoise model found at %s", model_path)
 
-    if use_restormer and (nr_amount > 1e-4 or do_denoise):
-        logger.info("[DENOISE] Using AI denoise (Restormer/SCUNet ONNX) for this export")
-        from onnx_restormer import RestormerONNX
-        restormer = RestormerONNX(restormer_model_path)
+    if use_scunet and (nr_amount > 1e-4 or do_denoise):
+        logger.info("[DENOISE] Using AI denoise (SCUNet ONNX) for this export")
+        scunet = SCUNetONNX(model_path)
 
         def _denoise_progress(frac: float) -> None:
             if progress_cb is not None:
                 progress_cb(frac)
 
-        img = restormer.process(img, cancel_check=cancel_check, progress_callback=_denoise_progress)
+        img = scunet.process(img, cancel_check=cancel_check, progress_callback=_denoise_progress)
     else:
         if nr_amount > 1e-4:
             img = apply_chroma_denoise(
@@ -924,7 +926,17 @@ def export_adjusted_tiff16(
     processed = _process_for_export(
         rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
     )
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "tonemap")
+        except TypeError:
+            progress_cb(0.85)
     out = linear_to_export_uint16_srgb(processed, adj)
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "encode")
+        except TypeError:
+            progress_cb(0.95)
     _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
 
 
@@ -942,23 +954,26 @@ def export_adjusted_jpeg(
     processed = _process_for_export(
         rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
     )
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "tonemap")
+        except TypeError:
+            progress_cb(0.85)
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
     _ensure_parent_dir(output_path)
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "encode")
+        except TypeError:
+            progress_cb(0.95)
     im.save(
         output_path,
         format="JPEG",
         quality=max(1, min(100, int(quality))),
         subsampling=0,
-        # Deliberately no optimize=True: that flag combined with
-        # subsampling=0 triggers a libjpeg "Suspension not allowed here"
-        # encoder crash on some Pillow/libjpeg builds -- reproduced with a
-        # plain synthetic array, unrelated to any RAWViewer-specific data.
-        # subsampling=0 (no chroma subsampling) matters for color fidelity;
-        # optimize is a pure file-size optimization with no visible quality
-        # difference, not worth the crash risk.
     )
 
 
@@ -976,11 +991,21 @@ def export_adjusted_webp(
     processed = _process_for_export(
         rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
     )
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "tonemap")
+        except TypeError:
+            progress_cb(0.85)
     out = linear_to_display_uint8(processed, adj)
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
     _ensure_parent_dir(output_path)
+    if progress_cb is not None:
+        try:
+            progress_cb(0.5, "encode")
+        except TypeError:
+            progress_cb(0.95)
     im.save(
         output_path,
         format="WEBP",

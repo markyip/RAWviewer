@@ -1534,13 +1534,13 @@ class ImageAdjustPanelWidget(QWidget):
         # consistent with every other item in this menu.
         self._ai_denoise_menu = None
         try:
-            from onnx_restormer import restormer_model_path
+            from onnx_scunet import scunet_model_path
 
-            if os.path.exists(restormer_model_path()):
-                ai_menu = QMenu("AI Denoise (Restormer/SCUNet)", export_menu)
+            if os.path.exists(scunet_model_path()):
+                ai_menu = QMenu("AI Denoise (SCUNet)", export_menu)
                 ai_menu.setStyleSheet(export_menu.styleSheet())
                 ai_tip = (
-                    "Uses AI (Restormer/SCUNet) instead of the Chroma NR method "
+                    "Uses AI (SCUNet) instead of the Chroma NR method "
                     "above, for this export only."
                 )
                 for label, fmt in (

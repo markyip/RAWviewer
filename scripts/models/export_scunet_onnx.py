@@ -27,7 +27,7 @@ from network_scunet import SCUNet
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHECKPOINT = os.path.join(ROOT, "models", "scunet_color_real_psnr.pth")
-OUTPUT = os.path.join(ROOT, "models", "restormer.onnx")
+OUTPUT = os.path.join(ROOT, "models", "scunet.onnx")
 TILE_SIZE = 512
 
 

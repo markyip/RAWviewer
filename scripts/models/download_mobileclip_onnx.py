@@ -163,8 +163,9 @@ def main() -> int:
 
         shutil.rmtree(MODELS_DIR / "onnx")
 
-    denoise_model_path = MODELS_DIR.parent / "restormer.onnx"
-    if not denoise_model_path.exists():
+    denoise_model_path = MODELS_DIR.parent / "scunet.onnx"
+    legacy_denoise_model_path = MODELS_DIR.parent / "restormer.onnx"
+    if not denoise_model_path.exists() and not legacy_denoise_model_path.exists():
         def _fetch_denoise_model():
             print("[INFO] Fetching AI denoise model (SCUNet, fp16 ONNX)", flush=True)
             _download_url_with_progress(

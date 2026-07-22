@@ -2998,11 +2998,11 @@ class SemanticImageIndex:
             self._mobileclip_backend = backend
             # Best-effort: also close the gap on the AI denoise model, which
             # this path previously never fetched -- see
-            # onnx_restormer.ensure_restormer_model_downloaded for why.
+            # onnx_scunet.ensure_scunet_model_downloaded for why.
             try:
-                from onnx_restormer import ensure_restormer_model_downloaded
+                from onnx_scunet import ensure_scunet_model_downloaded
 
-                ensure_restormer_model_downloaded()
+                ensure_scunet_model_downloaded()
             except Exception:
                 pass
             return path
