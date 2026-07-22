@@ -33,7 +33,7 @@ class HDRPanoramaDialog(QDialog):
     def __init__(
         self,
         image_paths: List[str],
-        mode: str = "hdr",  # "panorama", "hdr", "hdr_panorama"
+        mode: str = "hdr",  # "panorama", "hdr", "hdr_panorama", "focus_stack"
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -45,13 +45,14 @@ class HDRPanoramaDialog(QDialog):
             "panorama": "Standard Panorama Stitching",
             "hdr": "HDR Exposure Fusion & Weight Tuning",
             "hdr_panorama": "Panorama HDR Merge",
+            "focus_stack": "Focus Stacking (All-in-Focus Merge)",
         }
         self.setWindowTitle(title_map.get(self.mode, "Stitch & Merge"))
         self.setMinimumSize(540, 480)
         self.setStyleSheet(
             f"""
             QDialog {{
-                background-color: {theme.DARK_BG};
+                background-color: {theme.VOID};
                 color: {theme.INK};
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             }}
@@ -186,16 +187,37 @@ class HDRPanoramaDialog(QDialog):
         layout.addWidget(img_box, 1)
 
         # 3. Stitching Options
+        is_focus = self.mode == "focus_stack"
         opt_box = QVBoxLayout()
-        self.crop_cb = QCheckBox("Auto-crop warped black borders (Maintain rectangular frame)", self)
+        crop_text = (
+            "Auto-crop the alignment border (keep a clean rectangular frame)"
+            if is_focus
+            else "Auto-crop warped black borders (Maintain rectangular frame)"
+        )
+        self.crop_cb = QCheckBox(crop_text, self)
         self.crop_cb.setChecked(True)
         self.crop_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         opt_box.addWidget(self.crop_cb)
 
-        self.align_cb = QCheckBox("Auto-align handheld exposures (MTB)", self)
+        align_text = (
+            "Auto-align frames for focus breathing (ECC affine)"
+            if is_focus
+            else "Auto-align handheld exposures (MTB)"
+        )
+        self.align_cb = QCheckBox(align_text, self)
         self.align_cb.setChecked(True)
         self.align_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         opt_box.addWidget(self.align_cb)
+
+        if is_focus:
+            hint = QLabel(
+                "Frames must be the same scene shot at different focal planes. "
+                "Order does not matter. A tripod gives the best result; heavy "
+                "handheld parallax between frames can leave soft edges."
+            )
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+            opt_box.addWidget(hint)
 
         layout.addLayout(opt_box)
 
@@ -221,7 +243,8 @@ class HDRPanoramaDialog(QDialog):
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
-        self.merge_btn = QPushButton("Merge & Stitch", self)
+        # "&&" -- a single & is a Qt mnemonic and renders as "Merge _Stitch".
+        self.merge_btn = QPushButton("Merge && Stitch", self)
         self.merge_btn.setMinimumHeight(36)
         self.merge_btn.setMinimumWidth(120)
         self.merge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -235,7 +258,7 @@ class HDRPanoramaDialog(QDialog):
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background-color: {theme.EMBER_BRIGHT};
+                background-color: {theme.EMBER_DIM};
             }}
             """
         )
@@ -247,6 +270,10 @@ class HDRPanoramaDialog(QDialog):
     def should_auto_crop(self) -> bool:
         """Returns True if auto-cropping warped borders is enabled."""
         return self.crop_cb.isChecked()
+
+    def should_align(self) -> bool:
+        """Returns True if auto-alignment is enabled."""
+        return self.align_cb.isChecked()
 
     def get_hdr_weights(self) -> Dict[str, float]:
         """Returns dict of highlight, shadow, midtone weight multipliers."""
