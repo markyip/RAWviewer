@@ -8993,6 +8993,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
+                    self.gpu_view.dodgeBurnBrushStrengthWheel.connect(
+                        self._on_dodge_burn_brush_strength_wheel
+                    )
                     self.gpu_view.dodgeBurnResumeAfterResize.connect(
                         self._on_dodge_burn_resume_after_resize
                     )
@@ -22603,6 +22606,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         still one undo unit, ended only when the hotkey is released.
         """
         self._dodge_burn_last_stamp_pt = None
+
+    def _on_dodge_burn_brush_strength_wheel(self, wheel_delta: int) -> None:
+        """Two-finger horizontal scroll while painting → Brush Flow/Strength."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or panel.dodge_burn_mode() is None:
+            return
+        if hasattr(panel, "nudge_dodge_burn_brush_strength"):
+            panel.nudge_dodge_burn_brush_strength(int(wheel_delta))
 
     def _on_dodge_burn_brush_size_wheel(self, wheel_delta: int) -> None:
         """Trackpad/wheel while Dodge/Burn is armed → Brush Size, not navigate."""

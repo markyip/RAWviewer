@@ -482,6 +482,9 @@ class GpuImageView(QGraphicsView):
     # Vertical wheel/trackpad delta while D&B is armed — host nudges Brush Size
     # instead of navigating images.
     dodgeBurnBrushSizeWheel = pyqtSignal(int)
+    # Two-finger HORIZONTAL scroll while a hold-to-paint stroke is live: adjust
+    # Brush Flow/Strength (the orthogonal axis to vertical = size).
+    dodgeBurnBrushStrengthWheel = pyqtSignal(int)
     # Fingers lifted after a mid-stroke two-finger resize: host resets its
     # per-stroke stamp anchor so the resumed stamp is not flow-scaled against
     # the pre-pause position.
@@ -529,6 +532,11 @@ class GpuImageView(QGraphicsView):
         # resize the brush mid-stroke without painting, and the stroke stays
         # open (one undo unit) until the fingers lift and painting resumes.
         self._brush_resizing = False
+        # Per-gesture dominant-axis lock: None until the first significant
+        # delta, then "size" (vertical) or "flow" (horizontal) for the rest of
+        # the gesture, so a slightly diagonal scroll can't nudge both.
+        self._resize_axis = None
+        self._brush_hud = None  # lazily-created transient readout label
         self._crop_mode = False
         self._export_drag_enabled = True
         self._drag_start_pos = None
@@ -1752,6 +1760,8 @@ class GpuImageView(QGraphicsView):
         """
         self._db_key_held = False
         self._brush_resizing = False
+        self._resize_axis = None
+        self._hide_brush_hud()
         if getattr(self, "_dodge_burn_painting", False):
             self._dodge_burn_painting = False
             from PyQt6.QtGui import QCursor
@@ -1759,6 +1769,41 @@ class GpuImageView(QGraphicsView):
             view_pos = self.viewport().mapFromGlobal(QCursor.pos())
             pt = self._clamped_scene_point(view_pos)
             self.dodgeBurnStroke.emit(pt, 1.0, True)
+
+    def _show_brush_hud(self, text: str) -> None:
+        """Transient readout during a resize gesture.
+
+        With two axes (size vs flow) the cursor ring alone can't say which is
+        changing -- flow has no visual analog -- so a small label names the
+        parameter and value while the gesture is active. Anchored to the
+        viewport (fixed screen position), not the scene, so it doesn't pan/zoom.
+        """
+        from PyQt6.QtCore import Qt as _Qt
+        from PyQt6.QtWidgets import QLabel
+
+        hud = self._brush_hud
+        if hud is None:
+            hud = QLabel(self.viewport())
+            hud.setAttribute(_Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            # Hardcoded to match the app palette (VOID/INK/LINE); this widget
+            # deliberately carries no theme-module dependency, like the rest of
+            # the view's chrome.
+            hud.setStyleSheet(
+                "background-color: #14120f; color: #ede7dd; "
+                "border: 1px solid #3a332a; border-radius: 6px; "
+                "padding: 4px 10px; font-size: 13px; font-weight: 600;"
+            )
+            self._brush_hud = hud
+        hud.setText(text)
+        hud.adjustSize()
+        vp = self.viewport()
+        hud.move((vp.width() - hud.width()) // 2, 18)
+        hud.show()
+        hud.raise_()
+
+    def _hide_brush_hud(self) -> None:
+        if self._brush_hud is not None:
+            self._brush_hud.hide()
 
     def set_dodge_burn_brush_radius(self, radius_px: float) -> None:
         """Brush radius in *display/scene* pixels (matches the Size slider)."""
@@ -2313,15 +2358,36 @@ class GpuImageView(QGraphicsView):
             phase = event.phase()
             if phase == Qt.ScrollPhase.ScrollBegin:
                 self._brush_resizing = True
+                self._resize_axis = None
             elif phase == Qt.ScrollPhase.ScrollEnd:
                 # Fingers lifted -- resume painting and reset the stamp anchor.
                 self._brush_resizing = False
+                self._resize_axis = None
+                self._hide_brush_hud()
                 self.dodgeBurnResumeAfterResize.emit()
                 event.accept()
                 return
             elif phase == Qt.ScrollPhase.ScrollMomentum:
                 # Inertia after the fingers lifted: ignore so the brush does not
                 # keep growing once the gesture is physically over.
+                event.accept()
+                return
+
+            if phase in (Qt.ScrollPhase.ScrollBegin, Qt.ScrollPhase.ScrollUpdate):
+                dx = event.angleDelta().x() or event.pixelDelta().x()
+                dy = event.angleDelta().y() or event.pixelDelta().y()
+                # Lock the dominant axis on the first significant delta so a
+                # slightly diagonal scroll can't nudge both size and flow.
+                if self._resize_axis is None and max(abs(dx), abs(dy)) >= 2:
+                    self._resize_axis = "flow" if abs(dx) > abs(dy) else "size"
+                if self._resize_axis == "flow" and dx:
+                    self.dodgeBurnBrushStrengthWheel.emit(int(dx))
+                    self._show_brush_hud(
+                        f"Flow  {int(round(self._dodge_burn_brush_flow * 100))}%"
+                    )
+                elif self._resize_axis == "size" and dy:
+                    self.dodgeBurnBrushSizeWheel.emit(int(dy))
+                    self._show_brush_hud(f"Size  {int(round(self._dodge_burn_brush_radius))} px")
                 event.accept()
                 return
 

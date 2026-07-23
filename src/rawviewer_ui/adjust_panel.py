@@ -3038,6 +3038,23 @@ class ImageAdjustPanelWidget(QWidget):
             max(slider.minimum(), min(slider.maximum(), slider.value() + amount))
         )
 
+    def nudge_dodge_burn_brush_strength(self, wheel_delta: int) -> None:
+        """Adjust Brush Flow/Strength from a trackpad/wheel delta (positive = stronger)."""
+        slider = getattr(self, "_db_strength_slider", None)
+        if slider is None or not wheel_delta:
+            return
+        dx = int(wheel_delta)
+        if abs(dx) >= 120:
+            amount = (dx // 120) * 5
+        else:
+            # Trackpad pixel deltas: ~1 strength unit per 4px of scroll.
+            amount = int(round(dx / 4.0))
+        if amount == 0:
+            amount = 1 if dx > 0 else -1
+        slider.setValue(
+            max(slider.minimum(), min(slider.maximum(), slider.value() + amount))
+        )
+
     def dodge_burn_brush_strength(self) -> float:
         """0..1: per-stamp delta at the brush center before pressure scaling."""
         return float(self._db_strength_slider.value()) / 100.0

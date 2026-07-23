@@ -36,19 +36,23 @@ def _make_view():
     v._place_brush_cursor = lambda pt: None
     strokes: list = []
     resizes: list = []
+    strengths: list = []
     resumes: list = []
     v.dodgeBurnStroke.connect(lambda pt, p, e: strokes.append((pt.x(), pt.y(), p, e)))
     v.dodgeBurnBrushSizeWheel.connect(lambda d: resizes.append(d))
+    v.dodgeBurnBrushStrengthWheel.connect(lambda d: strengths.append(d))
     v.dodgeBurnResumeAfterResize.connect(lambda: resumes.append(True))
+    v._resizes = resizes
+    v._strengths = strengths
     return v, strokes, resizes, resumes
 
 
-def _wheel(phase: Qt.ScrollPhase, dy: int = 30) -> QWheelEvent:
+def _wheel(phase: Qt.ScrollPhase, dy: int = 30, dx: int = 0) -> QWheelEvent:
     return QWheelEvent(
         QPointF(50, 50),
         QPointF(50, 50),
         QPoint(0, 0),
-        QPoint(0, dy),
+        QPoint(dx, dy),
         Qt.MouseButton.NoButton,
         Qt.KeyboardModifier.NoModifier,
         phase,
@@ -102,6 +106,36 @@ def test_resize_gesture_suspends_and_resumes_stroke() -> None:
     assert strokes[-1][3] is True
 
 
+def test_axis_lock_vertical_is_size_only() -> None:
+    """A mostly-vertical scroll adjusts size and never leaks into flow."""
+    v, _s, resizes, _r = _make_view()
+    v.begin_key_paint()
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollBegin, dy=25, dx=3))
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollUpdate, dy=25, dx=3))
+    assert v._resize_axis == "size"
+    assert len(resizes) >= 1 and len(v._strengths) == 0, "vertical leaked into flow"
+
+
+def test_axis_lock_horizontal_is_flow_only() -> None:
+    """A mostly-horizontal scroll adjusts flow and never leaks into size."""
+    v, _s, resizes, _r = _make_view()
+    v.begin_key_paint()
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollBegin, dy=3, dx=25))
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollUpdate, dy=3, dx=25))
+    assert v._resize_axis == "flow"
+    assert len(v._strengths) >= 1 and len(resizes) == 0, "horizontal leaked into size"
+
+
+def test_axis_lock_holds_for_whole_gesture() -> None:
+    """Once locked to size, a later diagonal wobble must not switch to flow."""
+    v, _s, resizes, _r = _make_view()
+    v.begin_key_paint()
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollBegin, dy=25, dx=0))
+    v.wheelEvent(_wheel(Qt.ScrollPhase.ScrollUpdate, dy=2, dx=30))  # now horizontal-heavy
+    assert v._resize_axis == "size"
+    assert len(v._strengths) == 0, "axis lock broke mid-gesture"
+
+
 def test_momentum_does_not_resize() -> None:
     v, _s, resizes, _r = _make_view()
     v.begin_key_paint()
@@ -133,6 +167,9 @@ def test_key_release_clears_resize_state() -> None:
 
 def main() -> int:
     test_resize_gesture_suspends_and_resumes_stroke()
+    test_axis_lock_vertical_is_size_only()
+    test_axis_lock_horizontal_is_flow_only()
+    test_axis_lock_holds_for_whole_gesture()
     test_momentum_does_not_resize()
     test_no_phase_falls_back_to_plain_resize()
     test_key_release_clears_resize_state()
