@@ -2314,6 +2314,18 @@ class _AdjustExportSignals(QObject):
     progress = pyqtSignal(str, int, str)
 
 
+class _StitchSignals(QObject):
+    """Marshals HDR/panorama/focus-stack worker updates to the GUI thread.
+
+    The merge runs on _get_bg_thread_pool(); Qt widgets are main-thread-only, so
+    the worker must emit these (auto-queued cross-thread) rather than touch the
+    status bar / dialogs / gallery directly.
+    """
+
+    progress = pyqtSignal(str)  # status text
+    finished = pyqtSignal(bool, str, list)  # success, out_path-or-error, warnings
+
+
 class _AdjustExportWorker(QRunnable):
     """Full-res export: baked TIFF/JPEG/WebP/DNG or RAW copy + XMP settings."""
 
@@ -22268,6 +22280,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if self._adjust_panel_active() and self.image_files and len(self.image_files) > 1:
                 self.navigate_to_next_image()
             return
+        # Editor closed while this decode was in flight: don't retain the large
+        # base buffer (and its fast-preview downsample) for a session that is
+        # gone -- it would sit resident until the next edit. Navigate-away is
+        # already handled by the current_file_path guard above; this covers
+        # Adjust being closed. The calibration dialog, the only other reader,
+        # falls back to decoding on demand.
+        if not getattr(self, "_adjust_overlay_visible", False):
+            return
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
         self._adjust_preview_base_rgb_fast = _make_fast_preview_base(base)
@@ -25127,6 +25147,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage("Preparing images for stitching…", 0)
 
+        # All UI from the worker goes through these (queued to the GUI thread);
+        # kept on self so the object outlives the QRunnable.
+        signals = _StitchSignals()
+        signals.progress.connect(self._on_stitch_progress)
+        signals.finished.connect(self._on_stitch_finished)
+        self._stitch_signals = signals
+
         # Populated by the focus-stack branch so the completion handler can
         # surface parallax / alignment advisories (a merge can succeed while
         # still warning that near-object edges may be soft).
@@ -25154,8 +25181,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return False, "Failed to decode edit base for selected photos.", valid_paths
 
             def update_progress(pct, msg):
-                if hasattr(self, "status_bar") and self.status_bar:
-                    self.status_bar.showMessage(f"{msg} ({pct}%)", 0)
+                # Cross-thread: emit to the GUI thread, never touch the widget.
+                signals.progress.emit(f"{msg} ({pct}%)")
 
             if mode == "focus_stack":
                 from focus_stacking import focus_stack
@@ -25210,37 +25237,54 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return True, out_path, []
 
         from PyQt6.QtCore import QRunnable
+
         class StitchTask(QRunnable):
             def __init__(task_self):
                 super().__init__()
-            def run(task_self):
-                success, msg, rejected = worker_fn()
-                if success:
-                    if hasattr(self, "status_bar") and self.status_bar:
-                        self.status_bar.showMessage(f"Successfully created {os.path.basename(msg)}", 4000)
-                    if stack_warnings:
-                        from PyQt6.QtWidgets import QMessageBox
 
-                        QMessageBox.information(
-                            self,
-                            "Focus Stack — Alignment Notes",
-                            os.path.basename(msg)
-                            + " was created, with:\n\n• "
-                            + "\n• ".join(stack_warnings),
-                        )
-                    self._update_gallery_view()
-                    self._open_file(msg)
-                else:
-                    if hasattr(self, "status_bar") and self.status_bar:
-                        self.status_bar.showMessage(f"Stitching Error: {msg}", 6000)
-                    from PyQt6.QtWidgets import QMessageBox
-                    QMessageBox.warning(
-                        self,
-                        "Stitching / Alignment Failure",
-                        f"Stitching failed:\n{msg}\n\nPlease verify that the selected photos overlap sufficiently and have minimal camera movement.",
-                    )
+            def run(task_self):
+                try:
+                    success, msg, _rejected = worker_fn()
+                except Exception as exc:  # never let a worker exception vanish
+                    logging.getLogger(__name__).exception("Stitch worker crashed")
+                    success, msg = False, f"Internal error: {exc}"
+                # Hand off to the GUI thread for all widget work.
+                signals.finished.emit(bool(success), str(msg), list(stack_warnings))
 
         _get_bg_thread_pool().start(StitchTask())
+
+    def _on_stitch_progress(self, text: str) -> None:
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(text, 0)
+
+    def _on_stitch_finished(self, success: bool, msg: str, warnings: list) -> None:
+        """GUI-thread completion handler for the stitch/focus worker."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        if success:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(
+                    f"Successfully created {os.path.basename(msg)}", 4000
+                )
+            if warnings:
+                QMessageBox.information(
+                    self,
+                    "Focus Stack — Alignment Notes",
+                    os.path.basename(msg)
+                    + " was created, with:\n\n• "
+                    + "\n• ".join(warnings),
+                )
+            self._update_gallery_view()
+            self._open_file(msg)
+        else:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(f"Stitching Error: {msg}", 6000)
+            QMessageBox.warning(
+                self,
+                "Stitching / Alignment Failure",
+                f"Stitching failed:\n{msg}\n\nPlease verify that the selected photos "
+                "overlap sufficiently and have minimal camera movement.",
+            )
 
     def _camera_identity_for_file(self, path: str) -> tuple[str, str, int | None]:
         """(make, model, iso) from EXIF, or ("", "", None) if unreadable."""

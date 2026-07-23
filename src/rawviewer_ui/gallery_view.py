@@ -667,6 +667,12 @@ class JustifiedGallery(QWidget):
         self._orientation_flip_paths.clear()
         self._metadata_fetch_attempted.clear()
         self._thumb_fail_counts.clear()
+        # Drop the decoded thumbnail pixmaps too: this count-capped cache (base +
+        # several scaled variants per tile, up to 10000 entries) is scoped to the
+        # folder being browsed. Leaving it populated across a folder change keeps
+        # the previous folder's pixmaps resident -- a multi-hundred-MB to
+        # multi-GB leak the widget/task clears above don't touch.
+        self._thumbnail_cache.clear()
         self.clear_thumbnail_widgets()
 
     def _evict_stale_active_tasks(

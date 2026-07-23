@@ -22,6 +22,7 @@ handheld/parallax cases; see FocusStackResult.alignment_warnings.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -31,6 +32,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 ProgressCb = Optional[Callable[[int, str], None]]
+
+# Every frame is held in RAM simultaneously with several working copies, so an
+# unbounded stack can exhaust memory. Cap it (override via env for power users
+# with the RAM to spare).
+try:
+    _MAX_FRAMES = max(2, int(os.environ.get("RAWVIEWER_FOCUS_STACK_MAX_FRAMES", "30")))
+except ValueError:
+    _MAX_FRAMES = 30
 
 
 @dataclass
@@ -349,6 +358,17 @@ def focus_stack(
     if not images or len(images) < 2:
         return FocusStackResult(False, error_message="Focus stacking needs at least 2 photos.")
 
+    if len(images) > _MAX_FRAMES:
+        return FocusStackResult(
+            False,
+            error_message=(
+                f"Too many frames for focus stacking ({len(images)}; limit {_MAX_FRAMES}). "
+                "Every frame is held in memory at once with several working copies, so a "
+                "larger stack risks exhausting RAM. Select fewer frames or raise "
+                "RAWVIEWER_FOCUS_STACK_MAX_FRAMES."
+            ),
+        )
+
     shapes = {im.shape[:2] for im in images}
     if len(shapes) != 1:
         return FocusStackResult(
@@ -372,34 +392,47 @@ def focus_stack(
 
         if progress_callback:
             progress_callback(50, "Measuring sharpness…")
+
+        # Peak memory management: N frames are all resident, and fusion adds a
+        # float32 copy, a sharpness map and a Laplacian pyramid per frame. Grab
+        # everything still needed from the source frames up front, then drop the
+        # source list before the pyramid is built, and free each large
+        # intermediate the moment it is consumed.
+        ref_dtype = images[0].dtype
+        guide = _to_gray_u8(images[0])
+        crop_masks = None
+        if auto_crop:
+            crop_masks = [np.ones(images[0].shape[:2], dtype=bool)]
+            for im in images[1:]:
+                crop_masks.append(_to_gray_u8(im) > 0)
+
         sharp_maps = [_sharpness_map(_to_gray_u8(im)) for im in images]
         floats = [_as_float32(im) for im in images]
+        images = None  # source frames no longer needed -- release before fusion
 
         if seam_aware:
-            weights = _seam_aware_weights(sharp_maps, _to_gray_u8(images[0]))
+            weights = _seam_aware_weights(sharp_maps, guide)
+            sharp_maps = None  # superseded by the coherent weights
         else:
             weights = sharp_maps
 
         if progress_callback:
             progress_callback(70, "Blending sharpest regions…")
         fused = _fuse_pyramid(floats, weights)
+        floats = None
+        weights = None
+        sharp_maps = None
 
-        if auto_crop:
+        if auto_crop and crop_masks is not None:
             if progress_callback:
                 progress_callback(92, "Cropping alignment border…")
-            # A frame's valid region is where the warp did not pull in reflected
-            # edge pixels; approximate with a full mask for the reference and
-            # non-black luma for warped frames.
-            masks = [np.ones(fused.shape[:2], dtype=bool)]
-            for im in images[1:]:
-                masks.append(_to_gray_u8(im) > 0)
-            fused = _auto_crop_border(fused, masks)
+            fused = _auto_crop_border(fused, crop_masks)
+            crop_masks = None
 
         # Return in the input's bit-depth family.
-        ref = images[0]
-        if ref.dtype == np.uint16:
+        if ref_dtype == np.uint16:
             out = (fused * 65535.0).astype(np.uint16)
-        elif ref.dtype == np.uint8:
+        elif ref_dtype == np.uint8:
             out = (fused * 255.0).astype(np.uint8)
         else:
             out = fused.astype(np.float32)

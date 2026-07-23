@@ -163,6 +163,25 @@ def test_rejects_single_image() -> None:
     assert not res.success
 
 
+def test_rejects_too_many_frames() -> None:
+    """N is capped so a huge stack can't silently exhaust RAM."""
+    from focus_stacking import _MAX_FRAMES
+
+    frames = [np.zeros((32, 32, 3), np.uint8) for _ in range(_MAX_FRAMES + 1)]
+    res = focus_stack(frames)
+    assert not res.success and "many frames" in res.error_message.lower()
+
+
+def test_memory_refactor_still_fuses() -> None:
+    """The peak-memory refactor (release sources before fusion) must not change
+    the result: a split-focus pair still fuses to sharp-everywhere."""
+    base, a, b, w = _split_focus_pair(seed=11)
+    res = focus_stack([a, b], align=False, local_align=False, seam_aware=True, auto_crop=False)
+    assert res.success
+    for half in (slice(0, w // 2), slice(w // 2, None)):
+        assert _sharp(res.image[:, half]) > 0.5 * _sharp(base[:, half])
+
+
 def test_preserves_bit_depth() -> None:
     _base, a, b, _w = _split_focus_pair(seed=3)
     for cast, dt in ((lambda x: x, np.uint8),
@@ -196,6 +215,8 @@ def main() -> int:
     test_seam_aware_weights_are_coherent()
     test_rejects_mismatched_dimensions()
     test_rejects_single_image()
+    test_rejects_too_many_frames()
+    test_memory_refactor_still_fuses()
     test_preserves_bit_depth()
     test_dialog_focus_mode_builds()
     print("PASS t_focus_stacking")
