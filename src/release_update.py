@@ -86,6 +86,9 @@ def fetch_latest_release(*, timeout: float = 8.0) -> Dict[str, str]:
         "name": str(payload.get("name") or tag).strip(),
         "html_url": str(payload.get("html_url") or RELEASE_PAGE_URL).strip(),
         "published_at": str(payload.get("published_at") or "").strip(),
+        # The maintainer-written release notes (markdown). Shown, trimmed, in
+        # the update prompt so users see what changed without opening GitHub.
+        "body": str(payload.get("body") or "").strip(),
     }
 
 
@@ -106,6 +109,9 @@ def mock_update_result(
         "release_url": (release_url or RELEASE_PAGE_URL).strip() or RELEASE_PAGE_URL,
         "release_name": f"RAWviewer {latest} (preview)",
         "published_at": "",
+        "release_notes": summarize_release_notes(
+            os.environ.get("RAWVIEWER_MOCK_UPDATE_NOTES", "")
+        ),
         "offline": False,
         "error": "",
     }
@@ -116,6 +122,37 @@ def mock_update_result(
     result["is_latest"] = cmp >= 0
     result["update_available"] = cmp < 0
     return result
+
+
+def summarize_release_notes(body: str, *, max_lines: int = 8, max_chars: int = 600) -> str:
+    """Distill a GitHub release body (markdown) to a few plain-text bullet lines.
+
+    Keeps meaningful content lines (headings and list items), strips markdown
+    markers, and truncates so the update prompt shows a short "what's new"
+    rather than a wall of text or raw markdown. Returns "" when there is nothing
+    useful to show.
+    """
+    if not body:
+        return ""
+    lines: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Drop noise: horizontal rules, images, HTML comments, PR/compare links.
+        if line.startswith(("---", "***", "<!--", "![", "**Full Changelog")):
+            continue
+        # Strip common markdown leaders (#, -, *, +, >) and inline emphasis.
+        line = line.lstrip("#>*-+ ").replace("**", "").replace("`", "").strip()
+        if not line:
+            continue
+        lines.append(f"• {line}")
+        if len(lines) >= max_lines:
+            break
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "…"
+    return text
 
 
 def check_for_update(
@@ -144,6 +181,7 @@ def check_for_update(
         "release_url": RELEASE_PAGE_URL,
         "release_name": "",
         "published_at": "",
+        "release_notes": "",
         "offline": False,
         "error": "",
     }
@@ -163,6 +201,7 @@ def check_for_update(
     result["release_name"] = release.get("name") or latest
     result["release_url"] = release.get("html_url") or RELEASE_PAGE_URL
     result["published_at"] = release.get("published_at") or ""
+    result["release_notes"] = summarize_release_notes(release.get("body") or "")
     cmp = compare_version_labels(current, latest)
     result["is_latest"] = cmp >= 0
     result["update_available"] = cmp < 0

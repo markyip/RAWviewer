@@ -9914,7 +9914,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         _get_bg_thread_pool().start(_ReleaseUpdateCheckWorker(signals))
 
     def _show_release_update_available_dialog(
-        self, current: str, latest: str, release_url: str
+        self, current: str, latest: str, release_url: str, release_notes: str = ""
     ) -> bool:
         """Return True when the user chose Not Now (or dismissed), False after Open Download Page."""
         from release_update import RELEASE_PAGE_URL
@@ -9926,6 +9926,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             current=current,
             latest=latest,
             release_url=url,
+            release_notes=release_notes,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             QDesktopServices.openUrl(QUrl(dialog.release_url))
@@ -9956,7 +9957,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
 
         release_url = str(result.get("release_url") or "").strip()
-        dismissed = self._show_release_update_available_dialog(current, latest, release_url)
+        release_notes = str(result.get("release_notes") or "").strip()
+        dismissed = self._show_release_update_available_dialog(
+            current, latest, release_url, release_notes
+        )
         if dismissed:
             settings.setValue("update_check/snoozed_version", latest)
             settings.setValue(

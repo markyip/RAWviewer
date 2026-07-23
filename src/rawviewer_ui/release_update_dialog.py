@@ -6,7 +6,15 @@ import sys
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QCursor
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from release_update import APP_VERSION, RELEASE_PAGE_URL
 
@@ -23,6 +31,7 @@ class ReleaseUpdateDialog(QDialog):
         current: str | None = None,
         latest: str | None = None,
         release_url: str | None = None,
+        release_notes: str | None = None,
     ):
         super().__init__(parent)
         self.release_url = (release_url or RELEASE_PAGE_URL).strip() or RELEASE_PAGE_URL
@@ -72,6 +81,53 @@ class ReleaseUpdateDialog(QDialog):
             }
         """)
         main_layout.addWidget(message_label)
+
+        notes = (release_notes or "").strip()
+        if notes:
+            whats_new_label = QLabel("What's new")
+            whats_new_label.setStyleSheet("""
+                QLabel {
+                    color: #D9691E;
+                    font-size: 12px;
+                    font-weight: 600;
+                    font-family: 'Roboto', 'Segoe UI', sans-serif;
+                }
+            """)
+            main_layout.addWidget(whats_new_label)
+
+            # Read-only, scroll-capped so a long release body can't grow the
+            # dialog unbounded; the notes are already trimmed upstream.
+            from PyQt6.QtWidgets import QScrollArea
+
+            notes_label = QLabel(notes)
+            notes_label.setWordWrap(True)
+            notes_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            notes_label.setAlignment(
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+            )
+            notes_label.setStyleSheet("""
+                QLabel {
+                    color: #B7ADA0;
+                    font-size: 12px;
+                    line-height: 1.5;
+                    font-family: 'Roboto', 'Segoe UI', sans-serif;
+                }
+            """)
+            notes_scroll = QScrollArea()
+            notes_scroll.setWidget(notes_label)
+            notes_scroll.setWidgetResizable(True)
+            notes_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            notes_scroll.setMaximumHeight(150)
+            notes_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+            notes_scroll.setStyleSheet("""
+                QScrollArea { background: transparent; border: none; }
+                QScrollArea > QWidget > QWidget { background: transparent; }
+            """)
+            main_layout.addWidget(notes_scroll)
 
         note_label = QLabel(
             f"You are running {current_v}.\n"
