@@ -210,6 +210,13 @@ class HDRPanoramaDialog(QDialog):
         opt_box.addWidget(self.align_cb)
 
         if is_focus:
+            self.parallax_cb = QCheckBox(
+                "Correct parallax (local optical-flow align — slower, for handheld)", self
+            )
+            self.parallax_cb.setChecked(True)
+            self.parallax_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+            opt_box.addWidget(self.parallax_cb)
+
             hint = QLabel(
                 "Frames must be the same scene shot at different focal planes. "
                 "Order does not matter. A tripod gives the best result; heavy "
@@ -274,6 +281,11 @@ class HDRPanoramaDialog(QDialog):
     def should_align(self) -> bool:
         """Returns True if auto-alignment is enabled."""
         return self.align_cb.isChecked()
+
+    def should_correct_parallax(self) -> bool:
+        """Focus stacking only: True if local optical-flow refinement is on."""
+        cb = getattr(self, "parallax_cb", None)
+        return bool(cb.isChecked()) if cb is not None else False
 
     def get_hdr_weights(self) -> Dict[str, float]:
         """Returns dict of highlight, shadow, midtone weight multipliers."""

@@ -126,6 +126,91 @@ def align_focus_stack(
     return aligned, warnings
 
 
+def refine_alignment_flow(
+    images: List[np.ndarray],
+    ref_idx: int = 0,
+    max_shift_frac: float = 0.03,
+    progress_callback: ProgressCb = None,
+) -> Tuple[List[np.ndarray], float]:
+    """Non-rigid (per-pixel) refinement after the global affine align.
+
+    A single affine cannot satisfy parallax -- near objects shift more than far
+    ones between viewpoints, so the global solve leaves depth-dependent residual
+    that makes the sharpness selector composite a shifted foreground edge from
+    two positions (the classic doubled-edge ghost). Dense optical flow warps
+    each frame's geometry onto the reference to absorb that.
+
+    The flow is estimated on *heavily blurred* luma on purpose: focus stacks
+    have regions sharp in one frame and soft in another, and raw flow would be
+    dominated by that focus difference. Parallax is a low-frequency geometric
+    offset, so blurring to low frequencies leaves the shared structure the flow
+    should track and discards the focus mismatch. Vectors are clamped to
+    ``max_shift_frac`` of the frame so textureless/out-of-focus areas cannot
+    inject wild warps.
+
+    Returns (refined_images, parallax_px) where parallax_px is the median flow
+    magnitude across frames -- a cheap "how much parallax is present" signal for
+    the caller's warning.
+    """
+    if len(images) < 2:
+        return images, 0.0
+
+    ref = images[ref_idx]
+    ref_gray = _to_gray_u8(ref)
+    h, w = ref_gray.shape
+    sigma = max(2.0, min(h, w) / 200.0)
+    ref_blur = cv2.GaussianBlur(ref_gray, (0, 0), sigma)
+    max_shift = max_shift_frac * max(h, w)
+
+    # Confidence: only warp where the REFERENCE has real structure to register
+    # against. A focus stack's reference is sharp in some regions and soft in
+    # others; warping a frame's SHARP region against a reference that is SOFT
+    # there resamples good detail into mush (measured: it halved sharpness).
+    # Raising the normalised contrast to a >1 power collapses weakly-structured
+    # (blurred) regions toward zero confidence so their original pixels pass
+    # through cleanly, while genuinely-detailed regions -- where parallax
+    # actually shows -- keep near-full confidence. The 1.5 exponent balances
+    # sharp-detail preservation on tripod stacks (~0.75 of a no-warp merge)
+    # against parallax reduction on handheld ones (~0.5 residual); real stacks
+    # will refine this.
+    ref_struct = cv2.GaussianBlur(np.abs(cv2.Laplacian(ref_blur, cv2.CV_32F)), (0, 0), sigma)
+    thresh = np.percentile(ref_struct, 78) + 1e-6
+    confidence = np.clip(ref_struct / thresh, 0.0, 1.0) ** 1.5
+
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
+    xx, yy = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+
+    refined = list(images)
+    mags: List[float] = []
+    for idx, img in enumerate(images):
+        if idx == ref_idx:
+            continue
+        if progress_callback:
+            progress_callback(40 + int(8 * idx / len(images)), f"Refining alignment {idx + 1}…")
+        mov_blur = cv2.GaussianBlur(_to_gray_u8(img), (0, 0), sigma)
+        flow = dis.calc(ref_blur, mov_blur, None)
+        flow = np.clip(flow, -max_shift, max_shift)
+        # Attenuate by confidence, then smooth so the warp stays continuous.
+        flow[..., 0] = cv2.GaussianBlur(flow[..., 0] * confidence, (0, 0), sigma)
+        flow[..., 1] = cv2.GaussianBlur(flow[..., 1] * confidence, (0, 0), sigma)
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        mags.append(float(np.median(mag[mag > 0.1])) if np.any(mag > 0.1) else 0.0)
+        map_x = xx + flow[..., 0]
+        map_y = yy + flow[..., 1]
+        warped = cv2.remap(
+            img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT
+        )
+        # Only adopt the warped pixels where we trust the registration. remap's
+        # sub-pixel resample softens detail even for tiny residual flow, so in
+        # low-confidence (reference-blurred) regions keep the ORIGINAL pixels
+        # untouched -- that is exactly where the sharp frame's data must survive.
+        conf3 = confidence[..., None] if img.ndim == 3 else confidence
+        blended = warped.astype(np.float32) * conf3 + img.astype(np.float32) * (1.0 - conf3)
+        refined[idx] = blended.astype(img.dtype)
+
+    return refined, (float(np.median(mags)) if mags else 0.0)
+
+
 def _sharpness_map(gray_u8: np.ndarray, blur: int = 5) -> np.ndarray:
     """Local focus measure: |Laplacian|, smoothed so selection is region-wise.
 
@@ -137,6 +222,33 @@ def _sharpness_map(gray_u8: np.ndarray, blur: int = 5) -> np.ndarray:
     sharp = np.abs(lap)
     k = blur | 1  # odd
     return cv2.GaussianBlur(sharp, (k, k), 0)
+
+
+def _seam_aware_weights(
+    sharp_maps: List[np.ndarray],
+    guide_gray_u8: np.ndarray,
+    radius: int = 24,
+    eps: float = 1e-3,
+) -> List[np.ndarray]:
+    """Coherent per-source weights: which frame owns each region, seam-aware.
+
+    Raw smoothed-sharpness weights switch source pixel-by-pixel, which under
+    residual parallax picks a shifted edge from two frames at once. Instead take
+    the per-pixel argmax to decide the sharpest source, then regularise each
+    source's mask with a guided filter keyed on the reference luma: region
+    boundaries snap to real image edges and small speckle is absorbed, so a
+    contested (parallax) area is handed wholesale to one frame rather than
+    interleaved. This is the same intent as a graph-cut seam, done with the
+    edge-aware guided filter (robust and always available here).
+    """
+    stack = np.stack(sharp_maps, axis=0)  # (N, H, W)
+    labels = np.argmax(stack, axis=0)
+    weights: List[np.ndarray] = []
+    for i in range(len(sharp_maps)):
+        mask = (labels == i).astype(np.float32)
+        smooth = cv2.ximgproc.guidedFilter(guide_gray_u8, mask, radius, eps)
+        weights.append(np.clip(smooth, 0.0, 1.0))
+    return weights
 
 
 def _fuse_pyramid(
@@ -209,10 +321,17 @@ def _auto_crop_border(img: np.ndarray, aligned_masks: List[np.ndarray]) -> np.nd
     return img[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]
 
 
+# Above this median residual flow (in pixels), the global affine left parallax
+# the sharpness selector will ghost on; the caller surfaces it as a warning.
+_PARALLAX_WARN_PX = 2.0
+
+
 def focus_stack(
     images: List[np.ndarray],
     paths: Optional[List[str]] = None,
     align: bool = True,
+    local_align: bool = True,
+    seam_aware: bool = True,
     auto_crop: bool = True,
     progress_callback: ProgressCb = None,
 ) -> FocusStackResult:
@@ -221,6 +340,11 @@ def focus_stack(
     ``images`` are same-scene frames at different focal planes (any of uint8 /
     uint16 / float32; the output matches the input bit depth family). Order does
     not matter -- selection is per-region by sharpness.
+
+    ``local_align`` (v2) adds dense optical-flow refinement after the global
+    affine to absorb parallax the affine cannot. ``seam_aware`` (v2) selects
+    each region's owning frame coherently instead of per-pixel, so contested
+    parallax areas are not composited from two frames at once.
     """
     if not images or len(images) < 2:
         return FocusStackResult(False, error_message="Focus stacking needs at least 2 photos.")
@@ -237,10 +361,24 @@ def focus_stack(
         if align:
             images, warnings = align_focus_stack(images, progress_callback)
 
+        if local_align:
+            images, parallax_px = refine_alignment_flow(images, progress_callback=progress_callback)
+            if parallax_px > _PARALLAX_WARN_PX:
+                warnings.append(
+                    f"Significant parallax detected (~{parallax_px:.1f}px between frames). "
+                    "Edges of near objects may still show softness; a tripod or focus rail "
+                    "avoids this."
+                )
+
         if progress_callback:
             progress_callback(50, "Measuring sharpness…")
-        weights = [_sharpness_map(_to_gray_u8(im)) for im in images]
+        sharp_maps = [_sharpness_map(_to_gray_u8(im)) for im in images]
         floats = [_as_float32(im) for im in images]
+
+        if seam_aware:
+            weights = _seam_aware_weights(sharp_maps, _to_gray_u8(images[0]))
+        else:
+            weights = sharp_maps
 
         if progress_callback:
             progress_callback(70, "Blending sharpest regions…")

@@ -25077,15 +25077,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         auto_crop = dlg.should_auto_crop()
         weights = dlg.get_hdr_weights()
         do_align = dlg.should_align() if hasattr(dlg, "should_align") else True
+        fix_parallax = (
+            dlg.should_correct_parallax() if hasattr(dlg, "should_correct_parallax") else True
+        )
 
-        self._start_hdr_panorama_worker(mode, active_paths, auto_crop, weights, do_align)
+        self._start_hdr_panorama_worker(
+            mode, active_paths, auto_crop, weights, do_align, fix_parallax
+        )
 
     def _start_hdr_panorama_worker(
-        self, mode: str, paths: List[str], auto_crop: bool, weights: dict, do_align: bool = True
+        self,
+        mode: str,
+        paths: List[str],
+        auto_crop: bool,
+        weights: dict,
+        do_align: bool = True,
+        fix_parallax: bool = True,
     ) -> None:
         """Run stitching in a background thread."""
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage("Preparing images for stitching…", 0)
+
+        # Populated by the focus-stack branch so the completion handler can
+        # surface parallax / alignment advisories (a merge can succeed while
+        # still warning that near-object edges may be soft).
+        stack_warnings: List[str] = []
 
         def worker_fn():
             from unified_image_processor import UnifiedImageProcessor
@@ -25119,9 +25135,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     images,
                     paths=valid_paths,
                     align=do_align,
+                    local_align=fix_parallax,
                     auto_crop=auto_crop,
                     progress_callback=update_progress,
                 )
+                if getattr(res, "alignment_warnings", None):
+                    stack_warnings.extend(res.alignment_warnings)
             elif mode == "hdr":
                 aligned, _ = align_hdr_images(images)
                 res_img = merge_hdr_exposure_fusion(
@@ -25170,6 +25189,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if success:
                     if hasattr(self, "status_bar") and self.status_bar:
                         self.status_bar.showMessage(f"Successfully created {os.path.basename(msg)}", 4000)
+                    if stack_warnings:
+                        from PyQt6.QtWidgets import QMessageBox
+
+                        QMessageBox.information(
+                            self,
+                            "Focus Stack — Alignment Notes",
+                            os.path.basename(msg)
+                            + " was created, with:\n\n• "
+                            + "\n• ".join(stack_warnings),
+                        )
                     self._update_gallery_view()
                     self._open_file(msg)
                 else:
