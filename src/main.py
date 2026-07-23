@@ -8993,6 +8993,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
+                    self.gpu_view.dodgeBurnResumeAfterResize.connect(
+                        self._on_dodge_burn_resume_after_resize
+                    )
                     self.gpu_view.brushToolLeftImage.connect(
                         self._on_brush_tool_left_image
                     )
@@ -22589,6 +22592,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv.set_dodge_burn_brush_radius(panel.dodge_burn_brush_radius())
         if hasattr(gv, "set_dodge_burn_brush_flow"):
             gv.set_dodge_burn_brush_flow(panel.dodge_burn_brush_strength())
+
+    def _on_dodge_burn_resume_after_resize(self) -> None:
+        """Fingers lifted after a mid-stroke two-finger brush resize.
+
+        Clear the per-stroke stamp anchor so the first resumed stamp is treated
+        as a fresh point rather than distance-scaled against the pre-pause
+        position (the pointer is stationary during a two-finger scroll, so this
+        just guards against any drift). The stroke itself stays open -- it is
+        still one undo unit, ended only when the hotkey is released.
+        """
+        self._dodge_burn_last_stamp_pt = None
 
     def _on_dodge_burn_brush_size_wheel(self, wheel_delta: int) -> None:
         """Trackpad/wheel while Dodge/Burn is armed → Brush Size, not navigate."""

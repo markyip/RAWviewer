@@ -482,6 +482,10 @@ class GpuImageView(QGraphicsView):
     # Vertical wheel/trackpad delta while D&B is armed — host nudges Brush Size
     # instead of navigating images.
     dodgeBurnBrushSizeWheel = pyqtSignal(int)
+    # Fingers lifted after a mid-stroke two-finger resize: host resets its
+    # per-stroke stamp anchor so the resumed stamp is not flow-scaled against
+    # the pre-pause position.
+    dodgeBurnResumeAfterResize = pyqtSignal()
     # Crop overlay: insets changed / drag finished (CropLeft/Right/Top/Bottom).
     cropInsetsChanged = pyqtSignal(float, float, float, float)
     cropEditingFinished = pyqtSignal()
@@ -520,6 +524,11 @@ class GpuImageView(QGraphicsView):
         # Hold-to-paint: True while a brush hotkey is physically held (paint
         # gate, decoupled from the persistent _dodge_burn_mode context).
         self._db_key_held = False
+        # True between a two-finger-scroll ScrollBegin and ScrollEnd while a
+        # hold-to-paint stroke is live: stamping is suspended so the user can
+        # resize the brush mid-stroke without painting, and the stroke stays
+        # open (one undo unit) until the fingers lift and painting resumes.
+        self._brush_resizing = False
         self._crop_mode = False
         self._export_drag_enabled = True
         self._drag_start_pos = None
@@ -1742,6 +1751,7 @@ class GpuImageView(QGraphicsView):
         the focus-loss safety net relies on.
         """
         self._db_key_held = False
+        self._brush_resizing = False
         if getattr(self, "_dodge_burn_painting", False):
             self._dodge_burn_painting = False
             from PyQt6.QtGui import QCursor
@@ -2084,6 +2094,12 @@ class GpuImageView(QGraphicsView):
                 return
             pt = self._clamped_scene_point(view_pos)
             self._place_brush_cursor(pt)
+            # Mid-stroke resize gesture in progress: keep the cursor tracking but
+            # stamp nothing, and leave the stroke open (no is_stroke_end) so the
+            # whole paint+resize+paint sequence remains a single undo unit.
+            if getattr(self, "_brush_resizing", False):
+                event.accept()
+                return
             if button_painting:
                 self.dodgeBurnStroke.emit(pt, self._mouse_stroke_pressure(event), False)
                 event.accept()
@@ -2281,6 +2297,34 @@ class GpuImageView(QGraphicsView):
         event.accept()
 
     def wheelEvent(self, event) -> None:
+        # Mid-stroke resize gesture (hold-to-paint only): a macOS trackpad
+        # brackets a two-finger scroll with ScrollBegin/ScrollEnd, so we can
+        # suspend stamping for the duration, resize on the updates, and resume
+        # the same stroke when the fingers lift. This is handled BEFORE the
+        # delta==0 guard below because ScrollEnd on macOS carries zero delta --
+        # dropping it there would strand the brush in resize-suspend forever
+        # (fingers lifted but painting never resumes). Platforms/devices without
+        # phase report NoScrollPhase and fall through to plain per-tick resize.
+        if (
+            getattr(self, "_dodge_burn_mode", False)
+            and getattr(self, "_db_key_held", False)
+            and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        ):
+            phase = event.phase()
+            if phase == Qt.ScrollPhase.ScrollBegin:
+                self._brush_resizing = True
+            elif phase == Qt.ScrollPhase.ScrollEnd:
+                # Fingers lifted -- resume painting and reset the stamp anchor.
+                self._brush_resizing = False
+                self.dodgeBurnResumeAfterResize.emit()
+                event.accept()
+                return
+            elif phase == Qt.ScrollPhase.ScrollMomentum:
+                # Inertia after the fingers lifted: ignore so the brush does not
+                # keep growing once the gesture is physically over.
+                event.accept()
+                return
+
         delta = event.angleDelta().y()
         if delta == 0:
             delta = event.pixelDelta().y()
