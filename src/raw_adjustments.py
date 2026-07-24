@@ -875,18 +875,11 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         adj["Temperature"] = as_shot
     if not (xmp_path and os.path.isfile(xmp_path)):
         try:
-            from color_calibration import get_camera_profile
+            from color_calibration import camera_identity_from_exif, get_camera_profile
             from exif_extractor import ExifExtractor
-            exif = ExifExtractor().extract_exif_data(image_path)
-            make = str((exif or {}).get("Make", "") or "").strip()
-            model = str((exif or {}).get("Model", "") or "").strip()
-            iso_val = None
-            try:
-                raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
-                if raw_iso:
-                    iso_val = int(raw_iso)
-            except Exception:
-                pass
+            make, model, iso_val = camera_identity_from_exif(
+                ExifExtractor().extract_exif_data(image_path)
+            )
             if make or model:
                 prof = get_camera_profile(make, model, iso=iso_val)
                 if prof:

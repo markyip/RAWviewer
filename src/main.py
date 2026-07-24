@@ -25144,6 +25144,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         fix_parallax: bool = True,
     ) -> None:
         """Run stitching in a background thread."""
+        # One merge at a time: a second launch would overwrite _stitch_signals
+        # and both workers' completions would fire into the UI (double
+        # _open_file / dialogs). Cleared in _on_stitch_finished.
+        if getattr(self, "_stitch_in_progress", False):
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(
+                    "A merge is already running — wait for it to finish.", 4000
+                )
+            return
+        self._stitch_in_progress = True
         if hasattr(self, "status_bar") and self.status_bar:
             self.status_bar.showMessage("Preparing images for stitching…", 0)
 
@@ -25261,6 +25271,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """GUI-thread completion handler for the stitch/focus worker."""
         from PyQt6.QtWidgets import QMessageBox
 
+        self._stitch_in_progress = False
+
         if success:
             if hasattr(self, "status_bar") and self.status_bar:
                 self.status_bar.showMessage(
@@ -25290,20 +25302,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """(make, model, iso) from EXIF, or ("", "", None) if unreadable."""
         try:
             from exif_extractor import ExifExtractor
+            from color_calibration import camera_identity_from_exif
 
-            exif = ExifExtractor().extract_exif_data(path)
+            return camera_identity_from_exif(ExifExtractor().extract_exif_data(path))
         except Exception:
             return ("", "", None)
-        make = str((exif or {}).get("Make", "") or "").strip()
-        model = str((exif or {}).get("Model", "") or "").strip()
-        iso_val = None
-        try:
-            raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
-            if raw_iso:
-                iso_val = int(raw_iso)
-        except Exception:
-            pass
-        return (make, model, iso_val)
 
     def _refresh_camera_profile_banner(self, panel: Any, path: str) -> None:
         """Show the panel banner when a saved profile is auto-applied to this file.
@@ -25354,28 +25357,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _on_calibrate_camera_requested(self) -> None:
         """Launch interactive camera color calibration dialog for ColorChecker targets."""
-        target_path = getattr(self, "file_path", None)
+        # current_file_path is the viewer's attribute; self.file_path only
+        # exists on worker classes, so the old getattr always returned None and
+        # this menu entry could never open.
+        target_path = getattr(self, "current_file_path", None)
         if not target_path or not os.path.isfile(target_path):
             if hasattr(self, "status_bar") and self.status_bar:
                 self.status_bar.showMessage("Please open an image containing a ColorChecker target first.", 4000)
             return
 
         try:
-            from exif_extractor import ExifExtractor
             from unified_image_processor import UnifiedImageProcessor
             from rawviewer_ui.color_calibration_dialog import ColorCalibrationDialog
             from PyQt6.QtWidgets import QDialog
 
-            exif = ExifExtractor().extract_exif_data(target_path)
-            make = str((exif or {}).get("Make", "") or "").strip()
-            model = str((exif or {}).get("Model", "") or "").strip()
-            iso_val = None
-            try:
-                raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
-                if raw_iso:
-                    iso_val = int(raw_iso)
-            except Exception:
-                pass
+            make, model, iso_val = self._camera_identity_for_file(target_path)
 
             img = getattr(self, "_adjust_preview_base_rgb", None)
             if img is None:

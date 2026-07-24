@@ -33,6 +33,20 @@ def get_camera_profile_path() -> str:
     return os.path.join(app_dir, "camera_profiles.json")
 
 
+def camera_identity_from_exif(exif: Optional[Dict[str, Any]]) -> Tuple[str, str, Optional[int]]:
+    """(make, model, iso) from an EXIF dict — the one place this parsing lives."""
+    make = str((exif or {}).get("Make", "") or "").strip()
+    model = str((exif or {}).get("Model", "") or "").strip()
+    iso_val: Optional[int] = None
+    try:
+        raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
+        if raw_iso:
+            iso_val = int(raw_iso)
+    except Exception:
+        pass
+    return make, model, iso_val
+
+
 def normalize_camera_key(make: str, model: str, iso: Optional[int] = None) -> str:
     """Generate normalized lookup key from camera Make, Model, and optional ISO level."""
     make_clean = (make or "").strip().lower()
@@ -373,7 +387,6 @@ def calibrate_camera_curves_and_hsl(
 
     g_val = max(1e-3, float(samp_wb[1]))
     r_ratio = float(samp_wb[0]) / g_val
-    b_ratio = float(samp_wb[2]) / g_val
 
     # Calculate WB Temperature shift (in Kelvin) and Tint shift
     temp_shift = round((1.0 - r_ratio) * 2000.0, 1)
