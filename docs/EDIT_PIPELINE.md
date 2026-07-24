@@ -922,6 +922,10 @@ conversation history or re-run the benchmark snippet against
 
 ## Roadmap investigations (2026-07-04)
 
+> Newer feasibility research (focus stacking, mask editing / local
+> adjustments, object-detection masking, content-aware AI removal, HE-NEF
+> constraint) lives in [FEATURE_FEASIBILITY.md](FEATURE_FEASIBILITY.md).
+
 Three feasibility investigations, requested as research only (no code changes
 in this pass). Each follows Finding → Feasibility → Suggestion.
 
