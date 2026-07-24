@@ -207,6 +207,9 @@ class FilmStripBar(QFrame):
         self._bookmarked_norm: Set[str] = set()
         # Measured slot widths from decoded/scaled thumbs (survives layout rebuilds).
         self._measured_widths: Dict[str, int] = {}
+        # Set when files/adjustments changed so showEvent forces a cache
+        # refresh; otherwise a re-show reuses the cached cell pixmaps.
+        self._thumbnails_dirty = True
 
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._scroll = QScrollArea(self)
@@ -250,7 +253,11 @@ class FilmStripBar(QFrame):
     def showEvent(self, event):
         super().showEvent(event)
         self._periodic_refresh_timer.start()
-        QTimer.singleShot(0, lambda: self.refresh_visible_thumbnails(refresh_cache=True))
+        # Only force a cache re-read when files/adjustments changed while
+        # hidden; an unchanged re-show keeps the valid cached pixmaps.
+        refresh_cache = self._thumbnails_dirty
+        self._thumbnails_dirty = False
+        QTimer.singleShot(0, lambda: self.refresh_visible_thumbnails(refresh_cache=refresh_cache))
 
     def hideEvent(self, event):
         self._periodic_refresh_timer.stop()
@@ -281,6 +288,8 @@ class FilmStripBar(QFrame):
         self._active_paths.clear()
         self._thumb_gen.clear()
         self._measured_widths.clear()
+        self._metadata_cache.clear()
+        self._thumbnails_dirty = True
         self._rebuild_path_index()
         if bulk_metadata:
             self._metadata_cache.update(bulk_metadata)
@@ -363,6 +372,7 @@ class FilmStripBar(QFrame):
         if not file_path:
             return
         self._measured_widths.pop(_path_key(file_path), None)
+        self._thumbnails_dirty = True
         idx = self._index_for_path(file_path)
         if idx >= 0:
             cell = self._cells.get(idx)
@@ -466,6 +476,7 @@ class FilmStripBar(QFrame):
         """Update slot geometry and thumbnail after single-view rotation."""
         if not file_path:
             return
+        self._thumbnails_dirty = True
         self.refresh_cell_for_path(file_path)
 
     def _index_for_path(self, file_path: str) -> int:

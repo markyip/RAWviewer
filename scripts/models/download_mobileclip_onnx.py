@@ -9,6 +9,7 @@ Verbose details go to [INFO] log lines only.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import time
@@ -17,7 +18,10 @@ from pathlib import Path
 
 REPO_ID = "plhery/mobileclip2-onnx"
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "mobileclip_onnx"
-DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
+# Real SCUNet (scunet_color_real_psnr, official KAIR weights exported to ONNX),
+# stored in the repo via Git LFS. Pinned SHA-256 must match the LFS object.
+DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
+DENOISE_MODEL_SHA256 = "d1dd4cf53e589cbc6d76101415be8d709243233f1f4c4ba7e67ea33c65bbb1f5"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 
@@ -69,6 +73,14 @@ def _download_with_retry(label: str, download_fn) -> int:
     return 1
 
 
+def _sha256_of_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _download_url_with_progress(
     url: str,
     dest: Path,
@@ -78,23 +90,32 @@ def _download_url_with_progress(
     emit,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
     req = urllib.request.Request(url, headers={"User-Agent": "RAWviewer-Setup/1.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        done = 0
-        chunk_size = 1024 * 256
-        with open(dest, "wb") as out:
-            while True:
-                chunk = resp.read(chunk_size)
-                if not chunk:
-                    break
-                out.write(chunk)
-                done += len(chunk)
-                if total > 0:
-                    frac = min(1.0, done / total)
-                    emit(stage_start + int(frac * (stage_end - stage_start)))
-                else:
-                    emit(stage_end)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            done = 0
+            chunk_size = 1024 * 256
+            with open(tmp, "wb") as out:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    done += len(chunk)
+                    if total > 0:
+                        frac = min(1.0, done / total)
+                        emit(stage_start + int(frac * (stage_end - stage_start)))
+                    else:
+                        emit(stage_end)
+        os.replace(tmp, dest)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
     emit(stage_end)
 
 
@@ -167,7 +188,7 @@ def main() -> int:
     legacy_denoise_model_path = MODELS_DIR.parent / "restormer.onnx"
     if not denoise_model_path.exists() and not legacy_denoise_model_path.exists():
         def _fetch_denoise_model():
-            print("[INFO] Fetching AI denoise model (SCUNet, fp16 ONNX)", flush=True)
+            print("[INFO] Fetching AI denoise model (SCUNet ONNX)", flush=True)
             _download_url_with_progress(
                 DENOISE_MODEL_URL,
                 denoise_model_path,
@@ -175,6 +196,9 @@ def main() -> int:
                 stage_end=DENOISE_PCT_END,
                 emit=emit_installer_progress,
             )
+            if _sha256_of_file(denoise_model_path).lower() != DENOISE_MODEL_SHA256.lower():
+                denoise_model_path.unlink(missing_ok=True)
+                raise RuntimeError("denoise model failed SHA-256 verification")
 
         rc = _download_with_retry("denoise model", _fetch_denoise_model)
         if rc != 0:

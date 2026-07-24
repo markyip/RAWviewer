@@ -170,13 +170,18 @@ class UnifiedImageProcessor:
         # a newer decode of the same path bumps the token so a late write
         # cannot poison the cache after cancel/navigation.
         self._async_cache_lock = _threading.Lock()
-        self._async_cache_gen: dict = {}
+        # Bounded LRU (insertion-ordered): a long session visiting tens of
+        # thousands of files must not grow this token map without limit.
+        self._async_cache_gen: OrderedDict = OrderedDict()
 
     def _bump_async_cache_gen(self, file_path: str) -> int:
         key = os.path.normcase(os.path.abspath(file_path or ""))
         with self._async_cache_lock:
             gen = int(self._async_cache_gen.get(key, 0)) + 1
             self._async_cache_gen[key] = gen
+            self._async_cache_gen.move_to_end(key)
+            while len(self._async_cache_gen) > 4096:
+                self._async_cache_gen.popitem(last=False)
             return gen
 
     def _async_cache_gen_current(self, file_path: str) -> int:
@@ -470,15 +475,19 @@ class UnifiedImageProcessor:
             with _EDIT_BASE_INFLIGHT_LOCK:
                 slot = _EDIT_BASE_INFLIGHT.get(dedup_key)
                 if slot is None:
-                    slot = {"event": _threading.Event(), "result": None}
+                    slot = {"event": _threading.Event(), "result": None, "done": False}
                     _EDIT_BASE_INFLIGHT[dedup_key] = slot
                     mine = True
             if mine:
                 break
             slot["event"].wait(timeout=60.0)
+            if not slot["done"]:
+                # Owner still running past the wait timeout: keep waiting on
+                # the same slot instead of becoming a duplicate second owner.
+                continue
             if slot["result"] is not None:
                 return slot["result"]
-            # Owner failed or timed out: loop and try to become the owner.
+            # Owner failed: loop and try to become the owner.
             with _EDIT_BASE_INFLIGHT_LOCK:
                 if _EDIT_BASE_INFLIGHT.get(dedup_key) is slot:
                     _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
@@ -501,6 +510,7 @@ class UnifiedImageProcessor:
         finally:
             with _EDIT_BASE_INFLIGHT_LOCK:
                 _EDIT_BASE_INFLIGHT.pop(dedup_key, None)
+            slot["done"] = True
             slot["event"].set()
 
     def _decode_raw_edit_base_impl(

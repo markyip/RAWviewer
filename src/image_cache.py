@@ -14,7 +14,6 @@ import time
 import threading
 import sqlite3
 import hashlib
-import pickle
 import shutil
 import numpy as np
 from collections import OrderedDict
@@ -33,7 +32,13 @@ def _encode_exif_blob(data: Dict[str, Any] | None) -> bytes:
 
 
 def _decode_exif_blob(blob) -> Dict[str, Any]:
-    """Deserialize EXIF blob: prefer JSON, fall back to legacy pickle rows."""
+    """Deserialize EXIF blob as JSON.
+
+    Legacy pickle rows are intentionally NOT decoded: unpickling data from an
+    on-disk cache file would be arbitrary code execution for anyone with
+    write access to the cache directory. Non-JSON rows are treated as a cache
+    miss (empty dict); the caller re-extracts and rewrites the row as JSON.
+    """
     if not blob:
         return {}
     try:
@@ -46,11 +51,7 @@ def _decode_exif_blob(blob) -> Dict[str, Any]:
             return out if isinstance(out, dict) else {}
     except Exception:
         pass
-    try:
-        out = pickle.loads(blob)
-        return out if isinstance(out, dict) else {}
-    except Exception:
-        return {}
+    return {}
 
 
 def _safe_path_under_root(path: str | None, root: str | None) -> Optional[str]:
@@ -698,7 +699,7 @@ class PersistentEXIFCache:
                     'original_width': result_width if result_width else exif_data.get('original_width'),
                     'original_height': result_height if result_height else exif_data.get('original_height'),
                     'raw_exif_sensor_meta_ver': int(sensor_meta_ver),
-                    # rating is stored inside the pickled exif_data blob (see
+                    # rating is stored inside the exif_data blob (see
                     # _prepare_put_row/rate_current_image), not its own column --
                     # promote it to the top level so callers doing exif.get('rating')
                     # (the same shape put_exif() was called with) see it. Without
@@ -939,7 +940,7 @@ class PersistentEXIFCache:
                         "original_height": result_height,
                         "raw_exif_sensor_meta_ver": sensor_meta_ver,
                         # See get()'s 'rating' comment -- only recoverable when the
-                        # blob was actually unpickled (not the fast_mode/has_fast_data
+                        # blob was actually decoded (not the fast_mode/has_fast_data
                         # shortcut above, which skips it for bulk-scan speed).
                         "rating": exif_data.get("rating", 0) if exif_data else 0,
                     }
@@ -1065,7 +1066,7 @@ class PersistentEXIFCache:
                     if ct_col and str(ct_col).strip():
                         out[nk] = str(ct_col)
             if not out:
-                # Rare: capture_time only inside pickled blob
+                # Rare: capture_time only inside the exif_data blob
                 for pattern in patterns:
                     with self.lock:
                         rows = conn.execute(

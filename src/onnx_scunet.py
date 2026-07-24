@@ -7,8 +7,30 @@ from typing import Optional
 
 import numpy as np
 
-DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/scunet.onnx"
+# Primary: real SCUNet (scunet_color_real_psnr, official KAIR weights exported
+# to ONNX, opset 18, fixed 512x512 input) stored in the repo via Git LFS.
+DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
+DENOISE_MODEL_SHA256 = "d1dd4cf53e589cbc6d76101415be8d709243233f1f4c4ba7e67ea33c65bbb1f5"
+# Legacy fallback: Restormer weights from the old release asset (what shipped
+# as "scunet.onnx" before the real SCUNet export existed).
 LEGACY_DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
+LEGACY_DENOISE_MODEL_SHA256 = "fa43b07d631d61f084fb95e5e4942e188a4a0b51e905b651de2f4187f54b4f09"
+# (url, sha256) pairs tried in order; each download is verified against its
+# own pinned hash. Update the hash when the corresponding model changes.
+_DENOISE_MODEL_CANDIDATES = (
+    (DENOISE_MODEL_URL, DENOISE_MODEL_SHA256),
+    (LEGACY_DENOISE_MODEL_URL, LEGACY_DENOISE_MODEL_SHA256),
+)
+
+
+def _sha256_of_file(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def scunet_model_path() -> str:
@@ -29,23 +51,39 @@ def scunet_model_path() -> str:
 
 def ensure_scunet_model_downloaded() -> bool:
     """Best-effort fetch of the SCUNet AI denoise model if it's missing."""
+    logger = logging.getLogger(__name__)
     model_path = scunet_model_path()
     if os.path.exists(model_path):
         return True
+    tmp_path = model_path + ".part"
     try:
         from ssl_certs import urlretrieve
 
-        # Try scunet.onnx URL first, fallback to restormer.onnx URL if needed
-        try:
-            urlretrieve(DENOISE_MODEL_URL, model_path, timeout=180)
-        except Exception:
-            urlretrieve(LEGACY_DENOISE_MODEL_URL, model_path, timeout=180)
-        return os.path.exists(model_path)
+        # Try the real SCUNet (Git LFS) first, then the legacy Restormer asset.
+        # Download to a temp file and verify integrity before moving into place,
+        # so a failed/tampered download never leaves a loadable corrupt model.
+        for url, sha256 in _DENOISE_MODEL_CANDIDATES:
+            try:
+                urlretrieve(url, tmp_path, timeout=180)
+                if _sha256_of_file(tmp_path).lower() != sha256.lower():
+                    logger.warning("[DENOISE] Model download from %s failed SHA-256 verification", url)
+                    continue
+                os.replace(tmp_path, model_path)
+                return True
+            except Exception:
+                logger.warning("[DENOISE] Failed to download denoise model from %s", url, exc_info=True)
+        return False
     except Exception:
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "[DENOISE] Failed to download SCUNet AI denoise model from %s", DENOISE_MODEL_URL, exc_info=True
         )
         return False
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
 
 
 class SCUNetONNX:
@@ -58,9 +96,11 @@ class SCUNetONNX:
     def _init_session(self):
         import onnxruntime as ort
 
+        # NOTE: CoreMLExecutionProvider intentionally omitted — the SCUNet
+        # attention graph partitions into 200+ CoreML segments, making the
+        # first-tile compile hang for minutes and run slower than pure CPU.
         providers = [
             "DmlExecutionProvider",
-            "CoreMLExecutionProvider",
             "CUDAExecutionProvider",
             "CPUExecutionProvider",
         ]

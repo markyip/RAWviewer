@@ -86,6 +86,22 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+# QThreads that were asked to stop but didn't finish in time. We never call
+# QThread.terminate() (killing a thread inside rawpy/LibRaw native code can
+# corrupt the heap or deadlock); instead the thread is left to finish and kept
+# referenced here so its wrapper is never destroyed while still running.
+_LINGERING_QTHREADS = []
+
+
+def _park_lingering_thread(thread) -> None:
+    """Keep a still-running QThread referenced until it finishes."""
+    try:
+        _LINGERING_QTHREADS.append(thread)
+        thread.finished.connect(lambda t=thread: _LINGERING_QTHREADS.remove(t))
+    except Exception:
+        pass
+
+
 def _branded_icon_resource_path() -> str | None:
     """Bundled app icon for window chrome (platform format preferred)."""
     if platform.system() == "Windows":
@@ -14965,162 +14981,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._gallery_load_tracking[file_path]['loaded'] = True
                 self._gallery_load_tracking[file_path]['displayed'] = True
     
-    def _get_gallery_aspect_ratio(self, file_path):
-        """
-        Get aspect ratio for a file without loading the full image.
-        Optimized to use cache, then EXIF tags, then RAW metadata.
-        """
-        import os
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # 1. Check in-memory cache
-        if file_path in self.gallery_aspect_cache:
-            return self.gallery_aspect_cache[file_path]
-        
-        # 2. Try EXIF cache (fast)
-        try:
-            exif_data = self.image_cache.get_exif(file_path)
-            if exif_data:
-                w = exif_data.get('original_width')
-                h = exif_data.get('original_height')
-                orientation = exif_data.get('orientation', 1)
-                
-                if w and h and h > 0:
-                    # Respect orientation (5,6,7,8 are rotated formats)
-                    if orientation in (5, 6, 7, 8):
-                        w, h = h, w
-                    aspect = w / h
-                    self.gallery_aspect_cache[file_path] = aspect
-                    return aspect
-        except Exception:
-            pass
-            
-        # 3. Extract dimensions and orientation directly from file
-        ext = os.path.splitext(file_path)[1].lower()
-        raw_extensions = {'.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.rw2', '.rwl', '.srw', 
-                        '.pef', '.x3f', '.3fr', '.fff', '.iiq', '.cap', '.erf', '.mef', '.mos', '.nrw', '.srf'}
-        is_raw = ext in raw_extensions
-        
-        # A. Try EXIF (pyexiv2 preferred, else exifread) for JPEG/TIFF and some RAW formats
-        exif_likely_exts = {'.jpg', '.jpeg', '.tif', '.tiff', '.arw', '.cr2', '.nef', '.raf', '.orf', '.dng', '.cr3', '.heic', '.heif'}
-        if ext in exif_likely_exts:
-            try:
-                tags = process_file_from_path(
-                    file_path, details=False, stop_tag="EXIF ExifImageWidth"
-                )
-
-                # Search for width and height in various tags
-                w = h = None
-                for w_tag in ['EXIF ExifImageWidth', 'Image ImageWidth']:
-                    if w_tag in tags:
-                        try:
-                            w = int(str(tags[w_tag]))
-                            break
-                        except Exception:
-                            pass
-
-                for h_tag in ['EXIF ExifImageLength', 'Image ImageLength']:
-                    if h_tag in tags:
-                        try:
-                            h = int(str(tags[h_tag]))
-                            break
-                        except Exception:
-                            pass
-
-                # Handle Orientation
-                orientation = 1
-                if 'Image Orientation' in tags:
-                    try:
-                        val = tags['Image Orientation'].values[0]
-                        # Handle both integer and string orientation values
-                        if isinstance(val, int):
-                            orientation = val
-                        else:
-                            # Map common string orientations to numbers if necessary
-                            # Most exifread results for 'Orientation' are already integers in values[0]
-                            orientation = int(str(val))
-                    except Exception:
-                        pass
-
-                if w and h and h > 0:
-                    real_w, real_h = (h, w) if orientation in (5, 6, 7, 8) else (w, h)
-                    aspect = real_w / real_h
-                    self.gallery_aspect_cache[file_path] = aspect
-
-                    # Update cache with un-swapped dimensions but correct orientation
-                    try:
-                        cached_exif = self.image_cache.get_exif(file_path) or {}
-                        cached_exif['original_width'] = w
-                        cached_exif['original_height'] = h
-                        cached_exif['orientation'] = orientation
-                        self.image_cache.put_exif(file_path, cached_exif)
-                    except Exception:
-                        pass
-                    return aspect
-            except Exception:
-                pass
-
-        # B. Try rawpy for RAW specific metadata (more reliable for some cameras)
-        if is_raw:
-            try:
-                import rawpy
-                with rawpy.imread(file_path) as raw:
-                    # rawpy dimensions are usually the sensor dimensions (un-rotated)
-                    w, h = raw.sizes.width, raw.sizes.height
-                    
-                    # raw.sizes.flip contains rotation info (usually 0, 3, 5, or 6)
-                    # 3 = 180, 5 = 90 CCW, 6 = 90 CW
-                    flip = raw.sizes.flip
-                    
-                    if flip in (5, 6): # Rotated 90 degrees
-                        real_w, real_h = h, w
-                        aspect = real_w / real_h
-                    else:
-                        aspect = w / h
-                    
-                    self.gallery_aspect_cache[file_path] = aspect
-                    # Update cache
-                    try:
-                        cached_exif = self.image_cache.get_exif(file_path) or {}
-                        cached_exif['original_width'] = w
-                        cached_exif['original_height'] = h
-                        # Map rawpy flip to EXIF orientation for consistency if possible
-                        # 0->1, 3->3, 6->6, 5->8 (approximate)
-                        if flip == 6: cached_exif['orientation'] = 6
-                        elif flip == 3: cached_exif['orientation'] = 3
-                        elif flip == 5: cached_exif['orientation'] = 8
-                        else: cached_exif['orientation'] = 1
-                        self.image_cache.put_exif(file_path, cached_exif)
-                    except Exception: pass
-                    return aspect
-            except Exception:
-                pass
-
-        # C. Try PIL fallback (for TIFF/JPEG)
-        try:
-            from PIL import Image
-            with Image.open(file_path) as img:
-                w, h = img.size
-                # orientation handling in PIL
-                orientation = 1
-                try:
-                    exif_getter = getattr(img, "_getexif", None)
-                    exif = exif_getter() if callable(exif_getter) else None
-                    if isinstance(exif, dict):
-                        orientation = int(exif.get(274, 1))  # 274 is Orientation tag
-                except Exception: pass
-                
-                if h > 0:
-                    real_w, real_h = (h, w) if orientation in (5, 6, 7, 8) else (w, h)
-                    aspect = real_w / real_h
-                    self.gallery_aspect_cache[file_path] = aspect
-                    return aspect
-        except Exception:
-            pass
-            
-        return 1.333  # Final fallback
-    
     def _numpy_to_qpixmap(self, numpy_array):
         """
         Convert numpy array to QPixmap safely.
@@ -15532,12 +15392,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             local_target_height = final_target_height
             
             try:
-                logger.debug(f"[GALLERY] Starting load for {os.path.basename(file_path)}")
+                logger.debug("[GALLERY] Starting load for %s", os.path.basename(file_path))
                 # Get or load pixmap
                 pixmap = self._get_gallery_pixmap(file_path)
                 if not pixmap or pixmap.isNull():
                     # Try to load asynchronously if not in cache
-                    logger.debug(f"[GALLERY] Pixmap not in cache for {os.path.basename(file_path)}, loading async")
+                    logger.debug("[GALLERY] Pixmap not in cache for %s, loading async", os.path.basename(file_path))
                     if file_path in self._gallery_load_tracking:
                         self._gallery_load_tracking[file_path]['loaded'] = False
                     # Load pixmap asynchronously - it will update the label when ready
@@ -15550,7 +15410,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if file_path in self._gallery_load_tracking:
                     self._gallery_load_tracking[file_path]['loaded'] = True
                     self._gallery_load_tracking[file_path]['load_time'] = load_time
-                logger.info(f"[GALLERY] [PIXMAP] {os.path.basename(file_path)} - Loaded from cache in {load_time:.3f}s")
+                logger.debug("[GALLERY] [PIXMAP] %s - Loaded from cache in %.3fs", os.path.basename(file_path), load_time)
                 
                 # Get actual image dimensions
                 pixmap_width = pixmap.width()
@@ -15564,7 +15424,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.gallery_aspect_cache[file_path] = actual_aspect
                 
                 # Log original image dimensions and aspect ratio
-                logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Original: {pixmap_width}x{pixmap_height}, Aspect: {actual_aspect:.3f}")
+                logger.debug("[GALLERY] [THUMBNAIL] %s - Original: %dx%d, Aspect: %.3f", os.path.basename(file_path), pixmap_width, pixmap_height, actual_aspect)
                 
                 # For fixed height gallery: scale to fixed height while preserving aspect ratio
                 # Reference code: resized = pixmap.scaled(QSize(w, ROW_HEIGHT), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -15575,13 +15435,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 label_width = thumb_label.width()
                 label_height = thumb_label.height()
                 label_aspect = label_width / label_height if label_height > 0 else 0
-                logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Label: {label_width}x{label_height}, Label Aspect: {label_aspect:.3f}")
+                logger.debug("[GALLERY] [THUMBNAIL] %s - Label: %dx%d, Label Aspect: %.3f", os.path.basename(file_path), label_width, label_height, label_aspect)
                 
                 # Calculate width based on actual image aspect ratio and fixed height
                 scaled_width = int(target_height * actual_aspect)
                 scaled_height = target_height
                 scaled_aspect = scaled_width / scaled_height if scaled_height > 0 else 0
-                logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Scaled Target: {scaled_width}x{scaled_height}, Scaled Aspect: {scaled_aspect:.3f}")
+                logger.debug("[GALLERY] [THUMBNAIL] %s - Scaled Target: %dx%d, Scaled Aspect: %.3f", os.path.basename(file_path), scaled_width, scaled_height, scaled_aspect)
                 
                 # Scale pixmap to fixed height while preserving aspect ratio
                 scaled_pixmap = pixmap.scaled(
@@ -15598,7 +15458,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 actual_scaled_width = scaled_pixmap.width()
                 actual_scaled_height = scaled_pixmap.height()
                 actual_scaled_aspect = actual_scaled_width / actual_scaled_height if actual_scaled_height > 0 else 0
-                logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Scaled Result: {actual_scaled_width}x{actual_scaled_height}, Result Aspect: {actual_scaled_aspect:.3f}")
+                logger.debug("[GALLERY] [THUMBNAIL] %s - Scaled Result: %dx%d, Result Aspect: %.3f", os.path.basename(file_path), actual_scaled_width, actual_scaled_height, actual_scaled_aspect)
                 
                 # CRITICAL: Resize label to match scaled pixmap size (like reference code: thumb.setFixedSize(resized.size()))
                 # This ensures the label matches the pixmap dimensions exactly, preventing compression
@@ -15613,7 +15473,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 final_label_height = thumb_label.height()
                 final_pixmap_width = scaled_pixmap.width()
                 final_pixmap_height = scaled_pixmap.height()
-                logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Final Label: {final_label_width}x{final_label_height}, Pixmap: {final_pixmap_width}x{final_pixmap_height}")
+                logger.debug("[GALLERY] [THUMBNAIL] %s - Final Label: %dx%d, Pixmap: %dx%d", os.path.basename(file_path), final_label_width, final_label_height, final_pixmap_width, final_pixmap_height)
                 display_time = time.time() - display_start
                 
                 # Mark as displayed
@@ -15621,7 +15481,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._gallery_load_tracking[file_path]['displayed'] = True
                     self._gallery_load_tracking[file_path]['display_time'] = display_time
                     total_time = time.time() - self._gallery_load_tracking[file_path]['start_time']
-                    logger.info(f"[GALLERY] [IMAGE] {os.path.basename(file_path)} - Loaded in {load_time:.3f}s, Displayed in {display_time:.3f}s, Total: {total_time:.3f}s")
+                    logger.debug("[GALLERY] [IMAGE] %s - Loaded in %.3fs, Displayed in %.3fs, Total: %.3fs", os.path.basename(file_path), load_time, display_time, total_time)
             except Exception as e:
                 logger.warning(f"Error loading justified thumbnail for {os.path.basename(file_path)}: {e}")
                 import traceback
@@ -15690,9 +15550,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             try:
                                 pixmap = self._extract_embedded_preview(file_path)
                                 if pixmap and not pixmap.isNull():
-                                    logger.debug(f"[GALLERY] Loaded embedded preview for gallery: {os.path.basename(file_path)}")
+                                    logger.debug("[GALLERY] Loaded embedded preview for gallery: %s", os.path.basename(file_path))
                             except Exception as raw_error:
-                                logger.debug(f"Error extracting embedded preview for {os.path.basename(file_path)}: {raw_error}")
+                                logger.debug("Error extracting embedded preview for %s: %s", os.path.basename(file_path), raw_error)
                                 pixmap = None
                         
                         # For non-RAW files, try direct QPixmap load
@@ -15715,7 +15575,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                     else:
                                         pixmap = None
                                 except Exception as pil_error:
-                                    logger.debug(f"Error loading with PIL for {os.path.basename(file_path)}: {pil_error}")
+                                    logger.debug("Error loading with PIL for %s: %s", os.path.basename(file_path), pil_error)
                                     pixmap = None
                         
                         # If still no pixmap, try to get thumbnail from image cache
@@ -15726,7 +15586,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                     # Use unified conversion method
                                     pixmap = self._numpy_to_qpixmap(thumbnail_data)
                             except Exception as thumb_error:
-                                logger.debug(f"Error getting thumbnail from cache for {os.path.basename(file_path)}: {thumb_error}")
+                                logger.debug("Error getting thumbnail from cache for %s: %s", os.path.basename(file_path), thumb_error)
                                 import traceback
                                 logger.debug(f"Traceback: {traceback.format_exc()}")
                 
@@ -15747,7 +15607,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     if file_path in self._gallery_load_tracking:
                         self._gallery_load_tracking[file_path]['loaded'] = True
                         self._gallery_load_tracking[file_path]['load_time'] = load_time
-                        logger.debug(f"[GALLERY] [PIXMAP] {os.path.basename(file_path)} - Loaded pixmap in {load_time:.3f}s")
+                        logger.debug("[GALLERY] [PIXMAP] %s - Loaded pixmap in %.3fs", os.path.basename(file_path), load_time)
                     
                     # Update the specific thumbnail label directly instead of refreshing entire gallery
                     if hasattr(self, '_gallery_thumb_labels') and file_path in self._gallery_thumb_labels:
@@ -15764,7 +15624,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             self.gallery_aspect_cache[file_path] = actual_aspect
                             
                             # Log original image dimensions and aspect ratio
-                            logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Original: {pixmap_width}x{pixmap_height}, Aspect: {actual_aspect:.3f}")
+                            logger.debug("[GALLERY] [THUMBNAIL] %s - Original: %dx%d, Aspect: %.3f", os.path.basename(file_path), pixmap_width, pixmap_height, actual_aspect)
                             
                             # For fixed height gallery: scale to fixed height while preserving aspect ratio
                             # Reference code: resized = pixmap.scaled(QSize(w, ROW_HEIGHT), Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -15775,13 +15635,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             
                             label_width = thumb_label.width()
                             label_aspect = label_width / label_height if label_height > 0 else 0
-                            logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Label: {label_width}x{label_height}, Label Aspect: {label_aspect:.3f}")
+                            logger.debug("[GALLERY] [THUMBNAIL] %s - Label: %dx%d, Label Aspect: %.3f", os.path.basename(file_path), label_width, label_height, label_aspect)
                             
                             # Calculate width based on actual image aspect ratio and fixed height
                             scaled_width = int(label_height * actual_aspect)
                             scaled_height = label_height
                             scaled_aspect = scaled_width / scaled_height if scaled_height > 0 else 0
-                            logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Scaled Target: {scaled_width}x{scaled_height}, Scaled Aspect: {scaled_aspect:.3f}")
+                            logger.debug("[GALLERY] [THUMBNAIL] %s - Scaled Target: %dx%d, Scaled Aspect: %.3f", os.path.basename(file_path), scaled_width, scaled_height, scaled_aspect)
                             
                             # Scale pixmap to fixed height while preserving aspect ratio
                             scaled_pixmap = pixmap.scaled(
@@ -15798,7 +15658,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             actual_scaled_width = scaled_pixmap.width()
                             actual_scaled_height = scaled_pixmap.height()
                             actual_scaled_aspect = actual_scaled_width / actual_scaled_height if actual_scaled_height > 0 else 0
-                            logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Scaled Result: {actual_scaled_width}x{actual_scaled_height}, Result Aspect: {actual_scaled_aspect:.3f}")
+                            logger.debug("[GALLERY] [THUMBNAIL] %s - Scaled Result: %dx%d, Result Aspect: %.3f", os.path.basename(file_path), actual_scaled_width, actual_scaled_height, actual_scaled_aspect)
                             
                             # CRITICAL: Resize label to match scaled pixmap size (like reference code: thumb.setFixedSize(resized.size()))
                             # This ensures the label matches the pixmap dimensions exactly, preventing compression
@@ -15813,7 +15673,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             final_label_height = thumb_label.height()
                             final_pixmap_width = scaled_pixmap.width()
                             final_pixmap_height = scaled_pixmap.height()
-                            logger.info(f"[GALLERY] [THUMBNAIL] {os.path.basename(file_path)} - Final Label: {final_label_width}x{final_label_height}, Pixmap: {final_pixmap_width}x{final_pixmap_height}")
+                            logger.debug("[GALLERY] [THUMBNAIL] %s - Final Label: %dx%d, Pixmap: %dx%d", os.path.basename(file_path), final_label_width, final_label_height, final_pixmap_width, final_pixmap_height)
                             display_time = time.time() - display_start
                             
                             # Mark as displayed
@@ -15821,7 +15681,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                 self._gallery_load_tracking[file_path]['displayed'] = True
                                 self._gallery_load_tracking[file_path]['display_time'] = display_time
                                 total_time = time.time() - self._gallery_load_tracking[file_path]['start_time']
-                                logger.debug(f"[GALLERY] [IMAGE] {os.path.basename(file_path)} - Displayed in {display_time:.3f}s, Total: {total_time:.3f}s")
+                                logger.debug("[GALLERY] [IMAGE] %s - Displayed in %.3fs, Total: %.3fs", os.path.basename(file_path), display_time, total_time)
                 else:
                     # Failed to load
                     logger.warning(f"[GALLERY] [PIXMAP] Failed to load pixmap for {os.path.basename(file_path)}")
@@ -19330,10 +19190,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                 wait_result = self.current_processor.wait(100)  # Wait up to 100ms
                                 logger.info(f"[CLEANUP] wait() returned: {wait_result}, is_running: {self.current_processor.isRunning()}")
                                 if not wait_result:
-                                    logger.info("[CLEANUP] Processor did not stop gracefully, calling terminate()")
-                                    self.current_processor.terminate()
-                                    terminate_wait = self.current_processor.wait(50)  # Wait up to 50ms after terminate
-                                    logger.info(f"[CLEANUP] After terminate(), wait() returned: {terminate_wait}, is_running: {self.current_processor.isRunning()}")
+                                    logger.info("[CLEANUP] Processor did not stop gracefully; leaving it to finish (never terminate)")
+                                    _park_lingering_thread(self.current_processor)
                             else:
                                 logger.info("[CLEANUP] Processor not running, skip quit/wait")
                     
@@ -20382,8 +20240,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass
             converter.quit()
             if not converter.wait(500):
-                converter.terminate()
-                converter.wait(500)
+                # Never terminate() a thread that may be inside native decode
+                # code; park it and let it finish on its own.
+                _park_lingering_thread(converter)
         except Exception:
             pass
         self._display_pixmap_converter = None
@@ -34356,18 +34215,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     except Exception as e:
                         logger.warning(f"[CLOSE] Error waiting for image manager thread pool: {e}", exc_info=True)
             
-            # Force terminate any remaining threads/processes (no sleeps)
-            logger.info("[CLOSE] Force terminating any remaining processes...")
+            # Request stop on any remaining threads/processes (no sleeps, no
+            # terminate(): os._exit() below reaps anything still running, and
+            # killing a thread inside native code risks heap corruption).
+            logger.info("[CLOSE] Stopping any remaining processes...")
             try:
                 if hasattr(self, 'current_processor') and self.current_processor is not None:
-                    logger.warning("[CLOSE] Force terminating current processor...")
+                    logger.warning("[CLOSE] Stopping current processor...")
                     try:
-                        if hasattr(self.current_processor, 'terminate'):
-                            self.current_processor.terminate()
-                        if hasattr(self.current_processor, 'wait'):
-                            self.current_processor.wait(50)
+                        if hasattr(self.current_processor, 'stop_processing'):
+                            self.current_processor.stop_processing()
+                        if hasattr(self.current_processor, 'isRunning') and self.current_processor.isRunning():
+                            _park_lingering_thread(self.current_processor)
                     except Exception as e:
-                        logger.warning(f"[CLOSE] Error force terminating processor: {e}")
+                        logger.warning(f"[CLOSE] Error stopping processor: {e}")
                     finally:
                         self.current_processor = None
                 

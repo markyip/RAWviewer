@@ -1,4 +1,5 @@
 import errno
+import hashlib
 import os
 import re
 import sys
@@ -20,6 +21,9 @@ PIXI_DOWNLOAD_URL = (
     f"https://github.com/prefix-dev/pixi/releases/download/v{PIXI_VERSION}/"
     "pixi-x86_64-pc-windows-msvc.zip"
 )
+# Pinned integrity hash for the asset above (pixi-x86_64-pc-windows-msvc.zip).
+# MUST be updated whenever PIXI_VERSION is bumped; compute with `shasum -a 256`.
+PIXI_DOWNLOAD_SHA256 = "d9044186bfea9771b8e35b0ed032352b557a82528cd5165db6b8ad137c7a873c"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024  # ~2 GiB for pixi env + models (Plus)
@@ -216,9 +220,18 @@ def _describe_download_error(exc: BaseException) -> str:
     return str(exc)
 
 
+def _sha256_of_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "RAWviewer-Setup/1.0"})
+    tmp_path = dest_path + ".part"
     for attempt in range(1, DOWNLOAD_RETRIES + 1):
         disk_err = _check_disk_space(dest_path, _min_free_bytes_for_install())
         if disk_err:
@@ -227,10 +240,16 @@ def _download_file_with_retry(url: str, dest_path: str, log) -> bool:
         try:
             log(f"Downloading (attempt {attempt}/{DOWNLOAD_RETRIES})...")
             with urllib.request.urlopen(req, timeout=120) as resp:
-                with open(dest_path, "wb") as out:
+                with open(tmp_path, "wb") as out:
                     shutil.copyfileobj(resp, out)
+            os.replace(tmp_path, dest_path)
             return True
         except Exception as exc:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
             log(f"Download failed: {_describe_download_error(exc)}")
             if attempt < DOWNLOAD_RETRIES:
                 log(f"Retrying in {RETRY_DELAY_SEC}s...")
@@ -788,6 +807,13 @@ class InstallWorker(QObject):
                 )
                 zip_path = os.path.join(pixi_dir, "pixi.zip")
                 if not _download_file_with_retry(PIXI_DOWNLOAD_URL, zip_path, self.log_signal.emit):
+                    _cleanup_partial_install(target_dir, self.log_signal.emit)
+                    self.finished.emit(False, "")
+                    return
+                if _sha256_of_file(zip_path).lower() != PIXI_DOWNLOAD_SHA256.lower():
+                    self.log_signal.emit(
+                        "Pixi download failed integrity verification (SHA-256 mismatch); aborting."
+                    )
                     _cleanup_partial_install(target_dir, self.log_signal.emit)
                     self.finished.emit(False, "")
                     return

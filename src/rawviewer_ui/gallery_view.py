@@ -312,8 +312,12 @@ class JustifiedGallery(QWidget):
         # briefly; async production clears the entry on thumbnail_ready.
         self._base_fetch_miss_ts: Dict[str, float] = {}
         self._metadata_cache = {}
-        # Thumbnail cache: base + per-bucket scaled
+        # Thumbnail cache: base + per-bucket scaled. Count-capped via LRUCache
+        # and additionally byte-capped by _enforce_thumbnail_cache_budget()
+        # (pixmaps are several hundred KB each, so a count-only cap can reach
+        # multiple GB in large folders).
         self._thumbnail_cache = LRUCache(10000)
+        self._thumb_cache_puts_since_check = 0
         self._thumb_base_key = "__base__"
         self._row_height_buckets = list(range(100, 400, 20)) # updated max to 400
         self._width_bucket_px = 64  # quantize widths to avoid mismatched cached pixmaps
@@ -667,6 +671,9 @@ class JustifiedGallery(QWidget):
         self._orientation_flip_paths.clear()
         self._metadata_fetch_attempted.clear()
         self._thumb_fail_counts.clear()
+        # EXIF dicts are per-folder too; drop them with the rest of the
+        # folder-scoped state so they don't accumulate across folder changes.
+        self._metadata_cache.clear()
         # Drop the decoded thumbnail pixmaps too: this count-capped cache (base +
         # several scaled variants per tile, up to 10000 entries) is scoped to the
         # folder being browsed. Leaving it populated across a folder change keeps
@@ -1653,12 +1660,40 @@ class JustifiedGallery(QWidget):
         except Exception:
             return True
 
+    _THUMB_CACHE_BYTE_BUDGET = 768 * 1024 * 1024  # ~768 MiB of QPixmaps
+
+    def _enforce_thumbnail_cache_budget(self) -> None:
+        """Evict LRU thumbnails until the cache is under the byte budget.
+
+        Recounts actual pixmap bytes, but only every N puts to keep the hot
+        path cheap. Complements the count-only LRUCache cap.
+        """
+        self._thumb_cache_puts_since_check += 1
+        if self._thumb_cache_puts_since_check < 64:
+            return
+        self._thumb_cache_puts_since_check = 0
+        cache = self._thumbnail_cache
+        with cache.lock:
+            total = 0
+            sizes = {}
+            for k, pm in cache.cache.items():
+                try:
+                    b = int(pm.width()) * int(pm.height()) * 4
+                except Exception:
+                    b = 4096
+                sizes[k] = b
+                total += b
+            while total > self._THUMB_CACHE_BYTE_BUDGET and cache.cache:
+                k, _pm = cache.cache.popitem(last=False)
+                total -= sizes.get(k, 0)
+
     def _fit_tile_pixmap(
         self, file_path: str, base: QPixmap, physical_size: QSize, dpr: float, fast: bool = False
     ) -> QPixmap:
         fitted = self._fit_rotated_thumbnail(file_path, base, physical_size, fast=fast)
         fitted.setDevicePixelRatio(dpr)
         self._thumbnail_cache.put(self._scaled_cache_key(file_path, physical_size, fast=fast), fitted)
+        self._enforce_thumbnail_cache_budget()
         return fitted
 
     def _get_rotation_degrees_for_path(self, file_path: str) -> int:
@@ -1821,6 +1856,7 @@ class JustifiedGallery(QWidget):
         if oriented is None or oriented.isNull():
             return pixmap
         self._thumbnail_cache.put((file_path, self._thumb_base_key), oriented)
+        self._enforce_thumbnail_cache_budget()
         self._invalidate_scaled_thumbnails_for_path(file_path)
         return oriented
 

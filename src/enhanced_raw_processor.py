@@ -1619,7 +1619,7 @@ class EnhancedRAWProcessor(QThread):
         self.is_raw_file = self._is_raw_file(file_path)
 
         # Processing state
-        self._should_stop = False
+        self._should_stop = threading.Event()
 
     def _is_raw_file(self, file_path: str) -> bool:
         """Check if file is a RAW format."""
@@ -1628,7 +1628,7 @@ class EnhancedRAWProcessor(QThread):
 
     def stop_processing(self):
         """Stop the processing thread."""
-        self._should_stop = True
+        self._should_stop.set()
 
     def run(self):
         """Main processing loop with progressive loading."""
@@ -1639,18 +1639,18 @@ class EnhancedRAWProcessor(QThread):
 
             # Step 1: Check cache for full image first
             cached_image = self.cache.get_full_image(self.file_path)
-            if cached_image is not None and not self._should_stop:
+            if cached_image is not None and not self._should_stop.is_set():
                 self.processing_progress.emit("Loaded from cache")
                 self.image_processed.emit(cached_image)
                 return
 
             # Step 2: Extract and emit thumbnail immediately
-            if not self._should_stop:
+            if not self._should_stop.is_set():
                 self._process_thumbnail()
 
             # Step 3: Extract EXIF data
             exif_data = None
-            if not self._should_stop:
+            if not self._should_stop.is_set():
                 self.processing_progress.emit("Reading metadata...")
                 exif_data = self.exif_extractor.extract_exif_data(
                     self.file_path)
@@ -1660,11 +1660,11 @@ class EnhancedRAWProcessor(QThread):
                     self.exif_data_ready.emit(exif_data)
 
             # Step 4: Process full image
-            if not self._should_stop:
+            if not self._should_stop.is_set():
                 self._process_full_image(exif_data)
 
         except Exception as e:
-            if not self._should_stop:
+            if not self._should_stop.is_set():
                 self.error_occurred.emit(f"Processing error: {str(e)}")
 
     def _process_thumbnail(self):
@@ -1817,6 +1817,10 @@ class PreloadManager(QObject):
         super().__init__()
         self.max_preload_threads = max_preload_threads
         self.active_threads = {}
+        # Threads that were asked to stop but didn't finish in time. Keep them
+        # referenced until they finish so their QThread wrapper is never
+        # destroyed while still running (we never call QThread.terminate()).
+        self._lingering_threads = []
         self.cache = get_image_cache()
         # Accept processor class as parameter to avoid circular imports
         # If None, will use EnhancedRAWProcessor as fallback
@@ -1920,9 +1924,16 @@ class PreloadManager(QObject):
                             additional_wait = thread.wait(200)  # Additional 200ms for rawpy operations
                             logger.debug(f"cancel_all_preloads(): Additional wait(200) returned {additional_wait} for {file_basename}")
                             if not additional_wait and thread.isRunning():
-                                logger.debug(f"cancel_all_preloads(): Terminating thread for {file_basename}")
-                                thread.terminate()
-                                thread.wait(50)  # Short wait after terminate
+                                # Never terminate(): killing a thread inside rawpy/LibRaw
+                                # native code can corrupt the heap or deadlock. Leave the
+                                # thread to finish on its own and keep it referenced so the
+                                # QThread wrapper isn't destroyed while running.
+                                logger.debug(f"cancel_all_preloads(): Thread for {file_basename} still running; leaving it to finish")
+                                self._lingering_threads.append(thread)
+                                try:
+                                    thread.finished.connect(lambda t=thread: self._discard_lingering(t))
+                                except Exception:
+                                    pass
             except Exception as e:
                 logger.warning(f"cancel_all_preloads(): Error cleaning up thread for {os.path.basename(file_path)}: {e}", exc_info=True)
         
@@ -1933,3 +1944,10 @@ class PreloadManager(QObject):
         """Clean up finished thread."""
         if file_path in self.active_threads:
             del self.active_threads[file_path]
+
+    def _discard_lingering(self, thread):
+        """Drop a finished lingering thread (safe: it is no longer running)."""
+        try:
+            self._lingering_threads.remove(thread)
+        except ValueError:
+            pass

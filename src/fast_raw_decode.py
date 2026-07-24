@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -231,8 +232,11 @@ def wb_sanity_enabled() -> bool:
 # bodies score <= 0.21, the misparsed EOS R6 Mark III files score >= 1.12 --
 # threshold 0.5 sits in the middle of a >5x gap.
 _WB_SANITY_THRESHOLD = 0.5
+# Session caches are bounded LRU structures so long sessions don't grow them
+# without limit; 4096 entries covers many times a typical folder size.
+_SESSION_CACHE_LIMIT = 4096
 # key: normcase(abspath). Value: corrected cam_mul list, or None = checked, OK.
-_WB_CORRECTION_CACHE: Dict[str, Optional[list]] = {}
+_WB_CORRECTION_CACHE: "OrderedDict[str, Optional[list]]" = OrderedDict()
 # Per-MODEL verdict: the WB misparse is a parser-vs-model property, so once
 # one file of a model measures clean, later files of that model skip the
 # embedded-JPEG check entirely -- it costs ~38ms of thumb extract + decode +
@@ -250,9 +254,18 @@ _WB_MODEL_VERDICT: Dict[bytes, bool] = {}
 
 # Files whose fast-path unpack came back None this session, keyed on
 # (normcase path, mtime_ns, size) -- see unpack_raw. Re-probes if the file
-# changes on disk. Bounded by the number of distinct undecodable files a
-# session touches, which is tiny; a corrupt/exotic file is the exception.
-_UNPACK_UNSUPPORTED: set = set()
+# changes on disk. Stored as an OrderedDict used as a bounded LRU set (values
+# are None): a corrupt/exotic file is the exception, but a session scanning
+# thousands of bad files must not grow it without limit.
+_UNPACK_UNSUPPORTED: "OrderedDict[tuple, None]" = OrderedDict()
+
+
+def _session_cache_put(cache: OrderedDict, key, value) -> None:
+    """Bounded LRU insert for the session caches above."""
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > _SESSION_CACHE_LIMIT:
+        cache.popitem(last=False)
 
 
 def _wb_model_key(
@@ -706,7 +719,7 @@ def _unpack_identity(file_path: str) -> Optional[tuple]:
 def _note_unpack_unsupported(file_path: str) -> None:
     ident = _unpack_identity(file_path)
     if ident is not None:
-        _UNPACK_UNSUPPORTED.add(ident)
+        _session_cache_put(_UNPACK_UNSUPPORTED, ident, None)
 
 
 def unpack_raw(
@@ -831,13 +844,13 @@ def _unpack_raw_impl(
             if wb_key not in _WB_CORRECTION_CACHE:
                 if _WB_MODEL_VERDICT.get(model_key) is False:
                     # Model already verified clean this session -- skip.
-                    _WB_CORRECTION_CACHE[wb_key] = None
+                    _session_cache_put(_WB_CORRECTION_CACHE, wb_key, None)
                 else:
                     result = _wb_correction_from_jpeg(
                         file_path, thumb_bytes, mosaic, pattern, black,
                         scale_mul, rgb_cam, cam_mul,
                     )
-                    _WB_CORRECTION_CACHE[wb_key] = result
+                    _session_cache_put(_WB_CORRECTION_CACHE, wb_key, result)
                     # Record the model verdict only from a real measurement:
                     # a missing/undecodable thumb must not mark a potentially
                     # misparsed model as clean for the whole session.

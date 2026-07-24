@@ -7,8 +7,8 @@ from typing import Optional, Tuple
 import numpy as np
 
 from exposure_clipping import clipping_counts
-from PyQt6.QtCore import Qt, QRect, QRectF
-from PyQt6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import Qt, QRect, QRectF, QPointF
+from PyQt6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 
@@ -77,6 +77,8 @@ class ImageHistogramWidget(QWidget):
         self._hi_clip = 0
         self._lo_clip = 0
         self._clip_total = 0
+        self._polys: Optional[list] = None  # cached QPolygonF per channel
+        self._peaks: Optional[list] = None  # cached peak value per channel
         self.setFixedSize(self._CARD_W, self._CARD_H)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -132,6 +134,7 @@ class ImageHistogramWidget(QWidget):
     def clear(self) -> None:
         self._hr = self._hg = self._hb = self._hl = None
         self._hi_clip = self._lo_clip = self._clip_total = 0
+        self._polys = self._peaks = None
         self.update()
 
     def set_pixmap(self, pixmap: QPixmap) -> None:
@@ -158,6 +161,7 @@ class ImageHistogramWidget(QWidget):
             return
         self._hr, self._hg, self._hb, self._hl = _histograms_from_rgb(rgb)
         self._hi_clip, self._lo_clip, self._clip_total = clipping_counts(rgb)
+        self._polys = self._peaks = None  # invalidate cached geometry
         self.update()
 
     def paintEvent(self, event):
@@ -176,26 +180,33 @@ class ImageHistogramWidget(QWidget):
             painter.drawText(chart, Qt.AlignmentFlag.AlignCenter, "—")
             return
 
-        def polyline(hist: np.ndarray, color: QColor, width_f: float = 1.2):
-            peak = float(np.max(hist))
-            if peak < 1.0:
-                peak = 1.0
+        if self._polys is None:
             x0, y0 = chart.left(), chart.top()
             rw, rh = chart.width(), chart.height()
-            painter.setPen(QPen(color, width_f))
-            for i in range(255):
-                t0 = i / 255.0
-                t1 = (i + 1) / 255.0
-                vx0 = x0 + t0 * rw
-                vx1 = x0 + t1 * rw
-                vy0 = y0 + rh - (hist[i] / peak) * rh
-                vy1 = y0 + rh - (hist[i + 1] / peak) * rh
-                painter.drawLine(int(vx0), int(vy0), int(vx1), int(vy1))
+            polys = []
+            peaks = []
+            for hist in (self._hr, self._hg, self._hb, self._hl):
+                peak = float(np.max(hist))
+                if peak < 1.0:
+                    peak = 1.0
+                peaks.append(peak)
+                poly = QPolygonF()
+                for i in range(256):
+                    vx = x0 + (i / 255.0) * rw
+                    vy = y0 + rh - (hist[i] / peak) * rh
+                    poly.append(QPointF(vx, vy))
+                polys.append(poly)
+            self._polys = polys
+            self._peaks = peaks
 
-        polyline(self._hr, QColor(220, 90, 90, 200), 1.0)
-        polyline(self._hg, QColor(90, 200, 110, 200), 1.0)
-        polyline(self._hb, QColor(100, 160, 255, 200), 1.0)
-        polyline(self._hl, QColor(230, 230, 230, 255), 1.35)
+        for poly, color, width_f in (
+            (self._polys[0], QColor(220, 90, 90, 200), 1.0),
+            (self._polys[1], QColor(90, 200, 110, 200), 1.0),
+            (self._polys[2], QColor(100, 160, 255, 200), 1.0),
+            (self._polys[3], QColor(230, 230, 230, 255), 1.35),
+        ):
+            painter.setPen(QPen(color, width_f))
+            painter.drawPolyline(poly)
 
         if self._clip_total > 0:
             if self._lo_clip > 0:

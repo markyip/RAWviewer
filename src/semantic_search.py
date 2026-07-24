@@ -2715,6 +2715,8 @@ class SemanticImageIndex:
         self._metadata_backfill_paths: set[str] = set()
         self._metadata_backfill_geocode: set[str] = set()
         self._metadata_backfill_running = False
+        self._metadata_backfill_thread: Optional[threading.Thread] = None
+        self._closing = False
         # ImageLoadManager throttle hooks. Acquired only around heavy work (neural
         # pass / thumbnail warm / face scan) and released while paused, so that a
         # background index sitting idle in the gallery never starves thumbnail decode.
@@ -4607,12 +4609,15 @@ class SemanticImageIndex:
                 return
             if not self._metadata_backfill_paths and not self._metadata_backfill_geocode:
                 return
+            if self._closing:
+                return
             self._metadata_backfill_running = True
             thread = threading.Thread(
                 target=self._run_metadata_backfill_worker,
                 name="rawviewer-metadata-backfill",
                 daemon=True,
             )
+            self._metadata_backfill_thread = thread
             thread.start()
 
     def _run_metadata_backfill_worker(self) -> None:
@@ -4626,7 +4631,7 @@ class SemanticImageIndex:
                     geocode_paths = list(self._metadata_backfill_geocode)
                     self._metadata_backfill_paths.clear()
                     self._metadata_backfill_geocode.clear()
-                    if not extract_paths and not geocode_paths:
+                    if self._closing or (not extract_paths and not geocode_paths):
                         self._metadata_backfill_running = False
                         return
 
@@ -4708,6 +4713,14 @@ class SemanticImageIndex:
             logger.warning("[INDEX] Metadata backfill worker failed: %s", exc)
             with self._metadata_backfill_lock:
                 self._metadata_backfill_running = False
+
+    def close(self) -> None:
+        """Stop and join the metadata-backfill worker (bounded), as in image_cache.close()."""
+        with self._metadata_backfill_lock:
+            self._closing = True
+            thread = self._metadata_backfill_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
 
     @staticmethod
     def _flush_exif_backfill_batch(exif_batch: List[tuple]) -> None:

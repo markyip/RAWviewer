@@ -269,6 +269,51 @@ class RAWProcessor(QThread):
             # If psutil not available or error, assume we can proceed
             return True, 0, 0
 
+    def _postprocess_with_wb_fallback(self, raw, use_fast_processing, use_auto_bright):
+        """Postprocess trying camera WB, then auto WB, then default settings.
+
+        Each attempt is a full LibRaw demosaic; parameters are identical to the
+        previous per-camera code paths (8-bit output, fast gamma, linear demosaic).
+        """
+        wb_attempts = ({'use_camera_wb': True}, {'use_auto_wb': True}, {})
+        last_attempt = len(wb_attempts) - 1
+        for i, wb_params in enumerate(wb_attempts):
+            try:
+                if self._should_stop:
+                    return None
+                # Verify handle is still valid before postprocess
+                with self._raw_handle_lock:
+                    if self._raw_handle is None or self._raw_handle != raw:
+                        return None
+                # Optimized processing parameters for faster loading
+                # Use auto-brightness for full resolution to match initial display brightness
+                # Performance optimizations: 8-bit output, fast gamma
+                postprocess_params = {
+                    'half_size': use_fast_processing,
+                    'output_bps': 8,  # Use 8-bit for faster processing
+                    'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
+                    'gamma': (2.222, 4.5),  # Standard sRGB gamma
+                    'user_flip': 0
+                }
+                postprocess_params.update(wb_params)
+                # Add performance optimizations if available
+                try:
+                    # Use fastest demosaicing algorithm for speed (if supported)
+                    postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
+                except (AttributeError, TypeError):
+                    pass  # Parameter not available in this rawpy version
+                rgb_image = raw.postprocess(**postprocess_params)
+                # Check again after postprocess
+                if self._should_stop:
+                    return None
+                return rgb_image
+            except Exception:
+                # On last attempt (default params), let the error propagate to
+                # the outer fallback in process_raw_with_camera_specific_settings
+                if i == last_attempt:
+                    raise
+        return None
+
     def process_raw_with_camera_specific_settings(self, raw):
         """Process RAW data with camera-specific settings with improved memory management - thread-safe"""
         import logging
@@ -329,89 +374,7 @@ class RAWProcessor(QThread):
                 # Canon cameras (especially CR3) need proper white balance correction
                 # to avoid red hue issues. Try camera white balance first.
                 logger.debug(f"Applying Canon-specific white balance correction...")
-                try:
-                    if self._should_stop:
-                        return None
-                    # Verify handle is still valid before postprocess
-                    with self._raw_handle_lock:
-                        if self._raw_handle is None or self._raw_handle != raw:
-                            return None
-                    # Optimized processing parameters for faster loading
-                    # Use auto-brightness for full resolution to match initial display brightness
-                    # Performance optimizations: use camera WB (faster), 8-bit output, fast gamma
-                    postprocess_params = {
-                        'use_camera_wb': True,
-                        'half_size': use_fast_processing,
-                        'output_bps': 8,  # Use 8-bit for faster processing
-                        'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                        'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                    }
-                    # Add performance optimizations if available
-                    try:
-                        # Use fastest demosaicing algorithm for speed (if supported)
-                        postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                    except (AttributeError, TypeError):
-                        pass  # Parameter not available in this rawpy version
-                    rgb_image = raw.postprocess(**postprocess_params)
-                    # Check again after postprocess
-                    if self._should_stop:
-                        return None
-                    return rgb_image
-                except Exception:
-                    # If camera WB fails, try auto white balance
-                    try:
-                        if self._should_stop:
-                            return None
-                        with self._raw_handle_lock:
-                            if self._raw_handle is None or self._raw_handle != raw:
-                                return None
-                        # Optimized processing parameters for faster loading
-                        # Use auto-brightness for full resolution to match initial display brightness
-                        # Performance optimizations: use auto WB (fallback), 8-bit output, fast gamma
-                        postprocess_params = {
-                            'use_auto_wb': True,
-                            'half_size': use_fast_processing,
-                            'output_bps': 8,  # Use 8-bit for faster processing
-                            'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                            'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                        }
-                        # Add performance optimizations if available
-                        try:
-                            postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                        except (AttributeError, TypeError):
-                            pass
-                        rgb_image = raw.postprocess(**postprocess_params)
-                        if self._should_stop:
-                            return None
-                        return rgb_image
-                    except Exception:
-                        # If both fail, use default processing
-                        if self._should_stop:
-                            return None
-                        with self._raw_handle_lock:
-                            if self._raw_handle is None or self._raw_handle != raw:
-                                return None
-                        # Optimized processing parameters for faster loading
-                        # Use auto-brightness for full resolution to match initial display brightness
-                        # Performance optimizations: default processing, 8-bit output, fast gamma
-                        postprocess_params = {
-                            'half_size': use_fast_processing,
-                            'output_bps': 8,  # Use 8-bit for faster processing
-                            'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                            'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                        }
-                        # Add performance optimizations if available
-                        try:
-                            postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                        except (AttributeError, TypeError):
-                            pass
-                        rgb_image = raw.postprocess(**postprocess_params)
-                        if self._should_stop:
-                            return None
-                        return rgb_image
+                return self._postprocess_with_wb_fallback(raw, use_fast_processing, use_auto_bright)
             # Check if this is a Fujifilm camera
             elif self.is_fujifilm_camera():
                 # Fujifilm cameras (especially RAF) need proper white balance correction
@@ -420,87 +383,7 @@ class RAWProcessor(QThread):
                     logger.debug(f"Applying Fujifilm-specific processing with fast mode for large file ({file_size_mb:.1f}MB)...")
                 else:
                     logger.debug(f"Applying Fujifilm-specific white balance correction...")
-                try:
-                    if self._should_stop:
-                        return None
-                    with self._raw_handle_lock:
-                        if self._raw_handle is None or self._raw_handle != raw:
-                            return None
-                    # Optimized processing parameters for faster loading
-                    # Use auto-brightness for full resolution to match initial display brightness
-                    # Performance optimizations: use camera WB (faster), 8-bit output, fast gamma
-                    postprocess_params = {
-                        'use_camera_wb': True,
-                        'half_size': use_fast_processing,
-                        'output_bps': 8,  # Use 8-bit for faster processing
-                        'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                        'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                    }
-                    # Add performance optimizations if available
-                    try:
-                        # Use fastest demosaicing algorithm for speed (if supported)
-                        postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                    except (AttributeError, TypeError):
-                        pass  # Parameter not available in this rawpy version
-                    rgb_image = raw.postprocess(**postprocess_params)
-                    if self._should_stop:
-                        return None
-                    return rgb_image
-                except Exception:
-                    # If camera WB fails, try auto white balance
-                    try:
-                        if self._should_stop:
-                            return None
-                        with self._raw_handle_lock:
-                            if self._raw_handle is None or self._raw_handle != raw:
-                                return None
-                        # Optimized processing parameters for faster loading
-                        # Use auto-brightness for full resolution to match initial display brightness
-                        # Performance optimizations: use auto WB (fallback), 8-bit output, fast gamma
-                        postprocess_params = {
-                            'use_auto_wb': True,
-                            'half_size': use_fast_processing,
-                            'output_bps': 8,  # Use 8-bit for faster processing
-                            'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                            'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                        }
-                        # Add performance optimizations if available
-                        try:
-                            postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                        except (AttributeError, TypeError):
-                            pass
-                        rgb_image = raw.postprocess(**postprocess_params)
-                        if self._should_stop:
-                            return None
-                        return rgb_image
-                    except Exception:
-                        # If both fail, use default processing
-                        if self._should_stop:
-                            return None
-                        with self._raw_handle_lock:
-                            if self._raw_handle is None or self._raw_handle != raw:
-                                return None
-                        # Optimized processing parameters for faster loading
-                        # Use auto-brightness for full resolution to match initial display brightness
-                        # Performance optimizations: default processing, 8-bit output, fast gamma
-                        postprocess_params = {
-                            'half_size': use_fast_processing,
-                            'output_bps': 8,  # Use 8-bit for faster processing
-                            'no_auto_bright': not use_auto_bright,  # Use auto-brightness for full resolution
-                            'gamma': (2.222, 4.5),  # Standard sRGB gamma
-                        'user_flip': 0
-                        }
-                        # Add performance optimizations if available
-                        try:
-                            postprocess_params['demosaic_algorithm'] = rawpy.DemosaicAlgorithm.LINEAR
-                        except (AttributeError, TypeError):
-                            pass
-                        rgb_image = raw.postprocess(**postprocess_params)
-                        if self._should_stop:
-                            return None
-                        return rgb_image
+                return self._postprocess_with_wb_fallback(raw, use_fast_processing, use_auto_bright)
             else:
                 # For other cameras, use default processing
                 if self._should_stop:

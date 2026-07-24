@@ -721,6 +721,10 @@ class ImageLoadManager(QObject):
         # Semantic indexing throttle is toggled from the background index worker
         # thread as well as the UI thread (face scan), so guard the depth counter.
         self._indexing_throttle_lock = threading.Lock()
+        # Guards io-pressure/gallery-warmup depth counters, saved baselines,
+        # and setMaxThreadCount save/restore against concurrent enter/exit
+        # from worker threads and the VolumeSpeedProbe daemon thread.
+        self._throttle_lock = threading.Lock()
         
         # Throttled workers on macOS external drives to prevent IO overload crashes
         self.update_volume_throttling(os.getcwd())
@@ -836,24 +840,27 @@ class ImageLoadManager(QObject):
         # Cap wells short of unbounded: CURRENT pool never exceeds bg baseline.
         current_workers = max(1, min(current_workers, default_workers))
 
-        # If no throttle is currently active, apply directly
-        is_throttled = (
-            (getattr(self, "_io_pressure_throttle_depth", 0) or 0) > 0
-            or (getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) > 0
-            or (getattr(self, "_indexing_throttle_depth", 0) or 0) > 0
-        )
-        if not is_throttled:
-            self._thread_pool.setMaxThreadCount(default_workers)
-            self._apply_current_pool_limit(current_workers)
-        
-        # Save baseline to be restored when throttles exit
-        self._pressure_saved_max_threads = default_workers
-        self._warmup_saved_max_threads = default_workers
-        self._indexing_saved_max_threads = default_workers
-        self._pressure_saved_current_threads = current_workers
-        self._warmup_saved_current_threads = current_workers
-        self._indexing_saved_current_threads = current_workers
-        self._current_pool_baseline = current_workers
+        # If no throttle is currently active, apply directly. Guarded by
+        # _throttle_lock: this runs on the VolumeSpeedProbe daemon thread and
+        # races enter/exit throttle from worker threads.
+        with self._throttle_lock:
+            is_throttled = (
+                (getattr(self, "_io_pressure_throttle_depth", 0) or 0) > 0
+                or (getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) > 0
+                or (getattr(self, "_indexing_throttle_depth", 0) or 0) > 0
+            )
+            if not is_throttled:
+                self._thread_pool.setMaxThreadCount(default_workers)
+                self._apply_current_pool_limit(current_workers)
+
+            # Save baseline to be restored when throttles exit
+            self._pressure_saved_max_threads = default_workers
+            self._warmup_saved_max_threads = default_workers
+            self._indexing_saved_max_threads = default_workers
+            self._pressure_saved_current_threads = current_workers
+            self._warmup_saved_current_threads = current_workers
+            self._indexing_saved_current_threads = current_workers
+            self._current_pool_baseline = current_workers
         
         from common_image_loader import raw_load_limit_aligned_to_gpu
 
@@ -1123,40 +1130,42 @@ class ImageLoadManager(QObject):
 
     def enter_io_pressure_throttle(self) -> None:
         """Cut worker/RAW concurrency after EMFILE so open fds can drain."""
-        self._io_pressure_throttle_depth = (
-            int(getattr(self, "_io_pressure_throttle_depth", 0) or 0) + 1
-        )
-        if self._io_pressure_throttle_depth != 1:
-            return
-        self._pressure_saved_max_threads = self._thread_pool.maxThreadCount()
-        self._pressure_saved_current_threads = self._current_thread_pool.maxThreadCount()
-        pressure_max = _env_int("RAWVIEWER_IO_PRESSURE_MAX_WORKERS", 6, minimum=2)
-        self._thread_pool.setMaxThreadCount(
-            min(pressure_max, self._pressure_saved_max_threads)
-        )
-        # Keep a small CURRENT lane open so UI never hard-blocks under pressure.
-        self._apply_current_pool_limit(
-            min(max(2, pressure_max // 2), self._pressure_saved_current_threads)
-        )
-        self._pressure_saved_raw_limit = self._raw_load_limit
-        self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
+        with self._throttle_lock:
+            self._io_pressure_throttle_depth = (
+                int(getattr(self, "_io_pressure_throttle_depth", 0) or 0) + 1
+            )
+            if self._io_pressure_throttle_depth != 1:
+                return
+            self._pressure_saved_max_threads = self._thread_pool.maxThreadCount()
+            self._pressure_saved_current_threads = self._current_thread_pool.maxThreadCount()
+            pressure_max = _env_int("RAWVIEWER_IO_PRESSURE_MAX_WORKERS", 6, minimum=2)
+            self._thread_pool.setMaxThreadCount(
+                min(pressure_max, self._pressure_saved_max_threads)
+            )
+            # Keep a small CURRENT lane open so UI never hard-blocks under pressure.
+            self._apply_current_pool_limit(
+                min(max(2, pressure_max // 2), self._pressure_saved_current_threads)
+            )
+            self._pressure_saved_raw_limit = self._raw_load_limit
+            self._raw_load_limit = min(2, int(self._raw_load_limit or 2))
 
     def exit_io_pressure_throttle(self) -> None:
-        depth = int(getattr(self, "_io_pressure_throttle_depth", 0) or 0)
-        if depth <= 0:
-            return
-        self._io_pressure_throttle_depth = depth - 1
-        if self._io_pressure_throttle_depth > 0:
-            return
-        saved_threads = getattr(self, "_pressure_saved_max_threads", None)
-        if saved_threads is not None:
-            self._thread_pool.setMaxThreadCount(saved_threads)
-        saved_current = getattr(self, "_pressure_saved_current_threads", None)
-        if saved_current is not None:
-            self._apply_current_pool_limit(saved_current)
-        saved_raw = getattr(self, "_pressure_saved_raw_limit", None)
-        if saved_raw is not None:
-            self._raw_load_limit = saved_raw
+        with self._throttle_lock:
+            depth = int(getattr(self, "_io_pressure_throttle_depth", 0) or 0)
+            if depth <= 0:
+                return
+            self._io_pressure_throttle_depth = depth - 1
+            if self._io_pressure_throttle_depth > 0:
+                return
+            saved_threads = getattr(self, "_pressure_saved_max_threads", None)
+            if saved_threads is not None:
+                self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_current = getattr(self, "_pressure_saved_current_threads", None)
+            if saved_current is not None:
+                self._apply_current_pool_limit(saved_current)
+            saved_raw = getattr(self, "_pressure_saved_raw_limit", None)
+            if saved_raw is not None:
+                self._raw_load_limit = saved_raw
 
     def enter_gallery_warmup_throttle(self) -> None:
         """Raise worker/RAW concurrency while gallery tiles are first painting.
@@ -1166,57 +1175,60 @@ class ImageLoadManager(QObject):
         GPU cap during gallery entry instead of restoring volume parallelism —
         a regression when switching single→gallery with CUDA demosaic on.
         """
-        self._gallery_warmup_throttle_depth = (
-            int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) + 1
-        )
-        if self._gallery_warmup_throttle_depth != 1:
-            return
-        self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
-        self._warmup_saved_current_threads = self._current_thread_pool.maxThreadCount()
-        warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 24, minimum=2)
-        self._thread_pool.setMaxThreadCount(
-            min(warmed_max, max(self._warmup_saved_max_threads, warmed_max))
-        )
-        # Warmup is CURRENT-heavy: raise CURRENT pool toward the warmup budget
-        # (baseline CURRENT is intentionally small for single-view).
-        bg_cap = self._thread_pool.maxThreadCount()
-        self._apply_current_pool_limit(min(warmed_max, bg_cap))
-        self._warmup_saved_raw_limit = self._raw_load_limit
-        pre_gpu = getattr(self, "_pre_gpu_raw_limit", None)
-        try:
-            pre_gpu_n = int(pre_gpu) if pre_gpu is not None else 0
-        except (TypeError, ValueError):
-            pre_gpu_n = 0
-        # Prefer the pre-GPU volume limit (often cpu_count-based) over the
-        # GPU-aligned single-view cap so thumbnail admission is not serialized.
-        base = pre_gpu_n if pre_gpu_n > 0 else int(self._raw_load_limit or 6)
-        self._raw_load_limit = max(6, min(32, base))
-        import logging
+        with self._throttle_lock:
+            self._gallery_warmup_throttle_depth = (
+                int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0) + 1
+            )
+            if self._gallery_warmup_throttle_depth != 1:
+                return
+            self._warmup_saved_max_threads = self._thread_pool.maxThreadCount()
+            self._warmup_saved_current_threads = self._current_thread_pool.maxThreadCount()
+            warmed_max = _env_int("RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS", 24, minimum=2)
+            self._thread_pool.setMaxThreadCount(
+                min(warmed_max, max(self._warmup_saved_max_threads, warmed_max))
+            )
+            # Warmup is CURRENT-heavy: raise CURRENT pool toward the warmup budget
+            # (baseline CURRENT is intentionally small for single-view).
+            bg_cap = self._thread_pool.maxThreadCount()
+            self._apply_current_pool_limit(min(warmed_max, bg_cap))
+            self._warmup_saved_raw_limit = self._raw_load_limit
+            pre_gpu = getattr(self, "_pre_gpu_raw_limit", None)
+            try:
+                pre_gpu_n = int(pre_gpu) if pre_gpu is not None else 0
+            except (TypeError, ValueError):
+                pre_gpu_n = 0
+            # Prefer the pre-GPU volume limit (often cpu_count-based) over the
+            # GPU-aligned single-view cap so thumbnail admission is not serialized.
+            base = pre_gpu_n if pre_gpu_n > 0 else int(self._raw_load_limit or 6)
+            self._raw_load_limit = max(6, min(32, base))
+            import logging
 
-        logging.getLogger(__name__).info(
-            "[LOAD] Gallery warmup throttle ON (workers=%d current=%d raw_limit=%d; was raw_limit=%s pre_gpu=%s)",
-            self._thread_pool.maxThreadCount(),
-            self._current_thread_pool.maxThreadCount(),
-            self._raw_load_limit,
-            self._warmup_saved_raw_limit,
-            pre_gpu_n or "n/a",
-        )
+            logging.getLogger(__name__).info(
+                "[LOAD] Gallery warmup throttle ON (workers=%d current=%d raw_limit=%d; was raw_limit=%s pre_gpu=%s)",
+                self._thread_pool.maxThreadCount(),
+                self._current_thread_pool.maxThreadCount(),
+                self._raw_load_limit,
+                self._warmup_saved_raw_limit,
+                pre_gpu_n or "n/a",
+            )
+
     def exit_gallery_warmup_throttle(self) -> None:
-        depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
-        if depth <= 0:
-            return
-        self._gallery_warmup_throttle_depth = depth - 1
-        if self._gallery_warmup_throttle_depth > 0:
-            return
-        saved_threads = getattr(self, "_warmup_saved_max_threads", None)
-        if saved_threads is not None:
-            self._thread_pool.setMaxThreadCount(saved_threads)
-        saved_current = getattr(self, "_warmup_saved_current_threads", None)
-        if saved_current is not None:
-            self._apply_current_pool_limit(saved_current)
-        saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
-        if saved_raw is not None:
-            self._raw_load_limit = saved_raw
+        with self._throttle_lock:
+            depth = int(getattr(self, "_gallery_warmup_throttle_depth", 0) or 0)
+            if depth <= 0:
+                return
+            self._gallery_warmup_throttle_depth = depth - 1
+            if self._gallery_warmup_throttle_depth > 0:
+                return
+            saved_threads = getattr(self, "_warmup_saved_max_threads", None)
+            if saved_threads is not None:
+                self._thread_pool.setMaxThreadCount(saved_threads)
+            saved_current = getattr(self, "_warmup_saved_current_threads", None)
+            if saved_current is not None:
+                self._apply_current_pool_limit(saved_current)
+            saved_raw = getattr(self, "_warmup_saved_raw_limit", None)
+            if saved_raw is not None:
+                self._raw_load_limit = saved_raw
 
     def indexing_throttle_active(self) -> bool:
         """True while semantic/face heavy work has engaged the ILM throttle."""

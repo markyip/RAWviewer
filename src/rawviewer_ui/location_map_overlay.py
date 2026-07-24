@@ -11,6 +11,12 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal, QPoint, QRectF, QRunnable, QTh
 from PyQt6.QtGui import QCursor, QMouseEvent, QPainter, QPainterPath, QColor, QPen, QDesktopServices
 from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget, QLabel, QHBoxLayout
 
+try:
+    from PyQt6.sip import isdeleted as _sip_isdeleted
+except Exception:  # pragma: no cover - sip always ships with PyQt6
+    def _sip_isdeleted(_obj) -> bool:
+        return False
+
 import metadata_backend
 from location_map_engine import (
     DEFAULT_ZOOM,
@@ -403,7 +409,10 @@ class ImageLocationMapWidget(QWidget):
         self._worker = worker
 
         def _on_gps_found() -> None:
-            """GPS coordinates confirmed \u2014 now it is safe to show the loading card."""
+            """GPS coordinates confirmed — now it is safe to show the loading card."""
+            if _sip_isdeleted(self):
+                # Queued emission delivered after the overlay was destroyed.
+                return
             if load_generation != self._load_generation or self._worker is not worker:
                 return
             self._canvas.set_loading(True)
@@ -413,6 +422,9 @@ class ImageLocationMapWidget(QWidget):
             self._relayout_parent()
 
         def _done(model: object, err: str) -> None:
+            if _sip_isdeleted(self):
+                # Queued emission delivered after the overlay was destroyed.
+                return
             self._active_signals.discard(signals)
             if load_generation != self._load_generation or self._worker is not worker:
                 return
@@ -473,6 +485,9 @@ class ImageLocationMapWidget(QWidget):
         self._probe = probe
 
         def _on_result(ok: bool) -> None:
+            if _sip_isdeleted(self):
+                # Queued emission delivered after the overlay was destroyed.
+                return
             self._active_signals.discard(signals)
             if self._probe is not probe:
                 return
