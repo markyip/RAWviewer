@@ -312,7 +312,10 @@ def _process_linear_edit_tail(
         else:
             logger.info("[DENOISE] AI denoise model found at %s", model_path)
 
-    if use_scunet and (nr_amount > 1e-4 or do_denoise):
+    if use_scunet:
+        # The AI Denoise export submenu is explicit user intent: run SCUNet
+        # unconditionally. (Previously gated on nr_amount/do_denoise, which
+        # silently exported a non-denoised file when the NR sliders were 0.)
         logger.info("[DENOISE] Using AI denoise (SCUNet ONNX) for this export")
         scunet = SCUNetONNX(model_path)
 
@@ -321,6 +324,11 @@ def _process_linear_edit_tail(
                 progress_cb(frac)
 
         img = scunet.process(img, cancel_check=cancel_check, progress_callback=_denoise_progress)
+
+        # Legacy luma NR still applies on top if the user set it explicitly.
+        luma_nr_amount = float(merged.get("LuminanceNoiseReduction", 0.0))
+        if luma_nr_amount > 1e-4:
+            img = apply_luma_denoise(img, strength=luma_nr_amount / 100.0, method=method, preview=preview)
     else:
         if nr_amount > 1e-4:
             img = apply_chroma_denoise(
@@ -763,6 +771,21 @@ def _apply_display_color_adjustments(
     return out
 
 
+_dither_tile_cache: Optional[np.ndarray] = None
+
+
+def _dither_tile() -> np.ndarray:
+    """512x512 triangular-PDF dither tile in [-1, 1), built once, deterministic."""
+    global _dither_tile_cache
+    if _dither_tile_cache is None:
+        rng = np.random.default_rng(0xD17E)
+        _dither_tile_cache = (
+            rng.random((512, 512), dtype=np.float32)
+            - rng.random((512, 512), dtype=np.float32)
+        )
+    return _dither_tile_cache
+
+
 def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None) -> np.ndarray:
     # dcraw BT.709 encode, NOT the IEC sRGB OETF: browse renders encode with
     # this exact curve, and the two differ most in the toe (12.92x vs 4.5x
@@ -779,6 +802,15 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
         display = _apply_display_stage_banded(img, merged, n_workers)
     else:
         display = _apply_display_stage(img, merged)
+    # TPDF dither (±1 LSB of the 8-bit output) before quantization. Denoised
+    # smooth gradients otherwise posterize into visible banding on 8-bit
+    # export -- the sensor noise that used to dither them for free is gone.
+    # Deterministic tiled pattern (no per-call RNG state, no full-frame
+    # random buffer) so exports stay byte-reproducible.
+    tile = _dither_tile()
+    th, tw = display.shape[0], display.shape[1]
+    d = tile[np.arange(th) % tile.shape[0]][:, np.arange(tw) % tile.shape[1]]
+    display = display + (d * (1.0 / 255.0))[..., None]
     display = apply_pipeline_lut_linear(display, merged)
     idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
     encoded = apply_pipeline_lut_encoded(_gamma_lut8()[idx], merged, 255.0)
@@ -982,12 +1014,16 @@ def export_adjusted_webp(
     adj: dict[str, float],
     output_path: str,
     *,
-    quality: int = 88,
+    quality: int = 95,
     use_ai_denoise: bool = False,
     cancel_check=None,
     progress_cb=None,
 ) -> None:
-    """Bake adjustments to 8-bit WebP."""
+    """Bake adjustments to 8-bit WebP.
+
+    Default quality 95 + method 6: at q88/method 4 lossy WebP flattens smooth
+    denoised gradients into visible 16x16 macroblock grid banding.
+    """
     processed = _process_for_export(
         rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
     )
@@ -1010,7 +1046,7 @@ def export_adjusted_webp(
         output_path,
         format="WEBP",
         quality=max(1, min(100, int(quality))),
-        method=4,
+        method=6,
     )
 
 
