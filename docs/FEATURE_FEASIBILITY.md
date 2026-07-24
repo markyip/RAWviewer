@@ -1,7 +1,7 @@
 # Feature Feasibility Research
 
 **Status:** Research notes (dev branch, targeting 3.1.x+)
-**Last updated:** 2026-07-24
+**Last updated:** 2026-07-25
 
 Forward-looking feasibility and effort evaluations for candidate editing
 features. Each entry records the conclusion, the effort sizing, the constraints
@@ -63,6 +63,129 @@ general "apply arbitrary adjustments through a mask" system to wire into. The
 dominant cost is generalizing the engine from one global adjustment set to
 **layered masked adjustments**.
 
+### Masks — types & edit categories (evaluated)
+
+Concrete scope, evaluated against commercial masking (Lightroom Classic,
+Capture One Layers) and against what's actually reusable in this codebase.
+
+**Mask types** — all five proposed are feasible; two notes:
+
+| Type | Feasibility | Notes |
+|---|---|---|
+| Linear Gradient (+reverse) | Trivial | Pure alpha ramp by angle/position, no ML. |
+| Brush (+reverse) | Small | ~90% exists. `DodgeBurnMask.data` is a **signed** float32 exposure map in `[-1.5, 1.5]` (`raw_dodge_burn.py`); generalizing means re-encoding to a plain 0–1 alpha buffer. Stamping, edge-assist flood-fill, brush cursor, size/flow gestures all carry over. |
+| Radial mask (+reverse) | Small | Same alpha-ramp math as Linear, elliptical distance. **Recommend merging** the originally-separate "circular mask" into this as one primitive with a **Feather** parameter (0 = hard edge, 100 = soft falloff) — every commercial tool (Lightroom's Radial Gradient, Capture One's Radial Mask) models it this way; a separate hard-circle-only tool would just duplicate what Brush-at-a-fixed-size already covers. |
+| Sky Detection (+reverse) | Medium | Needs a real segmentation model (see correction above) — not free from a platform API. |
+| Focus/Subject detection (+reverse) | Medium | Vision (mac) / ONNX (win); see the AF-point-seeding idea above. |
+
+Reverse/invert is the same one-line op (`1 - alpha`) for all five — build it
+once in the shared mask chrome, not per-type.
+
+**Edit categories per mask** — Light, WB/Saturation/Vibrance, Tone Curve,
+HSL/Color Mixer, Sharpness/Clarity, **plus Dehaze** (added below). One scope
+call worth naming explicitly: **Tone Curve and full HSL/Color Mixer per mask
+exceed Lightroom Classic's own masking panel** (LR's masks get Light + WB +
+Saturation + Clarity/Dehaze/Texture + Sharpness/Noise, but no full parametric
+curve and no full 8-channel mixer inside a mask, even in current versions).
+This scope matches **Capture One Layers** instead, whose layer architecture is
+closer to true image layers. Worth deciding that target deliberately rather
+than discovering it mid-build.
+
+- **Light, WB/Sat/Vibrance:** direct reuse of existing global math
+  (`_apply_saturation_vibrance` in `raw_edit_pipeline.py`), only per-mask
+  compositing is new. **Include Temperature alongside Tint** — the original
+  list had Tint without Temp, an asymmetry: local white balance (both
+  together) is one of the most common real edits (warm a shaded face while a
+  sunlit background stays neutral), and every commercial tool ships both.
+- **Tone Curve is the single most expensive item, cost-wise.** Confirmed in
+  `raw_pv2012.py`: the global curve builds a **65,536-entry LUT** per
+  evaluation. Doing that N times per tick (once per mask) stacks directly on
+  top of Track A's per-mask compositing cost — the item to stress-test first
+  in the Phase 0 spike.
+- **HSL/Color Mixer** reuses the existing float32 HSV-scale math directly — a
+  per-pixel remap, not a rebuilt LUT, so meaningfully cheaper than Tone Curve
+  despite looking similarly "big."
+- **Sharpness/Clarity** has a concrete implementation trap: sharpening is a
+  neighborhood op, so filtering tightly cropped to a mask's bounding box
+  fringes at the edge (the kernel sees replicated/wrong border pixels right at
+  the boundary). `raw_spot_heal.py` already solved this exact problem — it
+  dilates its ROI before running Telea "so \[the filter\] has a clean border
+  of source pixels" (`raw_spot_heal.py:191`). Same pad-before-filter,
+  crop-after pattern applies here.
+- **Dehaze, added:** `raw_effects.py` already has global `apply_dehaze` — the
+  math exists, only regional compositing is new. Pairs narratively with Sky
+  Detection specifically ("dehaze the sky" is probably the most common reason
+  anyone masks a sky at all).
+
+**Not recommended for this scope:** per-mask Noise Reduction (deferred by
+request, despite the existing AI-denoise infra making it cheap) and per-body-
+part face/skin/hair masks (a materially bigger model + UI investment, out of
+scope here).
+
+**Other gaps found and now in scope:**
+- **Range masks (Color Range, Luminance Range)** — the biggest miss from the
+  original five/five list. Present in both Lightroom and Capture One, and
+  categorically different from every type above: they select by pixel *value*
+  (luminance/hue), not geometry or object identity ("everything above 80%
+  luminance" to grab a blown sky). Commonly combined with a brush or gradient
+  as a refinement rather than used standalone.
+- **Mask composability (Add/Subtract blend against the mask below).** This is
+  how Lightroom's own masking panel actually works internally — masks are
+  composed of sub-shapes, not siloed types. The common expert workflow
+  ("Select Subject, then Subtract the hand with a brush") needs this. Full
+  nested sub-component composability is a bigger UI lift; a cheaper interim
+  that gets most of the value: a simple **Add / Subtract blend mode per stack
+  entry** against the entry below it.
+- **Duplicate mask** (copy a mask + its settings) — minor, near-zero cost once
+  the data model exists.
+
+### Mask count / memory cap
+
+**Yes — cap it, on the same shape as focus stacking's `_MAX_FRAMES`.** Each
+masked layer isn't just an alpha buffer; per-mask *adjustments* (not just
+dodge/burn's single exposure gain) need their own full working RGB render to
+composite, plus a cache buffer to avoid recompute on unrelated slider ticks
+(mirroring the existing single-mask `_gain_cache` pattern). Estimated
+per-mask footprint at the mask's working resolution (which matches the
+half-res edit base, per `_dodge_burn_mask_shape`'s docstring — not full
+sensor res): **alpha buffer (4 B/px) + one float32 RGB working render
+(12 B/px) + cache overhead ≈ 16–24 B/px per mask.**
+
+| Sensor | Half-res working px | Memory per mask (16–24 B/px) | 10 masks | 20 masks |
+|---|---|---|---|---|
+| 24 MP | ~6.0 M px | ~96–144 MB | ~1.0–1.4 GB | ~2.0–2.9 GB |
+| 45 MP | ~7.7 M px | ~123–185 MB | ~1.2–1.8 GB | ~2.5–3.7 GB |
+| 61 MP | ~15 M px | ~240–360 MB | ~2.4–3.6 GB | ~4.8–7.2 GB |
+
+That's for the mask working set alone — on top of the base image, undo
+history, and the gallery/preview caches already resident. Unbounded N breaks
+**both** memory and the 80ms live-preview budget (more masks = more
+per-tick pipeline passes), so the cap is doing double duty, same as
+`_MAX_FRAMES` in focus stacking protects both RAM and correctness there.
+
+There's no hard precedent to match from a competitor — neither Lightroom nor
+Capture One enforce a UI-level cap — but community guidance in both
+consistently points at noticeable slowdown past a couple dozen complex masks
+on large files, which is roughly where the table above also turns
+uncomfortable.
+
+**Recommendation — two-part cap, mirroring `RAWVIEWER_FOCUS_STACK_MAX_FRAMES`:**
+1. **Byte-budget primary.** Compute `N × per-mask-bytes-at-current-resolution`
+   against a configurable budget (default ~1.5–2 GB, env-overridable). This
+   scales the *effective* limit with the image's actual working resolution —
+   more masks allowed on a 24 MP file than a 61 MP one — rather than a flat
+   count that's wrong at either extreme. (This also avoids repeating a mistake
+   already found and fixed elsewhere this session: the gallery thumbnail
+   cache was a **count-capped** `LRUCache(10000)` on a byte-varying resource,
+   which is exactly the wrong shape for this same reason.)
+2. **Hard count backstop** (default 24, env-overridable) regardless of bytes —
+   so a low-res image can't let someone create hundreds of masks and choke the
+   per-tick compositing loop even though bytes stay cheap.
+3. Reject with a clear message (same UX as `focus_stack`'s frame-count
+   rejection) rather than silently degrading — "Add Mask" disables past the
+   limit with a tooltip naming the reason, not a slowdown the user has to
+   diagnose themselves.
+
 ### Two tracks
 
 **Track A — general mask editing (the expensive one)**
@@ -72,7 +195,7 @@ dominant cost is generalizing the engine from one global adjustment set to
 | Pipeline generalization | Each masked layer renders its own adj set + alpha-blends. **The critical path** — perf vs the 80ms preview throttle (a single full-frame gain map already costs ~56ms). Needs per-mask stage caching. | Large |
 | Data model + XMP | List of `{mask, adjustments}` layers. Decide Lightroom `MaskGroupBasedCorrections` round-trip vs own sidecar schema — **early product decision**. | Medium–Large |
 | Mask UI | Mask list, per-mask scoped sliders (reuse slider components), overlay viz (`toggle_dodge_burn_show_mask` partly exists). | Medium–Large |
-| Mask primitives | Brush exists (refactor stamping to emit 0–1 alpha, not signed exposure); linear/radial gradients small; add/subtract/intersect + luminance/color range masks medium. | Small–Medium |
+| Mask primitives | Brush exists (refactor stamping to emit 0–1 alpha, not signed exposure); linear/radial gradients small (radial subsumes "circular" via Feather=0); Add/Subtract blend mode small; luminance/color range masks medium; per-mask Dehaze small (math already global). | Small–Medium |
 
 **Track B — rides on Track A's data model** (an AI mask is just another alpha
 layer). See [Object-Detection Masking](#object-detection-masking--evaluated).
@@ -83,7 +206,7 @@ layer). See [Object-Detection Masking](#object-detection-masking--evaluated).
 |---|---|---|
 | 0 | Data model + one brush mask driving a small adj subset (exp/contrast/temp) — the perf spike | ~1–1.5 wk |
 | 1 | Full per-mask adjustments + pipeline perf + mask-list UI | ~2–4 wk |
-| 2 | Linear/radial gradients, range/luminance masks, combination | ~1 wk |
+| 2 | Linear/radial gradients (feather-merged), color/luminance range masks, Add/Subtract blend, per-mask Dehaze, duplicate mask, mask-count cap | ~1.5 wk |
 | 3 | AI masks: subject/person/sky (Vision on mac, one ONNX model on win) + refinement | ~1.5–2 wk |
 | 4 | Click-to-segment (MobileSAM) | ~1–2 wk |
 
@@ -108,8 +231,23 @@ Auto-generate masks (subject / person / sky / arbitrary object). Well-supported
 and additive once masks exist — the infra is already proven in-repo.
 
 - **macOS:** `pyobjc-framework-Vision` + `CoreML` are already dependencies.
-  Vision gives person segmentation (`VNGeneratePersonSegmentationRequest`),
-  saliency-based subject selection, horizon/sky hints. Small–Medium per type.
+  Vision gives person segmentation (`VNGeneratePersonSegmentationRequest`) and
+  saliency-based subject selection. Small–Medium per type.
+- **Correction:** an earlier draft of this doc claimed Vision's horizon API
+  covers Sky detection — it doesn't. Vision's horizon request returns a **line
+  angle**, not a pixel mask (RAWviewer's own auto-straighten already gets this
+  classically, via Hough lines in `raw_auto_adjust.py`, no ML involved). A real
+  Sky mask needs a genuine small segmentation model, same as Subject/Person —
+  ship one cross-platform ONNX model rather than leaning on a platform API
+  that doesn't actually produce what's needed. Sizes below in [Masks — types &
+  edit categories](#masks--types--edit-categories-evaluated) already reflect
+  this.
+- **RAWviewer-specific opportunity:** the app already extracts the camera's AF
+  point (`exif_subject_area.py`) — a strong prior no generic photo tool has at
+  edit time (a JPEG viewer never sees the original capture metadata). Seeding
+  subject segmentation with the real focus point, rather than guessing from
+  pixels alone, is a plausible differentiator worth prototyping alongside the
+  base segmentation model.
 - **Windows/cross:** `onnxruntime` / `onnxruntime-directml` already ship (SCUNet,
   Restormer, MobileCLIP). Adding a segmentation model (U²-Net salient object,
   sky/person, or MobileSAM click-to-segment) is a solved pattern. Medium per
