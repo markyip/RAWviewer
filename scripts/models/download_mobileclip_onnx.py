@@ -21,7 +21,7 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "mobileclip_onnx"
 # Real SCUNet (scunet_color_real_psnr, official KAIR weights exported to ONNX),
 # stored in the repo via Git LFS. Pinned SHA-256 must match the LFS object.
 DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
-DENOISE_MODEL_SHA256 = "d1dd4cf53e589cbc6d76101415be8d709243233f1f4c4ba7e67ea33c65bbb1f5"
+DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 

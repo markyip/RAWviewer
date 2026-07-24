@@ -10,7 +10,7 @@ import numpy as np
 # Primary: real SCUNet (scunet_color_real_psnr, official KAIR weights exported
 # to ONNX, opset 18, fixed 512x512 input) stored in the repo via Git LFS.
 DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
-DENOISE_MODEL_SHA256 = "d1dd4cf53e589cbc6d76101415be8d709243233f1f4c4ba7e67ea33c65bbb1f5"
+DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
 # Legacy fallback: Restormer weights from the old release asset (what shipped
 # as "scunet.onnx" before the real SCUNet export existed).
 LEGACY_DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
