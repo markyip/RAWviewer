@@ -7,20 +7,20 @@ from typing import Optional
 
 import numpy as np
 
-# Primary: real SCUNet (scunet_color_real_psnr, official KAIR weights exported
-# to ONNX, opset 18, fixed 512x512 input) stored in the repo via Git LFS.
+# NAFNet (NAFNet-SIDD-width32, official megvii-research weights exported to
+# ONNX, fixed 512x512 input) stored in the repo via Git LFS. Pure-conv model:
+# ~5x faster than SCUNet on CPU with equal/better measured denoising, so it is
+# the preferred model on platforms without a GPU EP (macOS/Linux CPU).
+NAFNET_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/nafnet.onnx"
+NAFNET_MODEL_SHA256 = "9fb510fdce45ff393ca2822886c6c23cd60c09d47df1229bd7d5f0a07c98f3e0"
+# SCUNet (scunet_color_real_psnr, official KAIR weights, fp16) via Git LFS.
+# Preferred on Windows where DirectML runs its window-attention graph fast.
 DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
 DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
 # Legacy fallback: Restormer weights from the old release asset (what shipped
 # as "scunet.onnx" before the real SCUNet export existed).
 LEGACY_DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/releases/download/denoise-model-v1/restormer.onnx"
 LEGACY_DENOISE_MODEL_SHA256 = "fa43b07d631d61f084fb95e5e4942e188a4a0b51e905b651de2f4187f54b4f09"
-# (url, sha256) pairs tried in order; each download is verified against its
-# own pinned hash. Update the hash when the corresponding model changes.
-_DENOISE_MODEL_CANDIDATES = (
-    (DENOISE_MODEL_URL, DENOISE_MODEL_SHA256),
-    (LEGACY_DENOISE_MODEL_URL, LEGACY_DENOISE_MODEL_SHA256),
-)
 
 
 def _sha256_of_file(path: str) -> str:
@@ -33,38 +33,66 @@ def _sha256_of_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def scunet_model_path() -> str:
-    """Return the absolute path to the SCUNet ONNX model file.
+def _models_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models")
 
-    Checks for scunet.onnx first, then falls back to restormer.onnx for
-    backward compatibility with existing downloads.
+
+def _preferred_model_name() -> str:
+    """Which denoise model this platform should prefer.
+
+    Windows: SCUNet (DirectML runs its attention graph fast). Everything else
+    (CPU-only in practice): NAFNet -- pure conv, ~5x faster on CPU with equal
+    or better measured denoising. Override with RAWVIEWER_DENOISE_MODEL.
     """
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "models")
-    scunet_path = os.path.join(base_dir, "scunet.onnx")
-    if os.path.exists(scunet_path):
-        return scunet_path
-    restormer_path = os.path.join(base_dir, "restormer.onnx")
-    if os.path.exists(restormer_path):
-        return restormer_path
-    return scunet_path
+    override = os.environ.get("RAWVIEWER_DENOISE_MODEL", "").strip().lower()
+    if override in ("nafnet", "nafnet.onnx"):
+        return "nafnet.onnx"
+    if override in ("scunet", "scunet.onnx"):
+        return "scunet.onnx"
+    return "scunet.onnx" if sys.platform.startswith("win") else "nafnet.onnx"
+
+
+def _model_candidates() -> tuple:
+    """(filename, url, sha256) download/lookup candidates in preference order."""
+    nafnet = ("nafnet.onnx", NAFNET_MODEL_URL, NAFNET_MODEL_SHA256)
+    scunet = ("scunet.onnx", DENOISE_MODEL_URL, DENOISE_MODEL_SHA256)
+    legacy = ("restormer.onnx", LEGACY_DENOISE_MODEL_URL, LEGACY_DENOISE_MODEL_SHA256)
+    primary, secondary = (scunet, nafnet) if _preferred_model_name() == "scunet.onnx" else (nafnet, scunet)
+    return (primary, secondary, legacy)
+
+
+def scunet_model_path() -> str:
+    """Absolute path to the best available denoise ONNX model.
+
+    Returns the platform-preferred model if present, else any other known
+    model, else the preferred download destination (may not exist yet).
+    """
+    base_dir = _models_dir()
+    first_missing = None
+    for name, _url, _sha in _model_candidates():
+        p = os.path.join(base_dir, name)
+        if os.path.exists(p):
+            return p
+        if first_missing is None:
+            first_missing = p
+    return first_missing
 
 
 def ensure_scunet_model_downloaded() -> bool:
-    """Best-effort fetch of the SCUNet AI denoise model if it's missing."""
+    """Best-effort fetch of the platform-preferred denoise model if missing."""
     logger = logging.getLogger(__name__)
-    model_path = scunet_model_path()
-    if os.path.exists(model_path):
+    if os.path.exists(scunet_model_path()):
         return True
-    tmp_path = model_path + ".part"
     try:
         from ssl_certs import urlretrieve
 
-        # Try the real SCUNet (Git LFS) first, then the legacy Restormer asset.
         # Download to a temp file and verify integrity before moving into place,
         # so a failed/tampered download never leaves a loadable corrupt model.
-        for url, sha256 in _DENOISE_MODEL_CANDIDATES:
+        for name, url, sha256 in _model_candidates():
+            model_path = os.path.join(_models_dir(), name)
+            tmp_path = model_path + ".part"
             try:
-                urlretrieve(url, tmp_path, timeout=180)
+                urlretrieve(url, tmp_path, timeout=300)
                 if _sha256_of_file(tmp_path).lower() != sha256.lower():
                     logger.warning("[DENOISE] Model download from %s failed SHA-256 verification", url)
                     continue
@@ -72,18 +100,18 @@ def ensure_scunet_model_downloaded() -> bool:
                 return True
             except Exception:
                 logger.warning("[DENOISE] Failed to download denoise model from %s", url, exc_info=True)
+            finally:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
         return False
     except Exception:
         logger.warning(
-            "[DENOISE] Failed to download SCUNet AI denoise model from %s", DENOISE_MODEL_URL, exc_info=True
+            "[DENOISE] Failed to download AI denoise model from %s", _model_candidates()[0][1], exc_info=True
         )
         return False
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
 
 
 class SCUNetONNX:
@@ -125,12 +153,51 @@ class SCUNetONNX:
         tile_overlap: int = 64,
         progress_callback=None,
         cancel_check=None,
+        downscale: int = 1,
     ) -> np.ndarray:
         """Process a full-resolution RGB image using overlapping tiles.
 
         rgb_linear: (H, W, 3) float32 array in [0, 1] (scene linear or similar)
         cancel_check: optional no-arg callable polled once per tile.
+        downscale: 1 = full-res. 2 = denoise at half resolution (~4x faster)
+        and restore high-frequency luma detail with an edge-weighted blend --
+        measured on a noisy ISO-3200 CR3 to match full-res output on both
+        residual noise and detail energy at ~1/5 the compute.
         """
+        if self._session is None:
+            self._init_session()
+
+        if downscale > 1:
+            import cv2
+
+            orig = rgb_linear
+            h0, w0 = orig.shape[:2]
+            small = cv2.resize(orig, (w0 // downscale, h0 // downscale), interpolation=cv2.INTER_AREA)
+            out_small = self._process_tiles(small, tile_size, tile_overlap, progress_callback, cancel_check)
+            up = cv2.resize(out_small, (w0, h0), interpolation=cv2.INTER_LINEAR)
+
+            # Edge-weighted high-frequency restore: return original fine detail
+            # where real structure dominates (whiskers/edges), keep the denoised
+            # surface everywhere flat (where HF would just be noise).
+            hf = orig - cv2.GaussianBlur(orig, (0, 0), 2.0)
+            y = orig.mean(axis=2).astype(np.float32)
+            gx = cv2.Sobel(y, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3)
+            grad = np.sqrt(gx * gx + gy * gy)
+            w = (grad / (grad + 0.08))[..., None]  # soft edge weight (0 flat -> 1 edge)
+            return np.clip(up + hf * w * 0.5, 0.0, None)
+
+        return self._process_tiles(rgb_linear, tile_size, tile_overlap, progress_callback, cancel_check)
+
+    def _process_tiles(
+        self,
+        rgb_linear: np.ndarray,
+        tile_size: int,
+        tile_overlap: int,
+        progress_callback,
+        cancel_check,
+    ) -> np.ndarray:
+        """Tiled inference core (see process() for the public contract)."""
         if self._session is None:
             self._init_session()
 

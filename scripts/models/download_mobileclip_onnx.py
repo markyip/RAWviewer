@@ -18,10 +18,17 @@ from pathlib import Path
 
 REPO_ID = "plhery/mobileclip2-onnx"
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "mobileclip_onnx"
-# Real SCUNet (scunet_color_real_psnr, official KAIR weights exported to ONNX),
-# stored in the repo via Git LFS. Pinned SHA-256 must match the LFS object.
-DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
-DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
+# AI denoise model via Git LFS, same per-platform preference as the runtime
+# (src/onnx_scunet.py): SCUNet on Windows (DirectML), NAFNet elsewhere (CPU).
+# Pinned SHA-256 must match the LFS object.
+if sys.platform.startswith("win"):
+    DENOISE_MODEL_FILENAME = "scunet.onnx"
+    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
+    DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
+else:
+    DENOISE_MODEL_FILENAME = "nafnet.onnx"
+    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/nafnet.onnx"
+    DENOISE_MODEL_SHA256 = "9fb510fdce45ff393ca2822886c6c23cd60c09d47df1229bd7d5f0a07c98f3e0"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3
 
@@ -184,11 +191,12 @@ def main() -> int:
 
         shutil.rmtree(MODELS_DIR / "onnx")
 
-    denoise_model_path = MODELS_DIR.parent / "scunet.onnx"
-    legacy_denoise_model_path = MODELS_DIR.parent / "restormer.onnx"
-    if not denoise_model_path.exists() and not legacy_denoise_model_path.exists():
+    denoise_model_path = MODELS_DIR.parent / DENOISE_MODEL_FILENAME
+    # Any already-present runtime-loadable model satisfies the requirement.
+    alt_models = [MODELS_DIR.parent / n for n in ("scunet.onnx", "nafnet.onnx", "restormer.onnx")]
+    if not any(p.exists() for p in alt_models):
         def _fetch_denoise_model():
-            print("[INFO] Fetching AI denoise model (SCUNet ONNX)", flush=True)
+            print(f"[INFO] Fetching AI denoise model ({DENOISE_MODEL_FILENAME})", flush=True)
             _download_url_with_progress(
                 DENOISE_MODEL_URL,
                 denoise_model_path,
