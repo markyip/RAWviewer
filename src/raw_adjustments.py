@@ -58,6 +58,10 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "Defringe": 0.0,
     "ColorNoiseReduction": 0.0,
     "LuminanceNoiseReduction": 0.0,
+    # AI denoise detail preservation (export-only): 0 = maximum smoothness,
+    # 100 = maximum original fine detail. Drives the half-res AI denoise
+    # edge-weighted high-frequency restore gain in onnx_scunet.process().
+    "DenoiseDetail": 50.0,
     "ParametricShadows": 0.0,
     "ParametricDarks": 0.0,
     "ParametricLights": 0.0,
@@ -275,6 +279,7 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("Clarity2012", "Clarity", -100, 100, 0.0),
     _slider_linear("Defringe", "Defringe", 0, 100, 0.0),
     _slider_linear("LuminanceNoiseReduction", "Luma NR", 0, 100, 0.0, fmt=lambda x: f"{x:.0f}"),
+    _slider_linear("DenoiseDetail", "AI Detail", 0, 100, 50.0, fmt=lambda x: f"{x:.0f}"),
     # Transform (raw_transform.py). Straighten in 0.1-degree steps; keystone
     # sliders mirror Lightroom's slider-based Transform panel; crop insets as
     # per-edge percentages (stored as fractions).
@@ -1005,6 +1010,10 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
         # Strength only matters with a painted mask; alone it must not keep
         # an otherwise-empty sidecar after Reset.
         if key == "DodgeBurnStrength":
+            continue
+        # Export-only AI-denoise knob: changes nothing in the pixel pipeline,
+        # so it must not mark the image as edited on its own.
+        if key == "DenoiseDetail":
             continue
         try:
             av = float(adj.get(key, default) if adj.get(key, default) is not None else default)

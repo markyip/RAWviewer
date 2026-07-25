@@ -321,10 +321,12 @@ def _process_linear_edit_tail(
         # measured to match full-res on noise/detail metrics). Set
         # RAWVIEWER_AI_DENOISE_FULLRES=1 to force full-resolution inference.
         downscale = 1 if os.environ.get("RAWVIEWER_AI_DENOISE_FULLRES", "0") == "1" else 2
+        detail_gain = float(merged.get("DenoiseDetail", 50.0)) / 100.0
         logger.info(
-            "[DENOISE] Using AI denoise (model=%s, %s) for this export",
+            "[DENOISE] Using AI denoise (model=%s, %s, detail=%.0f%%) for this export",
             os.path.basename(model_path),
             "full-res" if downscale == 1 else "half-res+detail-restore",
+            detail_gain * 100.0,
         )
         scunet = SCUNetONNX(model_path)
 
@@ -333,7 +335,11 @@ def _process_linear_edit_tail(
                 progress_cb(frac)
 
         img = scunet.process(
-            img, cancel_check=cancel_check, progress_callback=_denoise_progress, downscale=downscale
+            img,
+            cancel_check=cancel_check,
+            progress_callback=_denoise_progress,
+            downscale=downscale,
+            detail_gain=detail_gain,
         )
 
         # Legacy luma NR still applies on top if the user set it explicitly.

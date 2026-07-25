@@ -1139,7 +1139,7 @@ class ImageAdjustPanelWidget(QWidget):
                     target_sect = self.sect_curve
             elif spec.key in {"Sharpness", "Clarity2012", "Defringe"}:
                 target_sect = self.sect_detail
-            elif spec.key in {"LuminanceNoiseReduction"}:
+            elif spec.key in {"LuminanceNoiseReduction", "DenoiseDetail"}:
                 target_sect = self.sect_noise
             elif spec.key in {
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",

@@ -154,6 +154,7 @@ class SCUNetONNX:
         progress_callback=None,
         cancel_check=None,
         downscale: int = 1,
+        detail_gain: float = 0.5,
     ) -> np.ndarray:
         """Process a full-resolution RGB image using overlapping tiles.
 
@@ -163,6 +164,9 @@ class SCUNetONNX:
         and restore high-frequency luma detail with an edge-weighted blend --
         measured on a noisy ISO-3200 CR3 to match full-res output on both
         residual noise and detail energy at ~1/5 the compute.
+        detail_gain: 0.0 = pure denoised surface (maximum smoothness),
+        1.0 = full original high-frequency detail at edges (maximum detail,
+        noise included). 0.5 measured to match full-res output metrics.
         """
         if self._session is None:
             self._init_session()
@@ -185,7 +189,8 @@ class SCUNetONNX:
             gy = cv2.Sobel(y, cv2.CV_32F, 0, 1, ksize=3)
             grad = np.sqrt(gx * gx + gy * gy)
             w = (grad / (grad + 0.08))[..., None]  # soft edge weight (0 flat -> 1 edge)
-            return np.clip(up + hf * w * 0.5, 0.0, None)
+            gain = max(0.0, min(1.0, float(detail_gain)))
+            return np.clip(up + hf * w * gain, 0.0, None)
 
         return self._process_tiles(rgb_linear, tile_size, tile_overlap, progress_callback, cancel_check)
 
