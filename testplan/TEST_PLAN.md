@@ -74,6 +74,11 @@ Run after significant display/editing changes:
 - [ ] R6 Mark III (or other misparsed-WB body) files: no pink/red cast in browse, editor, export
 - [ ] Shadows/Blacks +100 on an underexposed RAW: strong recovery, blacks stay black, no grey veil, colors survive
 - [ ] Export TIFF/JPEG of an edited file matches the on-screen preview
+- [ ] Masks section: Add Mask arms Paint; strokes deposit visible coverage (overlay M); mask sliders (Exposure/Sat/etc.) affect ONLY the painted region live
+- [ ] Masks: Erase removes coverage; Invert flips the affected region; disabling a layer (checkbox) removes its effect immediately
+- [ ] Masks: paint two overlapping masks with different adjustments — both apply, later layer composites over earlier
+- [ ] Masks: edit → close editor → reopen file: mask layers, names, and slider values restore from XMP; undo (Cmd/Ctrl+Z) steps mask edits back
+- [ ] Masks vs Dodge/Burn: arming one brush disarms the other (buttons and D/B/X/H hotkeys); brush size/flow/Edge Assist shared from Local section
 
 ## When to run
 

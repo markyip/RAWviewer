@@ -82,7 +82,11 @@ def main() -> int:
         check("default adjustments delete sidecar", not os.path.isfile(resolve_xmp_path(img)))
 
         # Identity tone-curve serial must count as default (Reset / clear).
-        from raw_adjustments import is_default_adjustments, tone_curve_serial_is_active
+        from raw_adjustments import (
+            is_default_adjustments,
+            is_default_adjustments_for_sidecar,
+            tone_curve_serial_is_active,
+        )
 
         ident = dict(DEFAULT_ADJUSTMENTS)
         ident[AS_SHOT_TEMP_KEY] = 5500.0
@@ -117,6 +121,36 @@ def main() -> int:
         check(
             "merge round-trip Exposure",
             abs(float(back2.get("Exposure2012", 0)) - 0.5) < 0.01,
+        )
+
+        # Regression: DenoiseDetail is deliberately excluded from
+        # is_default_adjustments (it's an export-only knob invisible to the
+        # live preview, so it shouldn't mark a file "edited" for the
+        # gallery badge) -- but that same check used to gate the sidecar
+        # write/clear decision too, so a DenoiseDetail-ONLY change (every
+        # other slider left at default) was silently dropped on save
+        # instead of persisted. is_default_adjustments_for_sidecar fixes
+        # the write-path decision while leaving the badge check untouched.
+        img2 = os.path.join(tmpd, "detail_only.NEF")
+        with open(img2, "wb") as f:
+            f.write(b"fake")
+        detail_only = dict(DEFAULT_ADJUSTMENTS)
+        detail_only[AS_SHOT_TEMP_KEY] = 5500.0
+        detail_only["DenoiseDetail"] = 80.0
+        check(
+            "a DenoiseDetail-only change is NOT flagged as edited (gallery badge stays off)",
+            is_default_adjustments(detail_only),
+        )
+        check(
+            "but the sidecar write decision must treat it as non-default (must persist)",
+            not is_default_adjustments_for_sidecar(detail_only),
+        )
+        write_xmp_adjustments_for_file(img2, detail_only)
+        check("sidecar written for a DenoiseDetail-only change", os.path.isfile(resolve_xmp_path(img2)))
+        back3 = load_adjustments_for_file(img2)
+        check(
+            "DenoiseDetail survives a DenoiseDetail-only save + reload",
+            abs(float(back3.get("DenoiseDetail", 0.0)) - 80.0) < 0.01,
         )
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)

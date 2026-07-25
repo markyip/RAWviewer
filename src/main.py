@@ -2083,6 +2083,52 @@ class _AdjustMaskLoadWorker(QRunnable):
         self.signals.finished.emit(self.generation, self.file_path, db_mask, heal_mask)
 
 
+class _AIMaskSignals(QObject):
+    # generation, file_path, kind, alpha|None
+    finished = pyqtSignal(int, str, str, object)
+
+
+class _AIMaskWorker(QRunnable):
+    """Run a raw_ai_masks segmentation model off the UI thread.
+
+    BiRefNet at 1024^2 costs ~0.5-2s on CPU and the MobileSAM encoder is
+    in the same range, so this cannot run inline -- unlike the SAM
+    *decoder*, which is milliseconds and stays on the UI thread so clicks
+    feel immediate (see MainWindow._on_mask_ai_click).
+    """
+
+    def __init__(self, generation: int, file_path: str, kind: str, rgb, target_hw, signals):
+        super().__init__()
+        self.generation = generation
+        self.file_path = file_path
+        self.kind = kind
+        self.rgb = rgb
+        self.target_hw = target_hw
+        self.signals = signals
+
+    def run(self) -> None:
+        alpha = None
+        try:
+            import raw_ai_masks
+
+            if self.kind == "sky":
+                alpha = raw_ai_masks.segment_sky(self.rgb, self.target_hw)
+            elif self.kind == "subject":
+                alpha = raw_ai_masks.segment_subject(self.rgb, self.target_hw)
+            elif self.kind == "sam_encode":
+                predictor = raw_ai_masks.SamPredictor()
+                if predictor.set_image(self.rgb, image_key=self.file_path):
+                    alpha = predictor
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[AIMASK] %s worker failed", self.kind, exc_info=True
+            )
+            alpha = None
+        self.signals.finished.emit(self.generation, self.file_path, self.kind, alpha)
+
+
 class _AdjustPreviewSignals(QObject):
     finished = pyqtSignal(int, str, object)  # generation, file_path, ndarray|None
 
@@ -8943,6 +8989,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.dodge_burn_brush_changed.connect(
                 self._sync_dodge_burn_brush_cursor
             )
+            self.single_image_adjust_panel.mask_add_requested.connect(
+                self._on_mask_layer_add
+            )
+            self.single_image_adjust_panel.mask_delete_requested.connect(
+                self._on_mask_layer_delete
+            )
+            self.single_image_adjust_panel.mask_duplicate_requested.connect(
+                self._on_mask_layer_duplicate
+            )
+            self.single_image_adjust_panel.mask_ai_requested.connect(
+                self._on_mask_ai_requested
+            )
+            self.single_image_adjust_panel.mask_layer_mode_changed.connect(
+                self._on_mask_layer_mode_changed
+            )
             self.single_image_adjust_panel.xmp_preset_applied.connect(
                 self._on_xmp_preset_applied
             )
@@ -9007,6 +9068,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_hist_sync_timer.timeout.connect(self._sync_single_image_histogram)
         self._dodge_burn_mask = None
         self._spot_heal_mask = None
+        self._mask_layer_stack = None
         self._dodge_burn_stroke_active = False
         self._dodge_burn_stroke_baseline = None
         self._dodge_burn_mask_at_stroke_start = None
@@ -21632,6 +21694,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             db_serial = str(loaded_adj.get(MASK_KEY, "") or "")
             heal_serial = str(loaded_adj.get(HEAL_MASK_KEY, "") or "")
+
+            # Mask layers hydrate synchronously (v1): unlike the dodge/burn
+            # blob below they must be MUTABLE (the Masks panel edits them in
+            # place), so the shared read-only deserialize cache is not usable.
+            from mask_layers_xmp import deserialize_stack as _deserialize_mask_stack
+            from raw_mask_layers import MASK_LAYERS_KEY as _ML_KEY
+
+            ml_serial = str(loaded_adj.get(_ML_KEY, "") or "")
+            self._mask_layer_stack = (
+                _deserialize_mask_stack(ml_serial) if ml_serial else None
+            )
+            if hasattr(panel, "set_mask_layer_stack"):
+                panel.set_mask_layer_stack(self._mask_layer_stack)
             # Always clear the PREVIOUS file's mask objects synchronously,
             # even when this file has its own mask to decode -- the actual
             # decode happens async further below (off the UI thread), and
@@ -22410,10 +22485,451 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _on_dodge_burn_mode_changed(self, mode) -> None:
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
-            gv.set_dodge_burn_mode(mode is not None)
+            # The GPU view's brush-stroke mode serves BOTH brush systems
+            # (dodge/burn/heal and mask-layer paint/erase) -- disarming one
+            # must not kill an armed tool of the other.
+            gv.set_dodge_burn_mode(self._any_brush_tool_armed())
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
         self._sync_dodge_burn_mask_overlay()
+
+    def _any_brush_tool_armed(self) -> bool:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return False
+        if panel.dodge_burn_mode() is not None:
+            return True
+        mode_fn = getattr(panel, "mask_layer_mode", None)
+        return mode_fn is not None and mode_fn() is not None
+
+    # ------------------------------------------------------------------
+    # Mask layers (Masks section -- raw_mask_layers.MaskLayerStack)
+    # ------------------------------------------------------------------
+
+    def _on_mask_layer_add(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        if panel is None or mask_shape is None:
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                self.status_bar.showMessage(
+                    "Open an image in the editor before adding a mask.", 3000
+                )
+            return
+        from raw_mask_layers import MaskLayer, MaskLayerStack
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is None:
+            stack = MaskLayerStack()
+            self._mask_layer_stack = stack
+        mh, mw = mask_shape
+        stack.layers.append(
+            MaskLayer.empty(mh, mw, name=f"Mask {len(stack.layers) + 1}")
+        )
+        panel.set_mask_layer_stack(stack)
+        panel.select_mask_index(len(stack.layers) - 1)
+        # Arm Paint right away -- an empty mask renders nothing, so the only
+        # sensible next action after Add is painting coverage.
+        if hasattr(panel, "arm_mask_paint"):
+            panel.arm_mask_paint()
+
+    def _on_mask_layer_delete(self, index: int) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if panel is None or stack is None or not (0 <= index < len(stack.layers)):
+            return
+        del stack.layers[index]
+        if not stack.layers:
+            self._mask_layer_stack = None
+            stack = None
+        panel.set_mask_layer_stack(stack)
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    def _on_mask_layer_duplicate(self, index: int) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if panel is None or stack is None or not (0 <= index < len(stack.layers)):
+            return
+        from raw_mask_layers import MaskLayer
+
+        src = stack.layers[index]
+        copy = MaskLayer(
+            src.alpha.copy(),
+            adjustments=dict(src.adjustments),
+            name=(src.name or f"Mask {index + 1}") + " copy",
+            enabled=src.enabled,
+            invert=src.invert,
+            blend=src.blend,
+        )
+        stack.layers.insert(index + 1, copy)
+        panel.set_mask_layer_stack(stack)
+        panel.select_mask_index(index + 1)
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    # -- AI masks (raw_ai_masks) ---------------------------------------
+
+    def _ai_mask_source_rgb(self):
+        """RGB buffer the segmentation models run on.
+
+        The post-decode edit base -- the same buffer the mask alpha is
+        sized against, so click coordinates and the returned alpha share
+        one coordinate space with no extra mapping. It can overshoot 1.0
+        at speculars; raw_ai_masks._to_float_rgb clamps, since these nets
+        expect display-referred input.
+        """
+        buf = getattr(self, "_adjust_preview_base_rgb", None)
+        if buf is not None and hasattr(buf, "shape") and getattr(buf, "ndim", 0) == 3:
+            return buf
+        return None
+
+    def _on_mask_ai_requested(self, kind: str) -> None:
+        """One-shot AI mask (Subject / Sky) -> a new mask layer."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        rgb = self._ai_mask_source_rgb()
+        if panel is None or mask_shape is None or rgb is None:
+            self._show_status("Open an image in the editor before using AI masks.", 3000)
+            return
+        if getattr(self, "_ai_mask_busy", False):
+            return
+
+        try:
+            import raw_ai_masks
+        except Exception:
+            self._show_status("AI masks unavailable (onnxruntime missing).", 4000)
+            return
+
+        if not raw_ai_masks.op_is_ready(kind):
+            # First use on macOS: the weights download on demand, exactly
+            # like the denoise models. Say so rather than looking hung.
+            self._show_status(f"Downloading {kind} model (first use)...", 0)
+
+        self._ai_mask_busy = True
+        self._set_ai_mask_buttons_enabled(False)
+        self._show_status(f"Finding {kind}...", 0)
+
+        signals = _AIMaskSignals()
+        signals.finished.connect(self._on_ai_mask_finished)
+        self._ai_mask_signals = signals  # keep alive
+        worker = _AIMaskWorker(
+            int(getattr(self, "_adjust_preview_gen", 0) or 0),
+            str(getattr(self, "current_file_path", "") or ""),
+            kind,
+            rgb,
+            mask_shape,
+            signals,
+        )
+        _get_bg_thread_pool().start(worker)
+
+    def _set_ai_mask_buttons_enabled(self, enabled: bool) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        for name in ("_mask_ai_subject_btn", "_mask_ai_sky_btn", "_mask_ai_click_btn"):
+            btn = getattr(panel, name, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
+
+    def _on_ai_mask_finished(self, generation: int, file_path: str, kind: str, result) -> None:
+        self._ai_mask_busy = False
+        self._set_ai_mask_buttons_enabled(True)
+
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        # Staleness is keyed on the FILE, not _adjust_preview_gen: that
+        # counter bumps on every slider tick, so a gen guard would throw
+        # away a good mask just because the user nudged Exposure while the
+        # model was running. Navigating to another photo is the only thing
+        # that actually invalidates this result.
+        if file_path and file_path != str(getattr(self, "current_file_path", "") or ""):
+            return
+
+        if kind == "sam_encode":
+            if result is None:
+                self._show_status("Click-to-select unavailable.", 4000)
+                return
+            self._sam_predictor = result
+            self._show_status("Click the photo to select something.", 3000)
+            return
+
+        if result is None:
+            self._show_status(
+                f"Could not find a {kind} in this photo.", 4000
+            )
+            return
+
+        self._add_mask_layer_from_alpha(result, name=f"AI {kind.capitalize()}")
+        self._show_status(f"{kind.capitalize()} mask added.", 2500)
+
+    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True):
+        """Wrap a model-produced alpha in a MaskLayer and push it on the stack.
+
+        The layer is an ordinary MaskLayer from here on -- brushable,
+        erasable, invertible, and serialized by mask_layers_xmp like any
+        hand-painted one. Nothing downstream knows it came from a model.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return None
+        import numpy as np
+
+        from raw_mask_layers import MaskLayer, MaskLayerStack
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is None:
+            stack = MaskLayerStack()
+            self._mask_layer_stack = stack
+
+        layer = MaskLayer(np.ascontiguousarray(alpha, dtype=np.float32), name=name)
+        layer.touch()
+        stack.layers.append(layer)
+        panel.set_mask_layer_stack(stack)
+        if select:
+            panel.select_mask_index(len(stack.layers) - 1)
+        # Unlike Add Mask (which arms Paint because an empty mask renders
+        # nothing), an AI mask already has coverage -- the useful next
+        # action is moving a slider, so leave the brushes disarmed.
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        return layer
+
+    def _on_mask_ai_click(self, pt) -> bool:
+        """Handle a canvas click while the AI Click tool is armed.
+
+        Returns True if the click was consumed. The first click on a photo
+        kicks off the encoder in the background (and consumes the click);
+        subsequent clicks run only the decoder, inline, in milliseconds.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        if panel is None or mask_shape is None:
+            return False
+        mh, mw = mask_shape
+
+        predictor = getattr(self, "_sam_predictor", None)
+        current = str(getattr(self, "current_file_path", "") or "")
+        if predictor is None or getattr(self, "_sam_predictor_path", None) != current:
+            rgb = self._ai_mask_source_rgb()
+            if rgb is None or getattr(self, "_ai_mask_busy", False):
+                return True
+            self._sam_predictor = None
+            self._sam_predictor_path = current
+            self._sam_points = []
+            self._ai_mask_busy = True
+            self._set_ai_mask_buttons_enabled(False)
+            self._show_status("Analysing image for click-to-select...", 0)
+            signals = _AIMaskSignals()
+            signals.finished.connect(self._on_ai_mask_finished)
+            self._ai_mask_signals = signals
+            _get_bg_thread_pool().start(
+                _AIMaskWorker(
+                    int(getattr(self, "_adjust_preview_gen", 0) or 0),
+                    current,
+                    "sam_encode",
+                    rgb,
+                    (mh, mw),
+                    signals,
+                )
+            )
+            return True
+
+        mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
+        rgb = self._ai_mask_source_rgb()
+        if rgb is None:
+            return True
+        # Points are in the source RGB's coordinate space, which may differ
+        # in scale from the mask buffer.
+        sh, sw = int(rgb.shape[0]), int(rgb.shape[1])
+        points = list(getattr(self, "_sam_points", []) or [])
+        points.append((float(mx) * sw / max(1, mw), float(my) * sh / max(1, mh)))
+        self._sam_points = points
+
+        alpha = predictor.predict(points, [1] * len(points), (mh, mw))
+        if alpha is None:
+            self._show_status("Nothing selected there.", 2500)
+            return True
+
+        # Successive clicks refine one selection rather than stacking new
+        # layers, so replace the alpha of the layer this tool created.
+        target = getattr(self, "_sam_layer", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if (
+            target is not None
+            and stack is not None
+            and target in stack.layers
+            and len(points) > 1
+        ):
+            import numpy as np
+
+            target.alpha = np.ascontiguousarray(alpha, dtype=np.float32)
+            target.touch()
+            panel.set_mask_layer_stack(stack)
+            self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        else:
+            self._sam_layer = self._add_mask_layer_from_alpha(alpha, name="AI Selection")
+        return True
+
+    def _reset_ai_mask_state(self) -> None:
+        """Drop per-image AI mask state (call on file change)."""
+        self._sam_predictor = None
+        self._sam_predictor_path = None
+        self._sam_points = []
+        self._sam_layer = None
+
+    def _show_status(self, message: str, timeout: int = 3000) -> None:
+        bar = getattr(self, "status_bar", None)
+        if bar is not None:
+            bar.showMessage(message, timeout)
+
+    def _on_mask_layer_mode_changed(self, mode) -> None:
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None:
+            gv.set_dodge_burn_mode(self._any_brush_tool_armed())
+            if mode is not None:
+                self._sync_dodge_burn_brush_cursor()
+        # Show painted coverage while a mask brush is armed: reuse the
+        # dodge/burn overlay path with a shim (alpha 0..1 renders in the
+        # overlay's dodge tint).
+        self._sync_mask_layer_overlay()
+
+    def _sync_mask_layer_overlay(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        gv = getattr(self, "gpu_view", None)
+        if panel is None or gv is None or not hasattr(gv, "update_dodge_burn_mask"):
+            return
+        mode_fn = getattr(panel, "mask_layer_mode", None)
+        if mode_fn is None or mode_fn() is None:
+            # Leaving mask-brush mode: fall back to whatever the dodge/burn
+            # overlay state should be showing.
+            self._sync_dodge_burn_mask_overlay()
+            return
+        stack = getattr(self, "_mask_layer_stack", None)
+        idx = panel.active_mask_index()
+        if stack is None or idx is None:
+            return
+        try:
+            from raw_dodge_burn import DodgeBurnMask
+
+            layer = stack.layers[idx]
+            if panel.dodge_burn_show_mask():
+                gv.update_dodge_burn_mask(DodgeBurnMask(layer.alpha))
+        except Exception:
+            pass
+
+    def _ensure_brush_guides(self, mh: int, mw: int):
+        """(luma, chroma) edge-assist guides at mask resolution, cached.
+
+        Same guides `_on_dodge_burn_stroke` builds inline; factored so the
+        mask-layer stroke path shares them without duplicating the build.
+        """
+        luma = getattr(self, "_dodge_burn_luma_guide", None)
+        chroma_guide = getattr(self, "_dodge_burn_chroma_guide", None)
+        if luma is not None and getattr(luma, "shape", None) == (mh, mw):
+            return luma, chroma_guide
+        try:
+            base = getattr(self, "_adjust_preview_base_rgb", None)
+            if base is None or not hasattr(base, "shape"):
+                return None, None
+            from raw_edit_pipeline import _linear_float_from_buffer
+
+            b = _linear_float_from_buffer(base)
+            if b.shape[0] != mh or b.shape[1] != mw:
+                import cv2
+
+                b = cv2.resize(b, (mw, mh), interpolation=cv2.INTER_AREA)
+            luma = (
+                0.2126 * b[..., 0] + 0.7152 * b[..., 1] + 0.0722 * b[..., 2]
+            ).astype(np.float32)
+            chroma_guide = np.stack(
+                [b[..., 0] - luma, b[..., 2] - luma], axis=-1
+            ).astype(np.float32)
+            self._dodge_burn_luma_guide = luma
+            self._dodge_burn_chroma_guide = chroma_guide
+            return luma, chroma_guide
+        except Exception:
+            return None, None
+
+    def _on_mask_layer_stroke(self, pt, pressure: float, is_end: bool) -> None:
+        """Brush stroke routed to the active mask layer (paint or erase).
+
+        Simpler than the dodge/burn stroke path (no per-stamp display patch
+        blit): stamps mutate the layer alpha, and the normal preview worker
+        re-renders on a ~120ms throttle -- acceptable for v1, revisit if
+        painting feels laggy on large bases.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        mode = panel.mask_layer_mode()
+        if mode == "ai_click":
+            # Click-to-select is a discrete click, not a drag: act once on
+            # stroke end so a wobbling cursor doesn't fire N decoder runs.
+            if is_end:
+                self._on_mask_ai_click(pt)
+            return
+        mask_shape = self._dodge_burn_mask_shape()
+        stack = getattr(self, "_mask_layer_stack", None)
+        idx = panel.active_mask_index()
+        if mode is None or mask_shape is None or stack is None or idx is None:
+            return
+        try:
+            from raw_mask_layers import (
+                erase_mask_layer_brush,
+                stamp_mask_layer_brush,
+            )
+
+            mh, mw = mask_shape
+            layer = stack.layers[idx]
+            if layer.alpha.shape != (mh, mw):
+                # Edit-base resolution changed since the layer was created
+                # (fast vs full base) -- carry existing paint across.
+                from raw_mask_layers import resize_alpha_to
+
+                layer.alpha = resize_alpha_to(layer.alpha, mh, mw).copy()
+                layer.touch()
+
+            mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
+            disp = self._adjust_display_pixel_size()
+            disp_w = disp[0] if disp is not None else mw
+            sx = mw / max(1, disp_w)
+            radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
+            strength = panel.dodge_burn_brush_strength() * max(0.05, float(pressure))
+
+            luma, chroma_guide = self._ensure_brush_guides(mh, mw)
+            edge_on = bool(panel.dodge_burn_edge_assist())
+            if mode == "erase":
+                erase_mask_layer_brush(
+                    layer, mx, my, radius, strength,
+                    luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                )
+            else:
+                stamp_mask_layer_brush(
+                    layer, mx, my, radius, strength,
+                    luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                )
+
+            # Live coverage overlay while painting (throttled with is_end flush).
+            if panel.dodge_burn_show_mask():
+                now = time.perf_counter()
+                last = float(getattr(self, "_mask_layer_overlay_last", 0.0) or 0.0)
+                if is_end or (now - last) >= 0.05:
+                    self._mask_layer_overlay_last = now
+                    self._sync_mask_layer_overlay()
+
+            # Throttled pipeline preview; settle + persist when the stroke ends.
+            if is_end:
+                self._on_adjust_panel_editing_finished(panel.get_adjustments())
+            else:
+                now = time.perf_counter()
+                last = float(getattr(self, "_mask_layer_preview_last", 0.0) or 0.0)
+                if (now - last) >= 0.12:
+                    self._mask_layer_preview_last = now
+                    self._apply_adjust_panel_preview()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[MASKS] mask layer stroke failed", exc_info=True
+            )
 
     def _handle_brush_key_down(self, mode: str) -> bool:
         """Route a brush hotkey (D/B/X/H) press.
@@ -22536,11 +23052,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_mask = None
         self._dodge_burn_luma_guide = None
         self._spot_heal_mask = None
+        self._mask_layer_stack = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(False)
             if hasattr(panel, "set_spot_heal_mask_present"):
                 panel.set_spot_heal_mask_present(False)
+            if hasattr(panel, "set_mask_layer_stack"):
+                panel.set_mask_layer_stack(None)
         self._sync_dodge_burn_mask_overlay()
 
     def _on_looks_drop_rejected(self, message: str) -> None:
@@ -22758,17 +23277,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         local masks live here (not in that dict) and must be cleared too."""
         had_db = getattr(self, "_dodge_burn_mask", None) is not None
         had_heal = getattr(self, "_spot_heal_mask", None) is not None
-        if not had_db and not had_heal:
+        had_masks = getattr(self, "_mask_layer_stack", None) is not None
+        if not had_db and not had_heal and not had_masks:
             return
         self._dodge_burn_mask = None
         self._dodge_burn_luma_guide = None
         self._spot_heal_mask = None
+        self._mask_layer_stack = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             if had_db:
                 panel.set_dodge_burn_mask_present(False)
             if had_heal and hasattr(panel, "set_spot_heal_mask_present"):
                 panel.set_spot_heal_mask_present(False)
+            if had_masks and hasattr(panel, "set_mask_layer_stack"):
+                panel.set_mask_layer_stack(None)
         self._sync_dodge_burn_mask_overlay()
 
     def _on_dodge_burn_clear_requested(self) -> None:
@@ -22917,6 +23440,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is None:
             return
         mode = panel.dodge_burn_mode()
+        if mode is None and getattr(panel, "mask_layer_mode", None) is not None:
+            # No dodge/burn/heal tool armed -- the GPU view's stroke mode may
+            # be active for a mask-layer brush instead (Masks section).
+            if panel.mask_layer_mode() is not None:
+                self._on_mask_layer_stroke(pt, pressure, is_end)
+                return
         if mode == "heal":
             self._on_spot_heal_stroke(pt, pressure, is_end)
             return
@@ -23439,6 +23968,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 adj = dict(adj)
                 adj.pop(HEAL_MASK_KEY, None)
                 adj.pop(HEAL_MASK_OBJ_KEY, None)
+
+        from raw_mask_layers import MASK_LAYERS_KEY, MASK_LAYERS_OBJ_KEY
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is not None and not stack.is_empty():
+            adj = dict(adj)
+            adj[MASK_LAYERS_OBJ_KEY] = stack
+            # _stage_key fingerprints the live object directly; drop any
+            # stale XMP serial so it can't shadow the live edit.
+            adj.pop(MASK_LAYERS_KEY, None)
+        else:
+            if MASK_LAYERS_KEY in adj or MASK_LAYERS_OBJ_KEY in adj:
+                adj = dict(adj)
+                adj.pop(MASK_LAYERS_KEY, None)
+                adj.pop(MASK_LAYERS_OBJ_KEY, None)
         return adj
 
     def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
@@ -23609,6 +24153,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_luma_guide = None
         self._dodge_burn_mask_shape_cache_key = None
         self._dodge_burn_mask_shape_cached = None
+        # The SAM embedding and click history belong to the previous photo
+        # -- same per-file high-water-mark hazard as _manager_displayed_max_dim.
+        self._reset_ai_mask_state()
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_dodge_burn_mask_present(mask is not None)
@@ -23632,6 +24179,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
             panel.set_spot_heal_mask_present(mask is not None)
         self._sync_dodge_burn_mask_overlay()
+
+    def _apply_mask_layers_from_adj(self, adj: dict | None) -> None:
+        """Rehydrate the live MaskLayerStack from a restored adj dict (undo).
+
+        Mirrors _apply_dodge_burn_mask_from_adj: deserialize the XMP serial
+        into fresh MUTABLE objects (the Masks panel edits them in place, so
+        the shared read-only deserialize cache must not be used here).
+        """
+        from mask_layers_xmp import deserialize_stack
+        from raw_mask_layers import MASK_LAYERS_KEY
+
+        serial = str((adj or {}).get(MASK_LAYERS_KEY, "") or "").strip()
+        stack = None
+        if serial:
+            try:
+                stack = deserialize_stack(serial)
+            except Exception:
+                stack = None
+        self._mask_layer_stack = stack
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_mask_layer_stack"):
+            panel.set_mask_layer_stack(stack)
 
     def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
@@ -23685,6 +24254,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 adj.pop(HEAL_MASK_KEY, None)
 
+            from mask_layers_xmp import serialize_stack as _serialize_mask_stack
+            from raw_mask_layers import (
+                MASK_LAYERS_KEY as _ML_KEY,
+                MASK_LAYERS_OBJ_KEY as _ML_OBJ_KEY,
+            )
+
+            adj.pop(_ML_OBJ_KEY, None)
+            ml_stack = getattr(self, "_mask_layer_stack", None)
+            ml_serial = _serialize_mask_stack(ml_stack) if ml_stack is not None else ""
+            if ml_serial:
+                adj[_ML_KEY] = ml_serial
+            else:
+                adj.pop(_ML_KEY, None)
+
             write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
             if hasattr(self, "status_bar"):
@@ -23696,9 +24279,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # preview. See _reencode_persisted_preview_for_sidecar's docstring;
         # re-enable once root-caused.
         # self._reencode_persisted_preview_for_sidecar(path, adj)
-        from raw_adjustments import is_default_adjustments
+        from raw_adjustments import is_default_adjustments_for_sidecar
 
-        cleared = is_default_adjustments(adj)
+        cleared = is_default_adjustments_for_sidecar(adj)
         self._invalidate_gallery_edited_memo(path)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
@@ -29995,6 +30578,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # editing_finished re-serializes whatever is in _dodge_burn_mask.
             self._apply_dodge_burn_mask_from_adj(old_adj)
             self._apply_spot_heal_mask_from_adj(old_adj)
+            self._apply_mask_layers_from_adj(old_adj)
             if panel is not None:
                 self._on_adjust_panel_editing_finished(old_adj)
         finally:

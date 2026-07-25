@@ -615,6 +615,21 @@ class ImageAdjustPanelWidget(QWidget):
     auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
+    # Masks section (raw_mask_layers.MaskLayerStack). Structure ops go
+    # through the host because only main.py knows the edit-base resolution
+    # a new layer's alpha buffer must be allocated at; in-place edits
+    # (sliders / invert / enable / rename) mutate the live stack directly
+    # and ride the normal preview_changed / editing_finished flow.
+    mask_add_requested = pyqtSignal()
+    mask_delete_requested = pyqtSignal(int)
+    mask_duplicate_requested = pyqtSignal(int)
+    # "subject" / "sky" -- one-shot AI mask generation (raw_ai_masks). Goes
+    # through the host for the same reason add does (it owns the edit-base
+    # resolution and the RGB the model runs on), plus inference is slow
+    # enough to need a worker thread and a busy state.
+    mask_ai_requested = pyqtSignal(str)
+    # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
+    mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
     dodgeBurnMaskToggled = pyqtSignal(bool)
     dodge_burn_brush_changed = pyqtSignal()  # size/flow changed — refresh brush cursor
@@ -972,6 +987,9 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_local = CollapsibleSection("Local", settings_key="local")
         if not _SHOW_DODGE_BURN_UI:
             self.sect_local.hide()
+        self.sect_masks = CollapsibleSection("Masks", settings_key="masks")
+        if not _SHOW_DODGE_BURN_UI:
+            self.sect_masks.hide()
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
         # Add Collapsible Sections to main scroll layout
@@ -984,6 +1002,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self.sect_noise)
         layout.addWidget(self.sect_effects)
         layout.addWidget(self.sect_local)
+        layout.addWidget(self.sect_masks)
         layout.addWidget(self.sect_lut)
         layout.addWidget(self.sect_transform)
 
@@ -1522,6 +1541,8 @@ class ImageAdjustPanelWidget(QWidget):
         db_mask_str_row.addWidget(self._db_mask_strength_value)
         db_container_layout.addWidget(self._db_mask_strength_row)
         self.sect_local.add_widget(db_container)
+
+        self._build_masks_section(self.sect_masks)
 
         self._build_looks_section(self.sect_lut)
 
@@ -2840,6 +2861,9 @@ class ImageAdjustPanelWidget(QWidget):
                         other.setChecked(False)
             finally:
                 self._block_emit = False
+            # Mask brushes share the same stroke pipeline -- only one armed.
+            if getattr(self, "_mask_paint_btn", None) is not None and self.mask_layer_mode() is not None:
+                self.disarm_mask_layer_tools()
         mode = self.dodge_burn_mode()
         self._sync_dodge_burn_mask_button_enabled(mode is not None)
         self._sync_local_controls_for_mode(mode)
@@ -2984,6 +3008,12 @@ class ImageAdjustPanelWidget(QWidget):
         finally:
             self._block_emit = False
         armed = dodge_on or burn_on or erase_on or heal_on
+        if armed and getattr(self, "_mask_paint_btn", None) is not None:
+            # Only one brush system may hold the shared stroke pipeline --
+            # this path (hotkeys D/B/X/H) bypasses _on_dodge_burn_toggled's
+            # own disarm via _block_emit, so it must disarm mask tools here.
+            if self.mask_layer_mode() is not None:
+                self.disarm_mask_layer_tools()
         self._sync_dodge_burn_mask_button_enabled(armed)
         if dodge_on:
             out = "dodge"
@@ -3090,6 +3120,376 @@ class ImageAdjustPanelWidget(QWidget):
         if not self._db_show_mask_btn.isEnabled():
             return
         self._db_show_mask_btn.toggle()
+
+    # ------------------------------------------------------------------
+    # Masks section (layered local adjustments — raw_mask_layers)
+    # ------------------------------------------------------------------
+
+    # (key, label, slider min, slider max, divisor). Temperature/Tint are
+    # RELATIVE here (±100 → _apply_wb_tint's ≤1000 relative-scale branch),
+    # unlike the global absolute-Kelvin Temperature slider.
+    _MASK_SLIDER_SPECS = (
+        ("Exposure2012", "Exposure", -300, 300, 100.0),
+        ("Contrast2012", "Contrast", -100, 100, 1.0),
+        ("Temperature", "Temp (rel)", -100, 100, 1.0),
+        ("Tint", "Tint", -100, 100, 1.0),
+        ("Saturation", "Saturation", -100, 100, 1.0),
+        ("Vibrance", "Vibrance", -100, 100, 1.0),
+        ("Dehaze", "Dehaze", -100, 100, 1.0),
+        ("Sharpness", "Sharpness", 0, 150, 1.0),
+        ("Clarity2012", "Clarity", -100, 100, 1.0),
+    )
+
+    def _build_masks_section(self, sect: "CollapsibleSection") -> None:
+        self._mask_stack = None  # live raw_mask_layers.MaskLayerStack (host-owned)
+        self._mask_block = False
+        self._mask_sliders: Dict[str, AdjustSlider] = {}
+        self._mask_value_labels: Dict[str, QLabel] = {}
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+
+        self._mask_list = QListWidget()
+        self._mask_list.setMaximumHeight(110)
+        self._mask_list.setStyleSheet(
+            f"""
+            QListWidget {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                border-radius: 4px;
+                color: {theme.INK};
+                font-size: 11px;
+            }}
+            QListWidget::item:selected {{
+                background-color: {theme.EMBER_DIM};
+                color: {theme.INK};
+            }}
+            """
+        )
+        self._mask_list.currentRowChanged.connect(self._on_mask_row_changed)
+        self._mask_list.itemChanged.connect(self._on_mask_item_changed)
+        col.addWidget(self._mask_list)
+
+        ops_row = QHBoxLayout()
+        ops_row.setSpacing(6)
+        self._mask_add_btn = QPushButton("Add Mask")
+        self._mask_del_btn = QPushButton("Delete")
+        self._mask_dup_btn = QPushButton("Duplicate")
+        for btn in (self._mask_add_btn, self._mask_del_btn, self._mask_dup_btn):
+            btn.setObjectName("adjust_db_clear_btn")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            ops_row.addWidget(btn, 1)
+        self._mask_add_btn.setToolTip("Add a new empty mask layer — paint it with the Paint brush")
+        self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
+        self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
+        self._mask_dup_btn.clicked.connect(self._on_mask_duplicate_clicked)
+        col.addLayout(ops_row)
+
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(6)
+        self._mask_paint_btn = QPushButton("Paint")
+        self._mask_erase_btn = QPushButton("Erase")
+        self._mask_invert_btn = QPushButton("Invert")
+        for btn, tip in (
+            (
+                self._mask_paint_btn,
+                "Brush coverage into the selected mask (max-blend; repeated "
+                "strokes saturate toward full coverage).\nUses the Local "
+                "section's Brush Size / Flow / Edge Assist settings.",
+            ),
+            (
+                self._mask_erase_btn,
+                "Remove coverage from the selected mask under the brush.",
+            ),
+            (
+                self._mask_invert_btn,
+                "Apply this mask's adjustments everywhere EXCEPT the painted region.",
+            ),
+        ):
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            tools_row.addWidget(btn, 1)
+        self._mask_paint_btn.toggled.connect(
+            lambda on: self._on_mask_tool_toggled(self._mask_paint_btn, on)
+        )
+        self._mask_erase_btn.toggled.connect(
+            lambda on: self._on_mask_tool_toggled(self._mask_erase_btn, on)
+        )
+        self._mask_invert_btn.toggled.connect(self._on_mask_invert_toggled)
+        col.addLayout(tools_row)
+
+        # AI selection row (raw_ai_masks). Subject/Sky are one-shot: they
+        # generate a whole layer and hand it back. Click is a *mode* --
+        # armed like Paint/Erase so it shares the same mutual-exclusion and
+        # cursor handling, then each canvas click adds a SAM point prompt.
+        ai_row = QHBoxLayout()
+        ai_row.setSpacing(6)
+        self._mask_ai_subject_btn = QPushButton("Subject")
+        self._mask_ai_sky_btn = QPushButton("Sky")
+        self._mask_ai_click_btn = QPushButton("Click")
+        for btn, tip in (
+            (
+                self._mask_ai_subject_btn,
+                "Select the main subject automatically (BiRefNet).\n"
+                "Creates a new mask layer you can then brush or erase.",
+            ),
+            (
+                self._mask_ai_sky_btn,
+                "Select the sky automatically.\n"
+                "Creates a new mask layer you can then brush or erase.",
+            ),
+            (
+                self._mask_ai_click_btn,
+                "Click anything in the photo to select it (MobileSAM).\n"
+                "Click again to add to the selection; the first click may "
+                "pause briefly while the image is analysed.",
+            ),
+        ):
+            btn.setObjectName("adjust_db_btn")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            ai_row.addWidget(btn, 1)
+        self._mask_ai_click_btn.setCheckable(True)
+        self._mask_ai_subject_btn.clicked.connect(
+            lambda: self.mask_ai_requested.emit("subject")
+        )
+        self._mask_ai_sky_btn.clicked.connect(lambda: self.mask_ai_requested.emit("sky"))
+        self._mask_ai_click_btn.toggled.connect(
+            lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
+        )
+        col.addLayout(ai_row)
+
+        for key, label, lo, hi, div in self._MASK_SLIDER_SPECS:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            lbl.setMinimumWidth(78)
+            row.addWidget(lbl)
+            slider = AdjustSlider(Qt.Orientation.Horizontal)
+            slider.setRange(lo, hi)
+            slider.setValue(0)
+            slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            slider.valueChanged.connect(
+                lambda _v, k=key: self._on_mask_slider_changed(k)
+            )
+            slider.sliderReleased.connect(self._on_slider_released)
+            row.addWidget(slider, 1)
+            val = AdjustValueLabel()
+            val.setProperty("class", "adjust_slider_value")
+            val.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+            val.setFixedWidth(52)
+            val.setText("0")
+            row.addWidget(val)
+            self._mask_sliders[key] = slider
+            self._mask_value_labels[key] = val
+            col.addLayout(row)
+
+        hint = QLabel(
+            "Each mask applies its own adjustments only where painted. "
+            "Brush Size / Flow / Edge Assist come from the Local section."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        col.addWidget(hint)
+
+        sect.add_widget(container)
+        self._sync_mask_controls_enabled()
+
+    # -- host API -------------------------------------------------------
+
+    def set_mask_layer_stack(self, stack) -> None:
+        """Point the section at the host's live MaskLayerStack (or None)."""
+        self._mask_stack = stack
+        self._rebuild_mask_list()
+
+    def mask_layer_stack(self):
+        return self._mask_stack
+
+    def active_mask_index(self) -> int | None:
+        stack = self._mask_stack
+        if stack is None or not stack.layers:
+            return None
+        row = self._mask_list.currentRow()
+        if row < 0 or row >= len(stack.layers):
+            return None
+        return row
+
+    def _mask_tool_buttons(self) -> tuple:
+        """(button, mode) for every mutually-exclusive mask tool."""
+        return (
+            (self._mask_paint_btn, "paint"),
+            (self._mask_erase_btn, "erase"),
+            (self._mask_ai_click_btn, "ai_click"),
+        )
+
+    def mask_layer_mode(self) -> str | None:
+        for btn, mode in self._mask_tool_buttons():
+            if btn.isChecked():
+                return mode
+        return None
+
+    def disarm_mask_layer_tools(self) -> None:
+        self._mask_block = True
+        try:
+            for btn, _mode in self._mask_tool_buttons():
+                btn.setChecked(False)
+        finally:
+            self._mask_block = False
+        self.mask_layer_mode_changed.emit(None)
+
+    def arm_mask_paint(self) -> None:
+        """Arm the mask Paint brush (used right after Add Mask)."""
+        if not self._mask_paint_btn.isChecked():
+            self._mask_paint_btn.setChecked(True)  # fires _on_mask_tool_toggled
+
+    def select_mask_index(self, index: int) -> None:
+        if 0 <= index < self._mask_list.count():
+            self._mask_list.setCurrentRow(index)
+
+    def _rebuild_mask_list(self) -> None:
+        self._mask_block = True
+        try:
+            prev_row = self._mask_list.currentRow()
+            self._mask_list.clear()
+            stack = self._mask_stack
+            layers = stack.layers if stack is not None else []
+            for i, layer in enumerate(layers):
+                name = layer.name or f"Mask {i + 1}"
+                item = QListWidgetItem(name)
+                item.setFlags(
+                    item.flags()
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEditable
+                )
+                item.setCheckState(
+                    Qt.CheckState.Checked if layer.enabled else Qt.CheckState.Unchecked
+                )
+                self._mask_list.addItem(item)
+            if layers:
+                row = min(max(0, prev_row), len(layers) - 1)
+                self._mask_list.setCurrentRow(row)
+        finally:
+            self._mask_block = False
+        self._sync_mask_sliders_from_active()
+        self._sync_mask_controls_enabled()
+
+    # -- internals ------------------------------------------------------
+
+    def _active_mask_layer(self):
+        idx = self.active_mask_index()
+        if idx is None:
+            return None
+        return self._mask_stack.layers[idx]
+
+    def _sync_mask_controls_enabled(self) -> None:
+        has_layer = self.active_mask_index() is not None
+        for btn in (self._mask_del_btn, self._mask_dup_btn, self._mask_paint_btn,
+                    self._mask_erase_btn, self._mask_invert_btn):
+            btn.setEnabled(has_layer)
+        for slider in self._mask_sliders.values():
+            slider.setEnabled(has_layer)
+        if not has_layer and self.mask_layer_mode() is not None:
+            self.disarm_mask_layer_tools()
+
+    def _sync_mask_sliders_from_active(self) -> None:
+        layer = self._active_mask_layer()
+        self._mask_block = True
+        try:
+            for key, _label, _lo, _hi, div in self._MASK_SLIDER_SPECS:
+                slider = self._mask_sliders[key]
+                val = 0.0 if layer is None else float(layer.adjustments.get(key, 0.0))
+                slider.setValue(int(round(val * div)))
+                self._update_mask_value_label(key)
+            self._mask_invert_btn.setChecked(bool(layer.invert) if layer is not None else False)
+        finally:
+            self._mask_block = False
+
+    def _update_mask_value_label(self, key: str) -> None:
+        spec = next(s for s in self._MASK_SLIDER_SPECS if s[0] == key)
+        div = spec[4]
+        v = self._mask_sliders[key].value() / div
+        lbl = self._mask_value_labels[key]
+        lbl.setText(f"{v:+.2f}" if div != 1.0 else f"{v:+.0f}")
+
+    def _on_mask_row_changed(self, _row: int) -> None:
+        if self._mask_block:
+            return
+        self._sync_mask_sliders_from_active()
+        self._sync_mask_controls_enabled()
+
+    def _on_mask_item_changed(self, item: QListWidgetItem) -> None:
+        """Rename (edit text) or enable/disable (check state) in place."""
+        if self._mask_block:
+            return
+        row = self._mask_list.row(item)
+        stack = self._mask_stack
+        if stack is None or not (0 <= row < len(stack.layers)):
+            return
+        layer = stack.layers[row]
+        layer.name = item.text()
+        enabled = item.checkState() == Qt.CheckState.Checked
+        if enabled != layer.enabled:
+            layer.enabled = enabled
+            layer.touch()
+            self._emit_preview_and_save()
+
+    def _on_mask_delete_clicked(self) -> None:
+        idx = self.active_mask_index()
+        if idx is not None:
+            self.mask_delete_requested.emit(idx)
+
+    def _on_mask_duplicate_clicked(self) -> None:
+        idx = self.active_mask_index()
+        if idx is not None:
+            self.mask_duplicate_requested.emit(idx)
+
+    def _on_mask_tool_toggled(self, btn: QPushButton, checked: bool) -> None:
+        if self._mask_block:
+            return
+        if checked:
+            self._mask_block = True
+            try:
+                for other, _mode in self._mask_tool_buttons():
+                    if other is not btn and other.isChecked():
+                        other.setChecked(False)
+            finally:
+                self._mask_block = False
+            # A mask brush and a dodge/burn brush share the same stroke
+            # pipeline -- only one may be armed.
+            if self.dodge_burn_mode() is not None:
+                self.set_dodge_burn_mode(None)
+        self.mask_layer_mode_changed.emit(self.mask_layer_mode())
+
+    def _on_mask_invert_toggled(self, checked: bool) -> None:
+        if self._mask_block:
+            return
+        layer = self._active_mask_layer()
+        if layer is None:
+            return
+        layer.invert = bool(checked)
+        layer.touch()
+        self._emit_preview_and_save()
+
+    def _on_mask_slider_changed(self, key: str) -> None:
+        if self._mask_block:
+            return
+        layer = self._active_mask_layer()
+        if layer is None:
+            return
+        spec = next(s for s in self._MASK_SLIDER_SPECS if s[0] == key)
+        div = spec[4]
+        layer.adjustments[key] = self._mask_sliders[key].value() / div
+        layer.touch()
+        self._update_mask_value_label(key)
+        self._schedule_live_preview()
 
     def _update_slider_label(self, key: str, fmt: Callable[[float], str]) -> None:
         slider = self._sliders.get(key)

@@ -103,6 +103,102 @@ def estimate_ev_offsets(images: List[np.ndarray]) -> List[float]:
     return ev_offsets
 
 
+def _exif_ratio_to_float(tag: Any) -> Optional[float]:
+    """Best-effort float from an exifread Ratio/IfdTag value ('−2/1', Fraction, int)."""
+    if tag is None:
+        return None
+    try:
+        values = getattr(tag, "values", None)
+        v = values[0] if values else tag
+        num = getattr(v, "num", None)
+        den = getattr(v, "den", None)
+        if num is not None and den:
+            return float(num) / float(den)
+        return float(str(v).strip())
+    except Exception:
+        s = str(tag).strip()
+        if "/" in s:
+            try:
+                num_s, den_s = s.split("/", 1)
+                den_f = float(den_s)
+                if den_f:
+                    return float(num_s) / den_f
+            except Exception:
+                return None
+        return None
+
+
+def exposure_ev_offsets_for_paths(
+    paths: List[str], images: Optional[List[np.ndarray]] = None
+) -> List[float]:
+    """Per-frame relative EV offsets for a bracketed set, best source first.
+
+    1. EXIF ExposureBiasValue when present on every frame and not uniform
+       (the camera's own bracketing record -- exact).
+    2. EXIF ExposureTime: log2(t / median t) -- correct when the bracket
+       was shot varying shutter (the normal case; aperture/ISO brackets
+       fall through to 3).
+    3. Pixel-luminance estimate via estimate_ev_offsets(images) when
+       decoded frames are available, else all zeros.
+
+    Used by the HDR dialog for its exposure-ladder sort, EV badges and the
+    default shadow/highlight recovery prior -- so this returns a usable
+    list for ANY input rather than raising.
+    """
+    n = len(paths)
+    if n == 0:
+        return []
+
+    biases: List[Optional[float]] = []
+    times: List[Optional[float]] = []
+    for p in paths:
+        tags: Dict[str, Any] = {}
+        try:
+            import metadata_backend
+
+            tags = metadata_backend.process_file_from_path(p, details=False) or {}
+        except Exception:
+            tags = {}
+        biases.append(_exif_ratio_to_float(tags.get("EXIF ExposureBiasValue")))
+        times.append(_exif_ratio_to_float(tags.get("EXIF ExposureTime")))
+
+    if all(b is not None for b in biases) and len({round(b, 2) for b in biases}) > 1:
+        return [round(float(b), 1) for b in biases]
+
+    valid_times = [t for t in times if t is not None and t > 0]
+    if len(valid_times) == n and len({round(t, 6) for t in valid_times}) > 1:
+        ref = sorted(valid_times)[n // 2]
+        return [round(math.log2(t / ref), 1) for t in valid_times]
+
+    if images:
+        return estimate_ev_offsets(images)
+    return [0.0] * n
+
+
+def default_recovery_weights(ev_offsets: List[float]) -> Tuple[List[float], List[float]]:
+    """(shadow_weights, highlight_weights) prior from a set's EV offsets.
+
+    The darkest frame is the natural highlight donor (its bright areas are
+    the only unclipped record of the scene's highlights) and the brightest
+    frame the shadow donor -- so they open biased that way (1.5x/0.5x)
+    while middle frames stay neutral. All-equal offsets (no usable EV
+    info) return all-neutral so the dialog never fakes a confident prior.
+    """
+    n = len(ev_offsets)
+    if n == 0:
+        return [], []
+    shadow = [1.0] * n
+    highlight = [1.0] * n
+    if n >= 2 and len({round(e, 2) for e in ev_offsets}) > 1:
+        darkest = int(np.argmin(ev_offsets))
+        brightest = int(np.argmax(ev_offsets))
+        highlight[darkest] = 1.5
+        shadow[darkest] = 0.5
+        shadow[brightest] = 1.5
+        highlight[brightest] = 0.5
+    return shadow, highlight
+
+
 def merge_hdr_exposure_fusion(
     images: List[np.ndarray],
     highlight_weight: float = 1.0,
@@ -111,12 +207,34 @@ def merge_hdr_exposure_fusion(
     image_weights: Optional[List[float]] = None,
     contrast_weight: float = 1.0,
     saturation_weight: float = 1.0,
-) -> np.ndarray:
-    """Mertens Exposure Fusion with custom Highlight, Shadow, Midtone & Per-Image weights."""
+    highlight_weights: Optional[List[float]] = None,
+    shadow_weights: Optional[List[float]] = None,
+    return_weight_maps: bool = False,
+):
+    """Mertens Exposure Fusion with custom Highlight, Shadow, Midtone & Per-Image weights.
+
+    ``highlight_weights`` / ``shadow_weights``: optional per-image exponent
+    lists (same 0-2.0 scale as the global scalars, which they override
+    per-image when given) -- "recover highlights mostly from frame 1,
+    shadows from frame 3". When either list is provided the fusion runs
+    through a Laplacian-pyramid blend of THESE custom weight maps
+    (focus_stacking._fuse_pyramid, seam-free like Mertens itself), because
+    cv2.createMergeMertens cannot accept external weight maps -- its
+    process() call only honours the three constructor scalars, so the
+    custom per-pixel maps built below never influence that path.
+
+    ``return_weight_maps``: also return the normalized per-image weight
+    maps (list of float32 HxW summing to 1 per pixel) for contribution
+    visualization -- returns ``(result, weight_maps)`` instead of just
+    ``result``.
+    """
     if not images:
         raise ValueError("No images provided for HDR merge")
     if len(images) == 1:
-        return images[0].copy()
+        res_single = images[0].copy()
+        if return_weight_maps:
+            return res_single, [np.ones(images[0].shape[:2], dtype=np.float32)]
+        return res_single
 
     is_uint8 = (images[0].dtype == np.uint8)
     norm_imgs = []
@@ -131,6 +249,9 @@ def merge_hdr_exposure_fusion(
     n = len(norm_imgs)
     if image_weights is None or len(image_weights) != n:
         image_weights = [1.0] * n
+    per_image_hl = highlight_weights is not None and len(highlight_weights) == n
+    per_image_sh = shadow_weights is not None and len(shadow_weights) == n
+    use_custom_maps = per_image_hl or per_image_sh
 
     weights_maps = []
     for idx, img in enumerate(norm_imgs):
@@ -139,10 +260,13 @@ def merge_hdr_exposure_fusion(
             weights_maps.append(np.zeros((img.shape[0], img.shape[1]), dtype=np.float32))
             continue
 
+        hl_exp = float(highlight_weights[idx]) if per_image_hl else float(highlight_weight)
+        sh_exp = float(shadow_weights[idx]) if per_image_sh else float(shadow_weight)
+
         gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
         well_exp = np.exp(-0.5 * ((gray - 0.5) ** 2) / (0.2 ** 2)) ** midtone_weight
-        hl_map = np.exp(-0.5 * ((gray - 0.15) ** 2) / (0.25 ** 2)) ** highlight_weight
-        sh_map = np.exp(-0.5 * ((gray - 0.85) ** 2) / (0.25 ** 2)) ** shadow_weight
+        hl_map = np.exp(-0.5 * ((gray - 0.15) ** 2) / (0.25 ** 2)) ** hl_exp
+        sh_map = np.exp(-0.5 * ((gray - 0.85) ** 2) / (0.25 ** 2)) ** sh_exp
 
         exp_w = (well_exp + hl_map + sh_map) / 3.0
 
@@ -168,25 +292,38 @@ def merge_hdr_exposure_fusion(
     for i in range(n):
         weights_maps[i] /= sum_w
 
-    try:
-        mertens = cv2.createMergeMertens(
-            contrast_weight=float(contrast_weight),
-            saturation_weight=float(saturation_weight),
-            exposure_weight=float(midtone_weight),
-        )
-        uint8_inputs = [(img * 255.0).clip(0, 255).astype(np.uint8) for img in norm_imgs]
-        res = mertens.process(uint8_inputs)
+    if use_custom_maps:
+        # Per-image weights MUST flow through the custom maps -- pyramid-
+        # blend them (seam-free multi-band, same primitive focus stacking
+        # uses) instead of cv2 Mertens, which ignores external maps.
+        from focus_stacking import _fuse_pyramid
+
+        res = _fuse_pyramid(norm_imgs, weights_maps)
         res = np.clip(res, 0.0, 1.0)
-    except Exception:
-        res = np.zeros_like(norm_imgs[0])
-        for i in range(n):
-            w3 = np.expand_dims(weights_maps[i], axis=-1)
-            res += norm_imgs[i] * w3
-        res = np.clip(res, 0.0, 1.0)
+    else:
+        try:
+            mertens = cv2.createMergeMertens(
+                contrast_weight=float(contrast_weight),
+                saturation_weight=float(saturation_weight),
+                exposure_weight=float(midtone_weight),
+            )
+            uint8_inputs = [(img * 255.0).clip(0, 255).astype(np.uint8) for img in norm_imgs]
+            res = mertens.process(uint8_inputs)
+            res = np.clip(res, 0.0, 1.0)
+        except Exception:
+            res = np.zeros_like(norm_imgs[0])
+            for i in range(n):
+                w3 = np.expand_dims(weights_maps[i], axis=-1)
+                res += norm_imgs[i] * w3
+            res = np.clip(res, 0.0, 1.0)
 
     if is_uint8:
-        return (res * 255.0).round().clip(0, 255).astype(np.uint8)
-    return (res * 65535.0).round().clip(0, 65535).astype(np.uint16)
+        out = (res * 255.0).round().clip(0, 255).astype(np.uint8)
+    else:
+        out = (res * 65535.0).round().clip(0, 65535).astype(np.uint16)
+    if return_weight_maps:
+        return out, weights_maps
+    return out
 
 
 def stitch_panorama(

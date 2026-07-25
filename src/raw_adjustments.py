@@ -761,6 +761,11 @@ def parse_spot_heal_mask_from_xmp(xmp_path: str) -> str:
     return _parse_crs_child_text_from_xmp(xmp_path, "SpotHealMask")
 
 
+def parse_mask_layers_from_xmp(xmp_path: str) -> str:
+    """Read the custom RVMaskLayers child element -> JSON string (see mask_layers_xmp.py)."""
+    return _parse_crs_child_text_from_xmp(xmp_path, "RVMaskLayers")
+
+
 def _parse_crs_child_text_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
@@ -850,6 +855,11 @@ def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
     heal_serial = parse_spot_heal_mask_from_xmp(xmp_path)
     if heal_serial:
         adj[HEAL_MASK_KEY] = heal_serial
+    from raw_mask_layers import MASK_LAYERS_KEY
+
+    mask_layers_serial = parse_mask_layers_from_xmp(xmp_path)
+    if mask_layers_serial:
+        adj[MASK_LAYERS_KEY] = mask_layers_serial
     from raw_lut import LUT_NAME_KEY, LUT_SPACE_DEFAULT, LUT_SPACE_KEY
 
     lut_name = parse_creative_lut_name_from_xmp(xmp_path)
@@ -989,12 +999,21 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
         return False
     if str(adj.get(HEAL_MASK_KEY, "") or "").strip():
         return False
+    from raw_mask_layers import MASK_LAYERS_KEY
+
+    if str(adj.get(MASK_LAYERS_KEY, "") or "").strip():
+        return False
     # Live paint injects mask objects without a PNG serial yet — still non-default.
     try:
         from raw_dodge_burn import MASK_OBJ_KEY
         from raw_spot_heal import MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY
+        from raw_mask_layers import MASK_LAYERS_OBJ_KEY
 
-        if adj.get(MASK_OBJ_KEY) is not None or adj.get(HEAL_MASK_OBJ_KEY) is not None:
+        if (
+            adj.get(MASK_OBJ_KEY) is not None
+            or adj.get(HEAL_MASK_OBJ_KEY) is not None
+            or adj.get(MASK_LAYERS_OBJ_KEY) is not None
+        ):
             return False
     except Exception:
         pass
@@ -1026,6 +1045,32 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
         elif abs(av - bv) > 1e-4:
             return False
     return True
+
+
+def is_default_adjustments_for_sidecar(adj: Dict[str, float] | None) -> bool:
+    """Like is_default_adjustments, but does NOT ignore DenoiseDetail.
+
+    is_default_adjustments() deliberately skips DenoiseDetail (it's an
+    export-only knob invisible to the always-shown preview, so it
+    shouldn't mark a file "edited" for the gallery badge or skip the
+    pixel-pipeline shortcut in raw_edit_pipeline/unified_image_processor).
+    But write_xmp_adjustments reused that SAME check to decide whether to
+    write or clear the sidecar -- so a DenoiseDetail-only change (every
+    other slider left at default) was treated as "no edit" and the value
+    was silently dropped on save, reverting to 50 on next load. Callers
+    that decide whether to persist/keep the sidecar (or report an "edits
+    cleared" status) must use this variant instead.
+    """
+    if not is_default_adjustments(adj):
+        return False
+    if not adj:
+        return True
+    default_detail = DEFAULT_ADJUSTMENTS["DenoiseDetail"]
+    try:
+        detail = float(adj.get("DenoiseDetail", default_detail))
+    except (TypeError, ValueError):
+        return False
+    return abs(detail - default_detail) <= 1e-4
 
 
 def adjustments_equal(a: Dict[str, float], b: Dict[str, float]) -> bool:
@@ -1153,6 +1198,7 @@ _OUR_CRS_CHILD_LOCALS = frozenset(
         "ToneCurvePV2012Blue",
         "DodgeBurnMask",
         "SpotHealMask",
+        "RVMaskLayers",
         "CreativeLUTName",
         "CreativeLUTWorkingSpace",
     }
@@ -1282,7 +1328,7 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
         except Exception:
             root = None
 
-    if is_default_adjustments(merged):
+    if is_default_adjustments_for_sidecar(merged):
         if root is None:
             if existing_rating > 0:
                 _write_xmp_rating_locked(xmp_path, existing_rating)
@@ -1379,6 +1425,13 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     if heal_serial:
         heal = ET.SubElement(desc, f"{{{CRS_NS}}}SpotHealMask")
         heal.text = heal_serial
+
+    from raw_mask_layers import MASK_LAYERS_KEY
+
+    mask_layers_serial = str(merged.get(MASK_LAYERS_KEY, "") or "")
+    if mask_layers_serial:
+        mask_layers_el = ET.SubElement(desc, f"{{{CRS_NS}}}RVMaskLayers")
+        mask_layers_el.text = mask_layers_serial
 
     from raw_lut import (
         LUT_AMOUNT_KEY,

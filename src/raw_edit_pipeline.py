@@ -28,6 +28,10 @@ from raw_dodge_burn import resolve_mask_from_adj as _resolve_db_mask
 from raw_spot_heal import MASK_KEY as _HEAL_MASK_KEY
 from raw_spot_heal import MASK_OBJ_KEY as _HEAL_MASK_OBJ_KEY
 from raw_spot_heal import resolve_mask_from_adj as _resolve_heal_mask
+from raw_mask_layers import MASK_LAYERS_KEY as _MASK_LAYERS_KEY
+from raw_mask_layers import MASK_LAYERS_OBJ_KEY as _MASK_LAYERS_OBJ_KEY
+from raw_mask_layers import apply_mask_layers as _apply_mask_layers
+from raw_mask_layers import resolve_stack_from_adj as _resolve_mask_layers
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
 
@@ -280,6 +284,14 @@ def _process_linear_edit_tail(
 
         img = apply_spot_heal(img, heal_mask)
 
+    # Mask Editing / Local Adjustments (Phase 0 perf spike): layered masked
+    # adjustments composite after dodge/burn+heal, before denoise/tone, so
+    # a masked exposure/contrast/WB change sees the same downstream
+    # denoise/tone response as the equivalent global change would.
+    mask_stack = _resolve_mask_layers(merged)
+    if mask_stack is not None:
+        img = _apply_mask_layers(img, mask_stack)
+
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
     method = int(float(merged.get("DenoiseMethod", 0.0)))
@@ -456,6 +468,8 @@ _PRE_TONE_KEYS = (
     _DB_STRENGTH_KEY,
     _HEAL_MASK_KEY,
     _HEAL_MASK_OBJ_KEY,
+    _MASK_LAYERS_KEY,
+    _MASK_LAYERS_OBJ_KEY,
     # Geometry runs at the head of the pipeline (before WB), so any transform
     # change invalidates pre_tone and everything chained to it.
     *_TRANSFORM_KEYS,
@@ -522,6 +536,13 @@ def _stage_key(merged: dict, keys: tuple) -> tuple:
             # Live DodgeBurnMask or HealMask object: O(1) version fingerprint!
             h, w = v.data.shape[:2]
             parts.append(f"mem:{int(h)}x{int(w)}:v{int(v.version)}")
+            continue
+        if hasattr(v, "layers") and hasattr(v, "fingerprint"):
+            # Live MaskLayerStack: per-layer version/adjustment fingerprint.
+            # Without this branch the object fell through to float() -> 0.0,
+            # a CONSTANT -- painting a layer or editing its sliders never
+            # changed the pre_tone key, so the cached stage was served stale.
+            parts.append(v.fingerprint())
             continue
         if isinstance(v, str):
             if v.startswith("mem:"):
@@ -622,9 +643,20 @@ def process_linear_edit_buffer_staged(
                     cache.stage_keys.get("geom") != geo_key
                     or "geom" not in cache.stage_out
                 ):
-                    cache.stage_out["geom"] = apply_geometry(
+                    geom_out = apply_geometry(
                         cache.stage_out["pre_geom"], merged, preview=True
                     )
+                    # Mask layers composite AFTER geometry even on the lite
+                    # path (unlike dodge/burn's documented denoise-before-warp
+                    # tradeoff above): their alpha buffers are authored in the
+                    # transformed frame, matching the settle/full path -- pre-
+                    # warp compositing shifted masked regions during live
+                    # rotate/perspective drags. Invalidation is covered by
+                    # geo_key's pre_geo_key component (mask keys included).
+                    mask_stack = _resolve_mask_layers(merged)
+                    if mask_stack is not None:
+                        geom_out = _apply_mask_layers(geom_out, mask_stack)
+                    cache.stage_out["geom"] = geom_out
                     cache.stage_keys["geom"] = geo_key
                 img = cache.stage_out["geom"]
             else:
@@ -647,6 +679,10 @@ def process_linear_edit_buffer_staged(
                     from raw_spot_heal import apply_spot_heal
 
                     img = apply_spot_heal(img, heal_mask)
+
+                mask_stack = _resolve_mask_layers(merged)
+                if mask_stack is not None:
+                    img = _apply_mask_layers(img, mask_stack)
 
                 do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
                 nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
