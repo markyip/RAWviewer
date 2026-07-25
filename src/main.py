@@ -8274,7 +8274,23 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             
         import logging
         logger = logging.getLogger(__name__)
-        
+
+        # Remember the failure for the prefetch failure-memo (see
+        # _needs_display_buffer_prefetch) regardless of which file is current.
+        try:
+            import time as _time
+
+            memo = getattr(self, "_prefetch_failure_ts", None)
+            if memo is None:
+                memo = self._prefetch_failure_ts = {}
+            memo[os.path.normcase(os.path.abspath(file_path))] = _time.monotonic()
+            if len(memo) > 256:  # bound it; entries are tiny
+                oldest = sorted(memo, key=memo.get)[: len(memo) - 256]
+                for k in oldest:
+                    del memo[k]
+        except Exception:
+            pass
+
         # Only handle current file's error (normalize for Windows path format differences)
         if _norm_path(file_path) != _norm_path(getattr(self, "current_file_path", None)):
             logger.debug(f"[MANAGER] Error for different file: {os.path.basename(file_path)}")
@@ -27790,6 +27806,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return _env_int("RAWVIEWER_NAV_PRELOAD_NEAR", default, minimum=1)
 
     def _needs_display_buffer_prefetch(self, file_path: str, *, zoomed: bool) -> bool:
+        # Failure memo: a file whose load keeps failing (e.g. undecodable NEF)
+        # is never cached, so without this the idle prefetch loop re-requests
+        # it every tick (~450ms) and each failure spams an error signal.
+        fail_ts = getattr(self, "_prefetch_failure_ts", None)
+        if fail_ts is not None:
+            import time as _time
+
+            ts = fail_ts.get(os.path.normcase(os.path.abspath(file_path)))
+            if ts is not None and (_time.monotonic() - ts) < 300.0:
+                return False
         min_dim = 2800 if zoomed else self._single_view_cache_min_dim(for_navigation=False)
         if self._display_quality_buffer_cached(file_path, min_dim=min_dim):
             return False
