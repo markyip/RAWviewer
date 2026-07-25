@@ -99,11 +99,16 @@ class SCUNetONNX:
         # NOTE: CoreMLExecutionProvider intentionally omitted — the SCUNet
         # attention graph partitions into 200+ CoreML segments, making the
         # first-tile compile hang for minutes and run slower than pure CPU.
-        providers = [
+        requested = [
             "DmlExecutionProvider",
             "CUDAExecutionProvider",
             "CPUExecutionProvider",
         ]
+        # Keep only providers this onnxruntime build actually has, so
+        # unavailable-platform requests (Dml/CUDA on macOS) don't spam
+        # UserWarnings into the app log on every session init.
+        available = set(ort.get_available_providers())
+        providers = [p for p in requested if p in available] or ["CPUExecutionProvider"]
 
         # Suppress warnings if a provider isn't available
         options = ort.SessionOptions()
