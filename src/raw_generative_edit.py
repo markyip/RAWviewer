@@ -51,6 +51,12 @@ DEFAULT_TIMEOUT_S = 120.0
 # Bump when the provenance record's shape changes.
 PROVENANCE_VERSION = 1
 
+# Adjustment-dict key carrying the provenance JSON. Persisted as the
+# crs:RVGenerativeProvenance child element, same pattern as RVMaskLayers.
+# Present in the dict => the file is AI-generated, which also forces
+# is_default_adjustments to False so the sidecar is never cleared away.
+PROVENANCE_KEY = "_generative_provenance"
+
 
 class GenerativeEditError(Exception):
     """Provider failed. Message is safe to show the user."""

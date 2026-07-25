@@ -73,6 +73,7 @@ run "camera profile apply" testplan/auto/t_camera_profile_apply.py
 run "colorchecker auto-detect (cv2.mcc)" testplan/auto/t_colorchecker_autodetect.py
 run "AI masks (raw_ai_masks)" testplan/auto/t_ai_masks.py
 run "generative edit providers" testplan/auto/t_generative_edit.py
+run "generative derived files" testplan/auto/t_generative_derived.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

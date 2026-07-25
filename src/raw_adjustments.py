@@ -766,6 +766,15 @@ def parse_mask_layers_from_xmp(xmp_path: str) -> str:
     return _parse_crs_child_text_from_xmp(xmp_path, "RVMaskLayers")
 
 
+def parse_generative_provenance_from_xmp(xmp_path: str) -> str:
+    """Read the RVGenerativeProvenance child element -> JSON string.
+
+    Marks a file as AI-generated and records the model/prompt/lineage --
+    see raw_generative_edit.build_provenance.
+    """
+    return _parse_crs_child_text_from_xmp(xmp_path, "RVGenerativeProvenance")
+
+
 def _parse_crs_child_text_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
@@ -860,6 +869,11 @@ def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
     mask_layers_serial = parse_mask_layers_from_xmp(xmp_path)
     if mask_layers_serial:
         adj[MASK_LAYERS_KEY] = mask_layers_serial
+    from raw_generative_edit import PROVENANCE_KEY
+
+    provenance_serial = parse_generative_provenance_from_xmp(xmp_path)
+    if provenance_serial:
+        adj[PROVENANCE_KEY] = provenance_serial
     from raw_lut import LUT_NAME_KEY, LUT_SPACE_DEFAULT, LUT_SPACE_KEY
 
     lut_name = parse_creative_lut_name_from_xmp(xmp_path)
@@ -1021,6 +1035,15 @@ def is_default_adjustments(adj: Dict[str, float] | None) -> bool:
     from raw_mask_layers import MASK_LAYERS_KEY
 
     if str(adj.get(MASK_LAYERS_KEY, "") or "").strip():
+        return False
+    # A generatively-edited file starts with NEUTRAL sliders (the edits are
+    # already baked into its pixels), so without this it would read as
+    # "no edit" and write_xmp_adjustments would clear the sidecar --
+    # silently destroying the record that the file is AI-generated. Same
+    # failure mode as the DenoiseDetail-only case.
+    from raw_generative_edit import PROVENANCE_KEY
+
+    if str(adj.get(PROVENANCE_KEY, "") or "").strip():
         return False
     # Live paint injects mask objects without a PNG serial yet — still non-default.
     try:
@@ -1218,6 +1241,7 @@ _OUR_CRS_CHILD_LOCALS = frozenset(
         "DodgeBurnMask",
         "SpotHealMask",
         "RVMaskLayers",
+        "RVGenerativeProvenance",
         "CreativeLUTName",
         "CreativeLUTWorkingSpace",
     }
@@ -1451,6 +1475,13 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     if mask_layers_serial:
         mask_layers_el = ET.SubElement(desc, f"{{{CRS_NS}}}RVMaskLayers")
         mask_layers_el.text = mask_layers_serial
+
+    from raw_generative_edit import PROVENANCE_KEY
+
+    provenance_serial = str(merged.get(PROVENANCE_KEY, "") or "")
+    if provenance_serial:
+        prov_el = ET.SubElement(desc, f"{{{CRS_NS}}}RVGenerativeProvenance")
+        prov_el.text = provenance_serial
 
     from raw_lut import (
         LUT_AMOUNT_KEY,
