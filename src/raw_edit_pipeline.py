@@ -229,7 +229,8 @@ def process_linear_edit_buffer(
     n_workers = _linear_pipeline_worker_count(img.shape[0])
     if n_workers > 1:
         return _process_linear_edit_buffer_banded(
-            img, merged, n_workers, preview=preview, chroma_denoise=chroma_denoise
+            img, merged, n_workers, preview=preview, chroma_denoise=chroma_denoise,
+            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
         )
 
     return _process_linear_edit_tail(
@@ -353,8 +354,20 @@ def _process_linear_edit_buffer_banded(
     *,
     preview: bool = False,
     chroma_denoise: Optional[bool] = None,
+    use_ai_denoise: bool = False,
+    cancel_check=None,
+    progress_cb=None,
 ) -> np.ndarray:
     """Row-band parallel version of process_linear_edit_buffer's WB/exposure/denoise/tone tail."""
+    if use_ai_denoise and not preview:
+        # AI (SCUNet) denoise is not row-independent and one ONNX session per
+        # band would multiply memory by n_workers -- run the tail single-pass.
+        # (Previously the flag was silently DROPPED here, so AI-denoise
+        # exports through the banded full-res path never denoised at all.)
+        return _process_linear_edit_tail(
+            img, merged, preview=preview, chroma_denoise=chroma_denoise,
+            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+        )
     from raw_adjustments import band_ranges, banded_executor
 
     # 16px overlap pad handles bilateral / guided filter radii (up to r=12) and spot heal
