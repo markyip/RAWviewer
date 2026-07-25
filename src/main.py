@@ -24239,7 +24239,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 os.path.basename(path),
             )
             return
-        logger.info("[EXPORT] Requested format=%s for %s", export_format, os.path.basename(path))
+        logger.info(
+            "[EXPORT] Requested format=%s for %s (ai_denoise=%s)",
+            export_format, os.path.basename(path), use_ai_denoise,
+        )
         from PyQt6.QtWidgets import QFileDialog
 
         from raw_edit_pipeline import (

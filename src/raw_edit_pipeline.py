@@ -362,7 +362,12 @@ def _process_linear_edit_buffer_banded(
 
     def _process_band(band):
         y0, y1, pad_top, pad_bot = band
-        src = img[y0 - pad_top : y1 + pad_bot]
+        # Copy, not view: _apply_wb_tint multiplies in place, and bands'
+        # 16px pad regions overlap -- on a shared view, overlapping rows get
+        # WB applied twice (and raced on by concurrent bands), and the
+        # denoise/guided stages then read the corrupted pad rows, bleeding
+        # visible seam lines ~10px into each band's kept region.
+        src = img[y0 - pad_top : y1 + pad_bot].copy()
         out = _process_linear_edit_tail(
             src, merged, preview=preview, chroma_denoise=chroma_denoise
         )
@@ -837,7 +842,9 @@ def _apply_display_stage_banded(
 
     def _process_band(band):
         y0, y1, pad_top, pad_bot = band
-        src = img[y0 - pad_top : y1 + pad_bot]
+        # Copy, not view: guard against any in-place stage (same seam bug
+        # class as the linear banded path -- see _process_linear_edit_buffer_banded).
+        src = img[y0 - pad_top : y1 + pad_bot].copy()
         out = _apply_display_stage(
             src, merged, y_range=(y0 - pad_top, y1 + pad_bot), total_h=total_h
         )
