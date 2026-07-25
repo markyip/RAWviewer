@@ -2129,6 +2129,53 @@ class _AIMaskWorker(QRunnable):
         self.signals.finished.emit(self.generation, self.file_path, self.kind, alpha)
 
 
+class _GenerativeEditSignals(QObject):
+    progress = pyqtSignal(str)
+    # source_path, derived_path, error ("" on success)
+    finished = pyqtSignal(str, str, str)
+
+
+class _GenerativeEditWorker(QRunnable):
+    """Provider call + derived-file write, off the UI thread.
+
+    Both halves belong here: the write is what makes the multi-second
+    wait worth anything, and doing it on the worker means the UI thread
+    only ever sees a finished path or an error string.
+    """
+
+    def __init__(self, provider, request, source_path: str, cancel, signals):
+        super().__init__()
+        self.provider = provider
+        self.request = request
+        self.source_path = source_path
+        self.cancel = cancel
+        self.signals = signals
+
+    def run(self) -> None:
+        import generative_derived_file as gdf
+        from raw_generative_edit import CancelledError, GenerativeEditError
+
+        try:
+            result = self.provider.edit(
+                self.request, cancel=self.cancel, progress=self.signals.progress.emit
+            )
+            self.signals.progress.emit("Writing file...")
+            derived = gdf.create_derived_file(self.source_path, result)
+        except CancelledError:
+            self.signals.finished.emit(self.source_path, "", "")
+            return
+        except GenerativeEditError as exc:
+            self.signals.finished.emit(self.source_path, "", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).warning("[GENEDIT] failed", exc_info=True)
+            self.signals.finished.emit(self.source_path, "", f"Generation failed: {exc}")
+            return
+        self.signals.finished.emit(self.source_path, derived, "")
+
+
 class _AdjustPreviewSignals(QObject):
     finished = pyqtSignal(int, str, object)  # generation, file_path, ndarray|None
 
@@ -9000,6 +9047,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.mask_ai_requested.connect(
                 self._on_mask_ai_requested
+            )
+            self.single_image_adjust_panel.generative_requested.connect(
+                self._on_generative_requested
+            )
+            self.single_image_adjust_panel.generative_cancel_requested.connect(
+                self._on_generative_cancel_requested
             )
             self.single_image_adjust_panel.mask_layer_mode_changed.connect(
                 self._on_mask_layer_mode_changed
@@ -22564,6 +22617,135 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel.set_mask_layer_stack(stack)
         panel.select_mask_index(index + 1)
         self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    # -- Generative edit (raw_generative_edit) --------------------------
+
+    def _on_generative_requested(self, instruction: str) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        source = str(getattr(self, "current_file_path", "") or "")
+        if panel is None or not source:
+            return
+        if getattr(self, "_generative_busy", False):
+            return
+
+        from generative_settings import has_consent, load_settings
+        from raw_generative_edit import CancelToken, GenerativeRequest, make_provider
+
+        settings = load_settings()
+        provider = make_provider(settings)
+        if not provider.is_configured():
+            panel.set_generative_status("No endpoint configured — press Setup…")
+            return
+
+        # Consent gate. Global (one decision, remembered) but bound to the
+        # endpoint it was granted for, so pointing at a different service
+        # asks again -- agreeing to your own machine is not agreeing to
+        # someone else's API.
+        if provider.requires_consent and not has_consent(settings.get("endpoint", "")):
+            if not self._ask_generative_consent(settings.get("endpoint", "")):
+                panel.set_generative_status("Cancelled.")
+                return
+
+        # The model gets the CURRENT render, so the parametric edits are
+        # baked in and are not replayed on top of the result later.
+        rgb = self._ai_mask_source_rgb()
+        if rgb is None:
+            panel.set_generative_status("Open an image in the editor first.")
+            return
+
+        import generative_derived_file as gdf
+
+        request = GenerativeRequest(
+            image=rgb,
+            instruction=instruction,
+            source_path=source,
+            options={"parent_provenance": gdf.parent_provenance_for(source)},
+        )
+
+        self._generative_busy = True
+        self._generative_cancel = CancelToken()
+        panel.set_generative_busy(True)
+        panel.set_generative_status("Starting…")
+
+        signals = _GenerativeEditSignals()
+        signals.progress.connect(panel.set_generative_status)
+        signals.finished.connect(self._on_generative_finished)
+        self._generative_signals = signals  # keep alive
+        _get_bg_thread_pool().start(
+            _GenerativeEditWorker(
+                provider, request, source, self._generative_cancel, signals
+            )
+        )
+
+    def _ask_generative_consent(self, endpoint: str) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+
+        from generative_settings import consent_prompt_text, grant_consent
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Send this photo to a remote server?")
+        box.setText(consent_prompt_text(endpoint))
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        # Default to Cancel: uploading someone's photographs should never
+        # be one stray Return keypress away.
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return False
+        grant_consent(endpoint)
+        return True
+
+    def _on_generative_cancel_requested(self) -> None:
+        token = getattr(self, "_generative_cancel", None)
+        if token is not None:
+            token.cancel()
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_generative_status("Cancelling…")
+
+    def _on_generative_finished(self, source_path: str, derived_path: str, error: str) -> None:
+        self._generative_busy = False
+        self._generative_cancel = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None:
+            panel.set_generative_busy(False)
+
+        if error:
+            if panel is not None:
+                panel.set_generative_status(error)
+            self._show_status(error, 6000)
+            return
+        if not derived_path:
+            if panel is not None:
+                panel.set_generative_status("Cancelled.")
+            return
+
+        name = os.path.basename(derived_path)
+        if panel is not None:
+            panel.set_generative_status(f"Created {name}")
+        self._show_status(f"Created {name}", 5000)
+        self._reveal_generated_file(derived_path)
+
+    def _reveal_generated_file(self, derived_path: str) -> None:
+        """Bring the new file into the current folder listing and select it.
+
+        Best-effort: the file is on disk regardless, so a refresh that
+        does not fire is a cosmetic problem, not a lost result.
+        """
+        try:
+            if derived_path not in (self.image_files or []):
+                self.image_files.append(derived_path)
+                self.image_files.sort()
+            if hasattr(self, "_refresh_filmstrip"):
+                self._refresh_filmstrip()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "[GENEDIT] Could not refresh listing for %s", derived_path, exc_info=True
+            )
 
     # -- AI masks (raw_ai_masks) ---------------------------------------
 

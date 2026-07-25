@@ -1,0 +1,112 @@
+"""
+Persisted settings and the consent gate for generative editing.
+
+Split out of raw_generative_edit so that module stays Qt-free and unit
+testable; this one owns the QSettings keys and is the single authority on
+whether the user has agreed to upload their photographs.
+
+The consent gate is GLOBAL (one decision, remembered) rather than
+per-folder. It is stored alongside the endpoint it was granted for:
+consenting to your own loopback server is not consent to send the same
+photographs to a different company's API, so changing the endpoint
+revokes it and the user is asked again. That is the one piece of
+per-context strictness worth keeping in an otherwise global gate.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+ORG = "RAWviewer"
+APP = "RAWviewer"
+
+_K_PROVIDER = "generative/provider"
+_K_ENDPOINT = "generative/endpoint"
+_K_API_KEY = "generative/api_key"
+_K_MODEL = "generative/model_name"
+_K_INSECURE = "generative/allow_insecure"
+_K_CONSENT_FOR = "generative/consent_endpoint"
+
+
+def _settings():
+    from PyQt6.QtCore import QSettings
+
+    return QSettings(ORG, APP)
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_settings() -> dict:
+    """Everything raw_generative_edit.make_provider needs."""
+    s = _settings()
+    return {
+        "provider": str(s.value(_K_PROVIDER, "http") or "http"),
+        "endpoint": str(s.value(_K_ENDPOINT, "") or ""),
+        "api_key": str(s.value(_K_API_KEY, "") or ""),
+        "model_name": str(s.value(_K_MODEL, "remote") or "remote"),
+        "allow_insecure": _as_bool(s.value(_K_INSECURE), False),
+    }
+
+
+def save_settings(
+    *,
+    endpoint: str,
+    api_key: str = "",
+    model_name: str = "remote",
+    allow_insecure: bool = False,
+    provider: str = "http",
+) -> None:
+    s = _settings()
+    previous = str(s.value(_K_ENDPOINT, "") or "")
+    s.setValue(_K_PROVIDER, provider)
+    s.setValue(_K_ENDPOINT, endpoint or "")
+    s.setValue(_K_API_KEY, api_key or "")
+    s.setValue(_K_MODEL, model_name or "remote")
+    s.setValue(_K_INSECURE, bool(allow_insecure))
+    if (endpoint or "") != previous:
+        # Consent was granted for a specific destination, not in general.
+        revoke_consent()
+
+
+def has_consent(endpoint: Optional[str] = None) -> bool:
+    """True if the user agreed to upload photos to this exact endpoint."""
+    s = _settings()
+    granted_for = str(s.value(_K_CONSENT_FOR, "") or "")
+    if not granted_for:
+        return False
+    target = endpoint if endpoint is not None else str(s.value(_K_ENDPOINT, "") or "")
+    return bool(target) and granted_for == target
+
+
+def grant_consent(endpoint: str) -> None:
+    _settings().setValue(_K_CONSENT_FOR, endpoint or "")
+
+
+def revoke_consent() -> None:
+    _settings().setValue(_K_CONSENT_FOR, "")
+
+
+def consent_prompt_text(endpoint: str) -> str:
+    """Wording for the gate. Concrete about what leaves the machine.
+
+    Deliberately plain: a photographer needs to know their client's
+    images are being uploaded to a third party, in the terms they would
+    use themselves, not in the language of a EULA.
+    """
+    return (
+        "Generative editing sends a copy of your photograph to:\n\n"
+        f"    {endpoint}\n\n"
+        "The image leaves this computer. Depending on who runs that "
+        "server, it may be stored, logged, or used to train models.\n\n"
+        "Do not use this for images under NDA, images of people who have "
+        "not agreed to it, or any work you are not free to share.\n\n"
+        "Your RAW files are never modified or uploaded — only the "
+        "rendered copy you are editing.\n\n"
+        "Continue?"
+    )

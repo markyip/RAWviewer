@@ -628,6 +628,10 @@ class ImageAdjustPanelWidget(QWidget):
     # resolution and the RGB the model runs on), plus inference is slow
     # enough to need a worker thread and a busy state.
     mask_ai_requested = pyqtSignal(str)
+    # Generative Edit section. Emits the instruction text; the host owns
+    # consent, baking, the provider call, and derived-file creation.
+    generative_requested = pyqtSignal(str)
+    generative_cancel_requested = pyqtSignal()
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -990,6 +994,7 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_masks = CollapsibleSection("Masks", settings_key="masks")
         if not _SHOW_DODGE_BURN_UI:
             self.sect_masks.hide()
+        self.sect_generate = CollapsibleSection("Generative Edit", settings_key="generate")
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
         # Add Collapsible Sections to main scroll layout
@@ -1003,6 +1008,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self.sect_effects)
         layout.addWidget(self.sect_local)
         layout.addWidget(self.sect_masks)
+        layout.addWidget(self.sect_generate)
         layout.addWidget(self.sect_lut)
         layout.addWidget(self.sect_transform)
 
@@ -1543,6 +1549,7 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_local.add_widget(db_container)
 
         self._build_masks_section(self.sect_masks)
+        self._build_generate_section(self.sect_generate)
 
         self._build_looks_section(self.sect_lut)
 
@@ -3139,6 +3146,131 @@ class ImageAdjustPanelWidget(QWidget):
         ("Sharpness", "Sharpness", 0, 150, 1.0),
         ("Clarity2012", "Clarity", -100, 100, 1.0),
     )
+
+    # ------------------------------------------------------------------
+    # Generative Edit section (raw_generative_edit)
+    # ------------------------------------------------------------------
+
+    def _build_generate_section(self, sect: "CollapsibleSection") -> None:
+        """Instruction box + Generate/Cancel.
+
+        Unlike every other section here, this one produces a NEW FILE
+        rather than changing the current render -- so it is a button and
+        a wait, not a slider you scrub. The wording says so plainly; a
+        photographer who thinks this is another adjustment will be
+        surprised when a second file shows up in the folder.
+        """
+        from PyQt6.QtWidgets import QPlainTextEdit
+
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+
+        blurb = QLabel(
+            "Describe a change. Creates a new edited copy next to the "
+            "original — your RAW is not altered."
+        )
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
+        col.addWidget(blurb)
+
+        self._gen_instruction = QPlainTextEdit()
+        self._gen_instruction.setPlaceholderText("e.g. remove the bin on the left")
+        self._gen_instruction.setMaximumHeight(64)
+        self._gen_instruction.setStyleSheet(
+            f"""
+            QPlainTextEdit {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                border-radius: 4px;
+                color: {theme.INK};
+                font-size: 11px;
+                padding: 4px;
+            }}
+            """
+        )
+        col.addWidget(self._gen_instruction)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self._gen_run_btn = QPushButton("Generate")
+        self._gen_cancel_btn = QPushButton("Cancel")
+        self._gen_settings_btn = QPushButton("Setup…")
+        for btn in (self._gen_run_btn, self._gen_cancel_btn, self._gen_settings_btn):
+            btn.setObjectName("adjust_db_clear_btn")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            row.addWidget(btn, 1)
+        self._gen_run_btn.setToolTip("Send this photo and your instruction to the configured model")
+        self._gen_cancel_btn.setToolTip("Stop the current generation")
+        self._gen_settings_btn.setToolTip("Configure the endpoint this feature sends to")
+        self._gen_cancel_btn.setEnabled(False)
+        self._gen_run_btn.clicked.connect(self._on_generate_clicked)
+        self._gen_cancel_btn.clicked.connect(self.generative_cancel_requested.emit)
+        self._gen_settings_btn.clicked.connect(self._on_generate_setup_clicked)
+        col.addLayout(row)
+
+        self._gen_status = QLabel("")
+        self._gen_status.setWordWrap(True)
+        self._gen_status.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
+        col.addWidget(self._gen_status)
+
+        sect.content_layout.addWidget(container)
+        self._refresh_generate_availability()
+
+    def _refresh_generate_availability(self) -> None:
+        """Reflect whether an endpoint is configured, without nagging."""
+        try:
+            from generative_settings import load_settings
+            from raw_generative_edit import make_provider
+
+            provider = make_provider(load_settings())
+            ready = provider.is_configured()
+            self._gen_run_btn.setEnabled(ready)
+            if not ready:
+                self._gen_status.setText("No endpoint configured — press Setup…")
+            elif not self._gen_status.text().strip():
+                self._gen_status.setText(provider.describe())
+        except Exception:
+            self._gen_run_btn.setEnabled(False)
+            self._gen_status.setText("Generative editing unavailable.")
+
+    def generative_instruction(self) -> str:
+        return self._gen_instruction.toPlainText().strip()
+
+    def set_generative_busy(self, busy: bool) -> None:
+        self._gen_run_btn.setEnabled(not busy and self._gen_endpoint_ready())
+        self._gen_cancel_btn.setEnabled(busy)
+        self._gen_instruction.setReadOnly(busy)
+        self._gen_settings_btn.setEnabled(not busy)
+
+    def set_generative_status(self, message: str) -> None:
+        self._gen_status.setText(message or "")
+
+    def _gen_endpoint_ready(self) -> bool:
+        try:
+            from generative_settings import load_settings
+            from raw_generative_edit import make_provider
+
+            return make_provider(load_settings()).is_configured()
+        except Exception:
+            return False
+
+    def _on_generate_clicked(self) -> None:
+        instruction = self.generative_instruction()
+        if not instruction:
+            self._gen_status.setText("Describe the edit you want first.")
+            return
+        self.generative_requested.emit(instruction)
+
+    def _on_generate_setup_clicked(self) -> None:
+        from rawviewer_ui.generative_setup_dialog import GenerativeSetupDialog
+
+        dialog = GenerativeSetupDialog(self)
+        if dialog.exec():
+            self._gen_status.setText("")
+            self._refresh_generate_availability()
 
     def _build_masks_section(self, sect: "CollapsibleSection") -> None:
         self._mask_stack = None  # live raw_mask_layers.MaskLayerStack (host-owned)
