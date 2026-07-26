@@ -572,7 +572,35 @@ class AdjustSlider(QSlider):
         # One minimum step per wheel notch: Qt's default is
         # singleStep * wheelScrollLines (3x) which overshoots fine-grained
         # sliders like Straighten's 0.1-degree steps.
-        delta = event.angleDelta().y() or event.angleDelta().x()
+        #
+        # On a trackpad only the HORIZONTAL axis moves the slider. These
+        # sliders run left to right, so a two-finger swipe up or down changing
+        # a horizontal control never matched the gesture -- and it stole the
+        # vertical scroll the pointer was hovering over, so scrolling the panel
+        # snagged and silently edited whichever slider sat under the cursor.
+        # Vertical is now ignored and propagates to the scroll area, which is
+        # what the gesture looks like it should do. The axis is locked to the
+        # dominant component so a slightly diagonal swipe does not do both.
+        #
+        # A real mouse wheel is exempt: it reports vertical only, so applying
+        # this rule to it would leave those users unable to move any slider.
+        # Trackpads report pixelDelta and/or a scroll phase; wheels report
+        # neither.
+        angle = event.angleDelta()
+        pixel = event.pixelDelta()
+        try:
+            phased = event.phase() != Qt.ScrollPhase.NoScrollPhase
+        except (AttributeError, TypeError):
+            phased = False
+        if not pixel.isNull() or phased:
+            dx = angle.x() or pixel.x()
+            dy = angle.y() or pixel.y()
+            if abs(dy) > abs(dx):
+                event.ignore()  # vertical belongs to the panel's scroll area
+                return
+            delta = dx
+        else:
+            delta = angle.y() or angle.x()
         if delta == 0:
             event.ignore()
             return

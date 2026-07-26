@@ -67,6 +67,7 @@ run "focus stacking" testplan/auto/t_focus_stacking.py
 run "Real-ESRGAN x2 upscale" testplan/auto/t_realesrgan_upscale.py
 run "adjust panel tabs" testplan/auto/t_adjust_panel_tabs.py
 run "adjust section defaults" testplan/auto/t_adjust_section_defaults.py
+run "slider wheel axis" testplan/auto/t_slider_wheel_axis.py
 run "tap-to-paint + eraser reach" testplan/auto/t_tap_to_paint.py
 run "mask layers (Phase 0 perf spike)" testplan/auto/t_mask_layers.py
 run "mask layers drag-time throttling" testplan/auto/t_mask_layers_drag_throttle.py
