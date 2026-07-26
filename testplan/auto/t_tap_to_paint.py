@@ -1,19 +1,26 @@
-"""Tap-to-paint latch + eraser correctness.
+"""Brush arming model + eraser correctness.
 
-Three behaviours the brush was expected to have and did not:
+Arming. A brush hotkey is momentary: hold D/B/X/H and sweep to paint with
+no mouse button, release to close the stroke AND disarm the tool, so the
+key press is the whole interaction. Previously the hotkey only selected the
+tool and a mouse button still had to be held to paint at all. The panel's
+tool buttons remain the click-to-arm-and-stay alternative.
 
-1. A brush hotkey tap should arm the tool *and* start painting on pointer
-   movement. Previously the tap only selected the tool and a mouse button
-   still had to be held down -- arming the same tool twice for one decision.
-2. The eraser should remove mask wherever it is, including across the
-   luminance boundary edge assist protects. Edge assist gating the eraser
-   made painted mask on the far side of a hard edge unreachable.
-3. The eraser should never ADD coverage. It did: the end-of-stroke edge
-   snap ran on erase strokes too, smearing surrounding mask back into the
-   hole the moment the brush was released (+35% of the erased area).
+The latch tests below drive that same paint gate directly. Latching is what
+the opt-out path (RAWVIEWER_HOLD_TO_PAINT=0) uses -- tap on, tap off -- and
+the held key opens the identical gate, so exercising it covers both.
 
-(2) and (3) compounded -- the eraser could not reach across an edge, and
-gave back a third of what it did manage to remove.
+Viewing. The mask overlay toggle needs no armed tool. It was disabled
+without one, which put the answer to "is anything masked?" behind arming a
+tool, and would now grey out the instant a stroke ended.
+
+Erasing, two compounding defects:
+
+1. Edge assist gated the eraser, so mask on the far side of a luminance
+   edge could not be removed at all.
+2. The end-of-stroke edge snap ran on erase strokes too, smearing
+   surrounding mask back into the hole the moment the brush was released
+   (+35% of the erased area) -- the eraser visibly ADDED coverage.
 """
 from __future__ import annotations
 
@@ -266,6 +273,143 @@ def test_erasing_only_ever_reduces_the_mask():
     print("  OK   erasing never increases mask magnitude")
 
 
+# ------------------------------------------------- release disarms the tool
+
+
+class _StubPanel:
+    """Only the surface _handle_brush_key_up / _abort_hold_to_paint touch."""
+
+    def __init__(self):
+        self.mode = None
+        self.disarm_calls = 0
+
+    def set_dodge_burn_mode(self, mode, toggle=True):
+        self.mode = mode
+
+    def dodge_burn_mode(self):
+        return self.mode
+
+    def disarm_dodge_burn(self):
+        self.disarm_calls += 1
+        self.mode = None
+
+    def mask_layer_mode(self):
+        return None
+
+    def disarm_mask_layer_tools(self):
+        pass
+
+
+class _StubView:
+    def __init__(self):
+        self.began = 0
+        self.ended = 0
+
+    def begin_key_paint(self):
+        self.began += 1
+
+    def end_key_paint(self):
+        self.ended += 1
+
+    def begin_latched_paint(self):
+        self.began += 1
+
+
+def _host():
+    """A bare object carrying just the host methods under test."""
+    import main
+
+    class _Host:
+        _handle_brush_key_down = main.RAWImageViewer._handle_brush_key_down
+        _handle_brush_key_up = main.RAWImageViewer._handle_brush_key_up
+        _abort_hold_to_paint = main.RAWImageViewer._abort_hold_to_paint
+
+    h = _Host()
+    h.single_image_adjust_panel = _StubPanel()
+    h.gpu_view = _StubView()
+    h._brush_key_held = None
+    return h, main
+
+
+def test_hold_to_paint_is_the_default():
+    import main
+
+    assert main.HOLD_TO_PAINT is True, "hold-to-paint must be the shipped default"
+    print("  OK   hold-to-paint is the default model")
+
+
+def test_key_release_disarms_the_tool():
+    h, _ = _host()
+    assert h._handle_brush_key_down("dodge") is True
+    assert h.single_image_adjust_panel.mode == "dodge"
+    assert h.gpu_view.began == 1
+
+    assert h._handle_brush_key_up("dodge") is True
+    assert h.gpu_view.ended == 1, "stroke was not closed"
+    assert h.single_image_adjust_panel.disarm_calls == 1, "tool was not disarmed"
+    assert h.single_image_adjust_panel.mode is None
+    assert h._brush_key_held is None
+    print("  OK   releasing the hotkey disarms the tool")
+
+
+def test_superseded_key_release_does_not_disarm_the_new_tool():
+    """D held, then B pressed, then D released -- B must survive."""
+    h, _ = _host()
+    h._handle_brush_key_down("dodge")
+    h._handle_brush_key_down("burn")
+    assert h.single_image_adjust_panel.mode == "burn"
+
+    assert h._handle_brush_key_up("dodge") is False, "stale key claimed the release"
+    assert h.single_image_adjust_panel.mode == "burn", "released stale key disarmed Burn"
+    assert h.single_image_adjust_panel.disarm_calls == 0
+    print("  OK   a superseded key's release leaves the new tool armed")
+
+
+def test_focus_loss_abort_also_disarms():
+    """A swallowed key-up must not leave a live tool behind."""
+    h, _ = _host()
+    h._handle_brush_key_down("heal")
+    h._abort_hold_to_paint()
+    assert h.gpu_view.ended == 1
+    assert h.single_image_adjust_panel.disarm_calls == 1
+    assert h._brush_key_held is None
+    print("  OK   focus-loss abort disarms too")
+
+
+# ------------------------------------------------ mask toggle without a tool
+
+
+def test_mask_overlay_togglable_with_nothing_armed():
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget
+
+    p = ImageAdjustPanelWidget()
+    p.show()
+    assert p.dodge_burn_mode() is None, "fixture should start with no tool armed"
+    assert p._db_show_mask_btn.isEnabled(), "mask toggle disabled with no tool armed"
+
+    seen = []
+    p.dodgeBurnMaskToggled.connect(seen.append)
+    p.toggle_dodge_burn_show_mask()
+    assert p._db_show_mask_btn.isChecked() is True, "M did not turn the overlay on"
+    p.toggle_dodge_burn_show_mask()
+    assert p._db_show_mask_btn.isChecked() is False, "M did not turn the overlay off"
+    assert seen == [True, False], f"overlay signal not emitted both ways: {seen}"
+    print("  OK   mask overlay toggles with no brush armed")
+
+
+def test_mask_toggle_stays_enabled_after_disarm():
+    """Release-disarms must not grey out the overlay the moment a stroke ends."""
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget
+
+    p = ImageAdjustPanelWidget()
+    p.show()
+    p.set_dodge_burn_mode("dodge")
+    assert p._db_show_mask_btn.isEnabled()
+    p.disarm_dodge_burn()
+    assert p._db_show_mask_btn.isEnabled(), "mask toggle greyed out on disarm"
+    print("  OK   mask toggle survives disarming")
+
+
 def main() -> int:
     test_latch_survives_key_release()
     test_latched_move_paints_without_any_button()
@@ -278,6 +422,12 @@ def main() -> int:
     test_eraser_removes_the_effect_not_just_coverage()
     test_release_must_not_put_erased_mask_back()
     test_erasing_only_ever_reduces_the_mask()
+    test_hold_to_paint_is_the_default()
+    test_key_release_disarms_the_tool()
+    test_superseded_key_release_does_not_disarm_the_new_tool()
+    test_focus_loss_abort_also_disarms()
+    test_mask_overlay_togglable_with_nothing_armed()
+    test_mask_toggle_stays_enabled_after_disarm()
     print("\nPASS t_tap_to_paint")
     return 0
 

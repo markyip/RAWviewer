@@ -2286,13 +2286,18 @@ class _AdjustCompareOriginalWorker(QRunnable):
 # (overlay scales original to match).
 _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 
-# Prototype: hold-to-paint brush control. When on, a brush hotkey (D/B/X/H) held
-# down paints while the pointer sweeps -- no click needed -- and painting stops
-# on release. The panel tool buttons stay as the persistent "brush context"
-# (cursor preview + wheel-to-resize) decoupled from the held-key paint gate.
-# Default off so the shipped click-drag flow is unchanged; enable with
-# RAWVIEWER_HOLD_TO_PAINT=1 to trial the feel.
-HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "").strip().lower() in (
+# Hold-to-paint brush control, now the default. A brush hotkey (D/B/X/H) held
+# down paints while the pointer sweeps -- no click needed -- and on release the
+# stroke closes AND the tool disarms. The key press is the whole interaction:
+# hold to paint, let go to put the tool away, with no separate arm and disarm
+# step to remember.
+#
+# The panel tool buttons remain a persistent, click-to-arm alternative for
+# anyone who wants the tool to stay put; only the hotkeys are momentary.
+#
+# RAWVIEWER_HOLD_TO_PAINT=0 restores the older model, where a hotkey tap
+# latches the tool on until it is tapped off.
+HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "1").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -22991,7 +22996,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return True
 
     def _handle_brush_key_up(self, mode: str) -> bool:
-        """Route a brush hotkey release: close the hold-stroke for that key."""
+        """Route a brush hotkey release: close the stroke and disarm the tool.
+
+        Releasing puts the tool away, so the key press is the entire
+        interaction -- hold to paint, let go to stop. Leaving it armed meant
+        the next pointer move over the photo could still paint under a tool
+        the user had stopped using.
+
+        Only the hotkey is momentary; the panel's tool buttons still arm
+        persistently, so click-to-arm remains available for anyone who wants
+        the tool to stay put.
+        """
         if not HOLD_TO_PAINT:
             return False
         if getattr(self, "_brush_key_held", None) != mode:
@@ -23001,6 +23016,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None and hasattr(gv, "end_key_paint"):
             gv.end_key_paint()
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "disarm_dodge_burn"):
+            panel.disarm_dodge_burn()
         return True
 
     def _abort_hold_to_paint(self) -> None:
@@ -23013,6 +23031,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None and hasattr(gv, "end_key_paint"):
             gv.end_key_paint()
+        # Same disarm as a real release: a tool left armed by a swallowed
+        # key-up would keep painting on the next pointer move.
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "disarm_dodge_burn"):
+            panel.disarm_dodge_burn()
 
     def _on_brush_tool_left_image(self) -> None:
         """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo.

@@ -1008,7 +1008,7 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addLayout(header)
 
         hint = QLabel(
-            "E / Esc — close · D/B/X/H brush tools (tap, then sweep) · "
+            "E / Esc — close · D/B/X/H hold to paint · "
             "two-finger scroll = Brush Size"
         )
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
@@ -1016,9 +1016,9 @@ class ImageAdjustPanelWidget(QWidget):
         hint.setToolTip(
             "While Adjust is open:\n"
             "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• D / B / X / H arm Dodge / Burn / Eraser / Heal and start painting: "
-            "sweep the pointer over the photo, no mouse button needed. "
-            "Press the same key again (or pick another tool) to put it away\n"
+            "• Hold D / B / X / H and sweep the pointer over the photo to paint — "
+            "no mouse button needed. Releasing the key stops the stroke and puts "
+            "the tool away. Click a tool button instead if you want it to stay armed\n"
             "• Eraser removes painted mask and the dodge/burn inside it, "
             "and unlike the paint brushes it is not held back by Edge Assist\n"
             "• With a brush tool armed, two-finger scroll changes Brush Size "
@@ -1530,13 +1530,13 @@ class ImageAdjustPanelWidget(QWidget):
             (
                 self._dodge_btn,
                 "Dodge (D) — brush to brighten; soft falloff, edge-snaps on release.\n"
-                "Tap the key, then sweep — no need to hold a mouse button.\n"
+                "Hold the key and sweep to paint — no mouse button needed.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
                 self._burn_btn,
                 "Burn (B) — brush to darken; soft falloff, edge-snaps on release.\n"
-                "Tap the key, then sweep — no need to hold a mouse button.\n"
+                "Hold the key and sweep to paint — no mouse button needed.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
@@ -1607,10 +1607,10 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_show_mask_btn.setCheckable(True)
         self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._db_show_mask_btn.setEnabled(False)
         self._db_show_mask_btn.setToolTip(
-            "Overlay the active brush mask (red/blue = dodge/burn, green = heal).\n"
-            "Turns on automatically when a brush tool is armed. Shortcut: M"
+            "Overlay the brush mask (red/blue = dodge/burn, green = heal).\n"
+            "Always available, with or without a tool armed -- arming one just\n"
+            "turns it on for you. Shortcut: M"
         )
         self._db_show_mask_btn.toggled.connect(self._on_mask_btn_toggled)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
@@ -3061,34 +3061,25 @@ class ImageAdjustPanelWidget(QWidget):
         self.dodge_burn_mode_changed.emit(mode)
 
     def _sync_dodge_burn_mask_button_enabled(self, armed: bool) -> None:
-        """Mask overlay is available while a brush tool is armed, and stays
-        available afterward if a previously-painted dodge/burn/heal mask
-        still has data (e.g. a loaded edit) so the user can inspect it
-        without re-arming a tool.
+        """Mask overlay is always togglable; arming merely turns it on for you.
 
-        Default on when arming a tool so paint coverage is visible immediately
-        (especially important for Heal).
+        It used to be disabled unless a tool was armed or a painted mask
+        already held data. That made the one control for "show me what is
+        masked" unavailable exactly when someone wanted to find out whether
+        anything was masked -- and now that releasing a hotkey disarms, it
+        would grey out the instant a stroke finished. Viewing is not editing;
+        it needs no armed tool.
+
+        Arming still checks it by default so paint coverage shows immediately
+        (which matters most for Heal), unless the user has hidden it.
         """
         btn = getattr(self, "_db_show_mask_btn", None)
         if btn is None:
             return
-        has_data = bool(
-            getattr(self, "_db_mask_has_data", False)
-            or getattr(self, "_heal_mask_has_data", False)
-        )
-        available = bool(armed or has_data)
-        btn.setEnabled(available)
+        btn.setEnabled(True)
         # setChecked below fires the button's own `toggled` signal, which
         # _on_mask_btn_toggled already forwards to dodgeBurnMaskToggled --
         # no need (and no longer any need) to emit it again here.
-        if not available:
-            if btn.isChecked():
-                self._block_emit = True
-                try:
-                    btn.setChecked(False)
-                finally:
-                    self._block_emit = False
-            return
         if armed and not btn.isChecked() and not self._mask_user_hidden:
             self._block_emit = True
             try:
