@@ -450,7 +450,12 @@ def test_release_snap_leaves_no_rectangular_edge():
         inside = float(mask.data[row, left : left + 3].mean())
         step = abs(inside - outside)
         local = float(np.abs(np.diff(before[row, left + 10 : left + 60])).mean())
-        assert step < 5.0 * max(local, 1e-6), (
+        # Two ways to pass, because a solid stroke has no local gradient to
+        # compare against and the ratio then divides by ~0: either the step is
+        # in scale with its surroundings, or it is too small to see at all.
+        # The bug this guards produced a step of 0.074 -- three orders of
+        # magnitude above this floor.
+        assert step < 1e-3 or step < 5.0 * max(local, 1e-6), (
             f"{label}: rectangular edge at x={left}: step {step:.5f} vs local "
             f"gradient {local:.5f} ({step / max(local, 1e-9):.1f}x)"
         )

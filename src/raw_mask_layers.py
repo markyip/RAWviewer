@@ -61,6 +61,8 @@ from typing import Optional
 
 import numpy as np
 
+from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
+
 MASK_LAYERS_KEY = "_mask_layers_v1"  # XMP serial key, see mask_layers_xmp.py
 MASK_LAYERS_OBJ_KEY = "_mask_layers_obj"  # live MaskLayerStack; never write to XMP
 
@@ -433,6 +435,7 @@ def stamp_mask_layer_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Accumulate soft brush coverage into ``layer.alpha`` (max-blend, 0..1).
 
@@ -458,7 +461,7 @@ def stamp_mask_layer_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if edge_assist and luminance is not None and luminance.shape[:2] == (h, w):
         from raw_dodge_burn import _edge_assist_gate
@@ -486,6 +489,7 @@ def erase_mask_layer_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Pull ``layer.alpha`` toward zero under a soft circular brush."""
     from raw_dodge_burn import circular_brush_falloff
@@ -499,7 +503,7 @@ def erase_mask_layer_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if edge_assist and luminance is not None and luminance.shape[:2] == (h, w):
         from raw_dodge_burn import _edge_assist_gate

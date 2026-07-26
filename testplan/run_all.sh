@@ -36,6 +36,7 @@ run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
 run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
+run "brush feather" testplan/auto/t_brush_feather.py
 run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
 run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py

@@ -23,6 +23,8 @@ from typing import Optional
 
 import numpy as np
 
+from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
+
 MASK_KEY = "_spot_heal_mask_v1"
 MASK_OBJ_KEY = "_spot_heal_mask_obj"  # live HealMask; never write to XMP
 INPAINT_RADIUS = 5  # OpenCV inpaint neighborhood radius (pixels at buffer res)
@@ -81,6 +83,7 @@ def stamp_heal_brush(
     cy: float,
     radius: float,
     strength: float,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Accumulate soft coverage into ``mask`` (max-blend). Returns bbox."""
     from raw_dodge_burn import circular_brush_falloff
@@ -94,7 +97,7 @@ def stamp_heal_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
     # Heal stamps need a strong single-click presence; max-blend with a
     # boosted center so a short dab covers the defect for Telea.
     amt = falloff * min(1.0, float(strength) * 1.35)
@@ -111,6 +114,7 @@ def erase_heal_brush(
     cy: float,
     radius: float,
     strength: float,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Pull heal coverage toward zero under a soft brush."""
     from raw_dodge_burn import circular_brush_falloff
@@ -124,7 +128,7 @@ def erase_heal_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
     region = mask.data[y0:y1, x0:x1]
     region *= np.clip(1.0 - falloff * float(strength), 0.0, 1.0)
     mask.touch()

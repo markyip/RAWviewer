@@ -1708,6 +1708,32 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row.addWidget(self._db_strength_slider, 1)
         db_container_layout.addLayout(db_strength_row)
 
+        # Brush Feather. Session tool state like Size and Flow -- it describes
+        # the brush, not the photo, so it is not an adjustment key and is not
+        # written to the sidecar (Lightroom treats brush feather the same way).
+        db_feather_row = QHBoxLayout()
+        db_feather_row.setSpacing(6)
+        db_feather_lbl = QLabel("Brush Feather")
+        db_feather_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_feather_lbl.setMinimumWidth(78)
+        db_feather_row.addWidget(db_feather_lbl)
+        self._db_feather_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._db_feather_slider.setRange(0, 100)
+        from raw_dodge_burn import DEFAULT_BRUSH_FEATHER as _DEFAULT_FEATHER
+
+        self._db_feather_slider.setValue(int(round(_DEFAULT_FEATHER * 100)))
+        self._db_feather_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_feather_slider.setToolTip(
+            "Edge softness: 0 paints a hard-edged circle, 100 fades from the "
+            "very centre.\nThe brush was fixed at 100 before this slider "
+            "existed, which is why solid coverage needed scrubbing."
+        )
+        self._db_feather_slider.valueChanged.connect(
+            lambda _v: self.dodge_burn_brush_changed.emit()
+        )
+        db_feather_row.addWidget(self._db_feather_slider, 1)
+        db_container_layout.addLayout(db_feather_row)
+
         # Stops-per-mask-unit (persisted as DodgeBurnStrength). Distinct from
         # Brush Flow, which only controls per-stroke accumulation while painting.
         # Heal mode disables this row — inpaint always runs at full strength.
@@ -3343,6 +3369,15 @@ class ImageAdjustPanelWidget(QWidget):
         """0..1: per-stamp delta at the brush center before pressure scaling."""
         return float(self._db_strength_slider.value()) / 100.0
 
+    def dodge_burn_brush_feather(self) -> float:
+        """0..1 edge softness for every brush (dodge/burn, heal, mask paint)."""
+        slider = getattr(self, "_db_feather_slider", None)
+        if slider is None:
+            from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
+
+            return float(DEFAULT_BRUSH_FEATHER)
+        return float(slider.value()) / 100.0
+
     def dodge_burn_edge_assist(self) -> bool:
         btn = getattr(self, "_db_edge_btn", None)
         return True if btn is None else bool(btn.isChecked())
@@ -3593,7 +3628,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "
-            "Brush Size / Flow / Edge Assist come from the Local section."
+            "Brush Size / Flow / Feather / Edge Assist come from the Local section."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")

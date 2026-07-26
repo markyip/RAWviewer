@@ -584,6 +584,8 @@ class GpuImageView(QGraphicsView):
         self._dodge_burn_brush_flow = 0.55
         self._brush_cursor_pixmap_r = -1.0
         self._brush_cursor_pixmap_flow = -1.0
+        self._brush_cursor_pixmap_feather = -1.0
+        self._dodge_burn_brush_feather = 0.70
         self._scene.addItem(self._brush_cursor_item)
 
         # Gradient-mask handles (selected parametric layer only).
@@ -1981,6 +1983,12 @@ class GpuImageView(QGraphicsView):
         self._dodge_burn_brush_flow = max(0.05, min(1.0, float(flow)))
         self._refresh_brush_cursor_placement()
 
+    def set_dodge_burn_brush_feather(self, feather: float) -> None:
+        """Edge softness 0..1 — must track the slider or the on-image ring
+        stops describing what a stroke will actually cover."""
+        self._dodge_burn_brush_feather = max(0.0, min(1.0, float(feather)))
+        self._refresh_brush_cursor_placement()
+
     def _refresh_brush_cursor_placement(self) -> None:
         center = None
         if not self._brush_cursor_item.pixmap().isNull():
@@ -1999,10 +2007,17 @@ class GpuImageView(QGraphicsView):
         """Soft radial preview: size from radius, opacity from flow. No hard ring."""
         r = float(getattr(self, "_dodge_burn_brush_radius", 40.0))
         flow = float(getattr(self, "_dodge_burn_brush_flow", 0.55))
-        # Rebuild when radius moves by >=0.5px or flow by >=2%.
+        feather = float(getattr(self, "_dodge_burn_brush_feather", 0.70))
+        # Rebuild when radius moves by >=0.5px, or flow/feather by >=2%.
+        # Feather MUST be part of this key: without it the preview keeps the
+        # softness it was first built with and stops describing what paints.
         if (
             abs(r - float(getattr(self, "_brush_cursor_pixmap_r", -1.0))) < 0.5
             and abs(flow - float(getattr(self, "_brush_cursor_pixmap_flow", -1.0)))
+            < 0.02
+            and abs(
+                feather - float(getattr(self, "_brush_cursor_pixmap_feather", -1.0))
+            )
             < 0.02
         ):
             if not self._brush_cursor_item.pixmap().isNull():
@@ -2013,7 +2028,9 @@ class GpuImageView(QGraphicsView):
 
             ri = max(2, int(np.ceil(r)))
             size = 2 * ri + 1
-            falloff = circular_brush_falloff(0, size, 0, size, float(ri), float(ri), r)
+            falloff = circular_brush_falloff(
+                0, size, 0, size, float(ri), float(ri), r, feather
+            )
             rgba = np.zeros((size, size, 4), dtype=np.uint8)
             # Soft white fill; peak alpha scales with Brush Flow so the preview
             # matches how strong each stamp will land.
@@ -2031,11 +2048,13 @@ class GpuImageView(QGraphicsView):
             self._brush_cursor_item.setPixmap(QPixmap.fromImage(qimg))
             self._brush_cursor_pixmap_r = r
             self._brush_cursor_pixmap_flow = flow
+            self._brush_cursor_pixmap_feather = feather
         except Exception:
             # Fallback: empty — cursor still hidden OS-side while armed.
             self._brush_cursor_item.setPixmap(QPixmap())
             self._brush_cursor_pixmap_r = -1.0
             self._brush_cursor_pixmap_flow = -1.0
+            self._brush_cursor_pixmap_feather = -1.0
 
     def _place_brush_cursor(self, scene_pt: QPointF) -> None:
         self._ensure_brush_cursor_pixmap()

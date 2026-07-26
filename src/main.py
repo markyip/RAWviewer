@@ -23092,15 +23092,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             luma, chroma_guide = self._ensure_brush_guides(mh, mw)
             edge_on = bool(panel.dodge_burn_edge_assist())
+            feather = float(panel.dodge_burn_brush_feather())
             if mode == "erase":
                 erase_mask_layer_brush(
                     layer, mx, my, radius, strength,
                     luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                    feather=feather,
                 )
             else:
                 stamp_mask_layer_brush(
                     layer, mx, my, radius, strength,
                     luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                    feather=feather,
                 )
 
             # Live coverage overlay while painting (throttled with is_end flush).
@@ -23236,6 +23239,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv.set_dodge_burn_brush_radius(panel.dodge_burn_brush_radius())
         if hasattr(gv, "set_dodge_burn_brush_flow"):
             gv.set_dodge_burn_brush_flow(panel.dodge_burn_brush_strength())
+        if hasattr(gv, "set_dodge_burn_brush_feather"):
+            gv.set_dodge_burn_brush_feather(panel.dodge_burn_brush_feather())
 
     def _on_dodge_burn_resume_after_resize(self) -> None:
         """Fingers lifted after a mid-stroke two-finger brush resize.
@@ -23630,7 +23635,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sx = mw / max(1, disp_w)
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
             strength = panel.dodge_burn_brush_strength() * max(0.05, float(pressure))
-            stamp_heal_brush(mask, mx, my, radius, strength)
+            stamp_heal_brush(
+                mask, mx, my, radius, strength,
+                feather=float(panel.dodge_burn_brush_feather()),
+            )
             if hasattr(panel, "set_spot_heal_mask_present"):
                 panel.set_spot_heal_mask_present(not mask.is_empty)
 
@@ -23791,6 +23799,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._dodge_burn_chroma_guide = None
 
             edge_on = bool(panel.dodge_burn_edge_assist())
+            brush_feather = float(panel.dodge_burn_brush_feather())
             t_stamp = time.perf_counter()
             if mode == "erase":
                 # Flow × pressure → erase amount (1.0 clears center in one stamp).
@@ -23806,13 +23815,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     luminance=luma,
                     chroma=chroma_guide,
                     edge_assist=edge_on,
+                    feather=brush_feather,
                 )
                 if panel is not None and hasattr(panel, "set_dodge_burn_mask_present"):
                     panel.set_dodge_burn_mask_present(not mask.is_empty)
                 # Also erase heal coverage under the same brush.
                 heal = getattr(self, "_spot_heal_mask", None)
                 if heal is not None and heal.data.shape == (mh, mw):
-                    erase_heal_brush(heal, mx, my, radius, erase_amt)
+                    erase_heal_brush(
+                        heal, mx, my, radius, erase_amt, feather=brush_feather
+                    )
                     if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
                         panel.set_spot_heal_mask_present(not heal.is_empty)
             else:
@@ -23828,6 +23840,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     edge_assist=edge_on,
                     stroke_baseline=getattr(self, "_dodge_burn_mask_at_stroke_start", None),
                     max_stroke_delta=max_stroke_cap,
+                    feather=brush_feather,
                 )
             stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
             perf_acc = getattr(self, "_dodge_burn_stroke_perf", None)
@@ -23920,7 +23933,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         # gaussian at the cursor instead of a flat block.
                         r_disp = max(2.0, float(panel.dodge_burn_brush_radius()))
                         d_disp = circular_brush_falloff(
-                            0, ph, 0, pw, pt.x() - px0, pt.y() - py0, r_disp
+                            0, ph, 0, pw, pt.x() - px0, pt.y() - py0, r_disp,
+                            brush_feather,
                         ) * float(delta) * (1.0 if mode == "dodge" else -1.0)
 
                     stops = float(

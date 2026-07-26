@@ -46,6 +46,19 @@ STRENGTH_KEY = "DodgeBurnStrength"
 DEFAULT_STRENGTH = 1.75  # stops at mask value +/-1.0
 MASK_CLIP = 1.5
 
+# Brush edge softness, 0..1 (the UI's Feather 0..100). Session-level tool state
+# like Size and Flow, deliberately NOT an adjustment key: it describes the
+# brush, not the photo, so it is no more part of an edit than which hand you
+# hold the pen in. Lightroom treats brush feather the same way.
+#
+# 0.70 rather than the 1.0 this was fixed at: at 1.0 only 4.2% of the brush
+# disc reaches 0.9 strength and the disc averages 0.298, so a stamp lays down
+# under a third of its nominal strength and solid coverage needs scrubbing.
+# 0.70 puts ~16% above 0.9 and averages 0.418 -- still visibly soft-edged, but
+# a stroke covers roughly what the cursor ring says it will. Already-saved
+# masks are stored as alpha and are unaffected.
+DEFAULT_BRUSH_FEATHER = 0.70
+
 
 def mask_stage_fingerprint(mask: "DodgeBurnMask") -> str:
     """Cheap stage-cache key: shape + mutation version (no PNG encode)."""
@@ -280,18 +293,35 @@ def circular_brush_falloff(
     cx: float,
     cy: float,
     radius: float,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> np.ndarray:
     """Soft circular brush kernel on ``[y0:y1, x0:x1]`` (peak 1 at center).
 
-    Raised-cosine (Hann) radial profile: full strength at the center, smooth
-    gradient to zero at ``radius``. Hard-clips outside ``radius`` so the
-    axis-aligned stamp bbox corners stay empty (avoids rectangular live blits).
+    Two-radius profile, as every brush-based editor uses: full strength out to
+    ``(1 - feather) * radius``, then a raised-cosine (Hann) fall to zero at
+    ``radius``. Hard-clips outside ``radius`` so the axis-aligned stamp bbox
+    corners stay empty (avoids rectangular live blits).
+
+    ``feather`` is 0..1 (the UI's 0..100). 1.0 is the single-radius Hann this
+    used to be fixed at, which put only 4.2% of the disc above 0.9 strength and
+    averaged 0.298 across it -- so a stamp deposited under a third of its
+    nominal strength and no setting could produce a crisp edge. 0.0 is a hard
+    circle. The default sits between, where a stroke covers what it looks like
+    it covers.
     """
     r = max(1.0, float(radius))
+    fe = max(0.0, min(1.0, float(feather)))
     yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
     dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
-    t = np.clip(dist / r, 0.0, 1.0)
-    # Hann window: 1 at center, 0 at edge, continuous first derivative.
+
+    inner = r * (1.0 - fe)
+    if fe <= 1e-4:
+        # Hard edge: no transition band to interpolate across.
+        falloff = (dist <= r).astype(np.float32)
+        return falloff
+    t = np.clip((dist - inner) / max(1e-6, r - inner), 0.0, 1.0)
+    # Hann window over the transition band: 1 at the core, 0 at the edge,
+    # continuous first derivative so repeated stamps do not band.
     falloff = (0.5 * (1.0 + np.cos(np.pi * t))).astype(np.float32)
     falloff[dist > r] = 0.0
     return falloff
@@ -311,6 +341,7 @@ def stamp_brush(
     luma_tol: float = 0.10,
     stroke_baseline: Optional[np.ndarray] = None,
     max_stroke_delta: Optional[float] = None,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Add one soft circular stamp to ``mask`` in place.
 
@@ -337,7 +368,7 @@ def stamp_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if (
         edge_assist
@@ -383,6 +414,7 @@ def erase_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Pull mask values toward zero under a soft circular brush.
 
@@ -412,7 +444,7 @@ def erase_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     # Multiplicative erase toward zero: factor 1 at edge, (1-strength) at center.
     amount = np.clip(falloff * float(strength), 0.0, 1.0)
