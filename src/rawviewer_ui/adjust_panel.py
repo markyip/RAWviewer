@@ -929,7 +929,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         # Camera calibration profile banner. A saved profile is applied
         # automatically to every image from the same body that has no XMP
-        # sidecar (raw_adjustments.apply_camera_profile_defaults), so without
+        # sidecar (raw_adjustments.load_adjustments_for_file), so without
         # this the user sees an unexplained colour shift and has no way back.
         self._camera_profile_row = QWidget()
         cp_row = QHBoxLayout(self._camera_profile_row)

@@ -34,17 +34,67 @@ def get_camera_profile_path() -> str:
 
 
 def camera_identity_from_exif(exif: Optional[Dict[str, Any]]) -> Tuple[str, str, Optional[int]]:
-    """(make, model, iso) from an EXIF dict — the one place this parsing lives."""
-    make = str((exif or {}).get("Make", "") or "").strip()
-    model = str((exif or {}).get("Model", "") or "").strip()
+    """(make, model, iso) from an EXIF dict — the one place this parsing lives.
+
+    Accepts BOTH tag conventions in use here: exifread/metadata_backend's
+    "Image Make" / "EXIF ISOSpeedRatings" (what every producer in this
+    codebase actually emits) and the bare "Make" / "ISO" form. It
+    previously read only the bare form, which nothing produces, so every
+    lookup returned empty and profiles were saved under "unknown_camera".
+    """
+    tags = exif or {}
+
+    def _first(*names: str) -> str:
+        for name in names:
+            value = tags.get(name)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+        return ""
+
+    make = _first("Image Make", "Make", "EXIF Make")
+    model = _first("Image Model", "Model", "EXIF Model")
+
     iso_val: Optional[int] = None
-    try:
-        raw_iso = (exif or {}).get("ISOSpeedRatings") or (exif or {}).get("ISO")
-        if raw_iso:
-            iso_val = int(raw_iso)
-    except Exception:
-        pass
+    raw_iso = _first(
+        "EXIF ISOSpeedRatings",
+        "ISOSpeedRatings",
+        "EXIF ISO",
+        "ISO",
+        "EXIF PhotographicSensitivity",
+    )
+    if raw_iso:
+        try:
+            # exifread renders lists as "[100]"; take the leading integer.
+            digits = "".join(c for c in raw_iso.split(",")[0] if c.isdigit())
+            if digits:
+                iso_val = int(digits)
+        except Exception:
+            iso_val = None
     return make, model, iso_val
+
+
+def camera_identity_for_file(path: str) -> Tuple[str, str, Optional[int]]:
+    """(make, model, iso) for an image path, or ("", "", None) if unreadable.
+
+    THE single entry point for camera identity — both the profile
+    auto-apply path and the UI banner previously had their own copy that
+    imported a module named ``exif_extractor``, which does not exist in
+    this repository. Both copies sat inside a bare ``except Exception``,
+    so the ImportError was swallowed and the entire camera-profile feature
+    silently did nothing: profiles saved under "unknown_camera", never
+    matched, never applied.
+    """
+    if not path:
+        return ("", "", None)
+    try:
+        from metadata_backend import process_file_from_path
+
+        return camera_identity_from_exif(process_file_from_path(path, details=False))
+    except Exception:
+        logger.debug("[CALIB] Could not read camera identity for %s", path, exc_info=True)
+        return ("", "", None)
 
 
 def normalize_camera_key(make: str, model: str, iso: Optional[int] = None) -> str:
@@ -161,7 +211,7 @@ def delete_camera_profile(
     Deletes the exact ISO-specific key when ``iso`` is given, otherwise the
     general key for the model. Returns True if an entry was actually removed.
     Without this there is no way out of a bad calibration short of hand-editing
-    camera_profiles.json, while ``apply_camera_profile_defaults`` keeps applying
+    camera_profiles.json, while ``raw_adjustments.load_adjustments_for_file`` keeps applying
     it to every future shot from the same body.
     """
     key = normalize_camera_key(make, model, iso=iso)

@@ -890,11 +890,9 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
         adj["Temperature"] = as_shot
     if not (xmp_path and os.path.isfile(xmp_path)):
         try:
-            from color_calibration import camera_identity_from_exif, get_camera_profile
-            from exif_extractor import ExifExtractor
-            make, model, iso_val = camera_identity_from_exif(
-                ExifExtractor().extract_exif_data(image_path)
-            )
+            from color_calibration import camera_identity_for_file, get_camera_profile
+
+            make, model, iso_val = camera_identity_for_file(image_path)
             if make or model:
                 prof = get_camera_profile(make, model, iso=iso_val)
                 if prof:
@@ -902,15 +900,36 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
                         adj["Temperature"] = float(adj.get("Temperature", as_shot)) + float(prof["temperature_shift"])
                     if "tint_shift" in prof:
                         adj["Tint"] = float(adj.get("Tint", 0.0)) + float(prof["tint_shift"])
-                    for band in ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"]:
-                        if "hsl_hue" in prof and band in prof["hsl_hue"]:
-                            adj[f"Hue{band}"] = float(prof["hsl_hue"][band])
-                        if "hsl_sat" in prof and band in prof["hsl_sat"]:
-                            adj[f"Sat{band}"] = float(prof["hsl_sat"][band])
-                        if "hsl_lum" in prof and band in prof["hsl_lum"]:
-                            adj[f"Lum{band}"] = float(prof["hsl_lum"][band])
+                    # Key names MUST match what raw_hsl.apply_hsl_adjustments
+                    # reads ("HueAdjustmentRed", not "HueRed"). These were
+                    # written as Hue/Sat/Lum + band, which are in neither
+                    # DEFAULT_ADJUSTMENTS nor RELEVANT_ADJUSTMENT_KEYS, so
+                    # every calibrated HSL value was dropped -- a second,
+                    # independent defect that would have surfaced the moment
+                    # the identity lookup above was repaired. Band list and
+                    # prefixes now come from the same source the pipeline
+                    # uses, so they cannot drift apart again.
+                    from raw_hsl import HSL_COLOR_NAMES
+
+                    for band in HSL_COLOR_NAMES:
+                        for prof_key, adj_prefix in (
+                            ("hsl_hue", "HueAdjustment"),
+                            ("hsl_sat", "SaturationAdjustment"),
+                            ("hsl_lum", "LuminanceAdjustment"),
+                        ):
+                            values = prof.get(prof_key)
+                            if isinstance(values, dict) and band in values:
+                                adj[f"{adj_prefix}{band}"] = float(values[band])
         except Exception:
-            pass
+            # Logged, not swallowed: a bare `pass` here hid a dead import
+            # (`exif_extractor`, a module that does not exist) for the
+            # entire life of this feature. A camera profile that cannot be
+            # applied must still leave a trace.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[CALIB] Could not apply camera profile to %s", image_path, exc_info=True
+            )
     return adj
 
 

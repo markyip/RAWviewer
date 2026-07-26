@@ -25760,19 +25760,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
     def _camera_identity_for_file(self, path: str) -> tuple[str, str, int | None]:
-        """(make, model, iso) from EXIF, or ("", "", None) if unreadable."""
-        try:
-            from exif_extractor import ExifExtractor
-            from color_calibration import camera_identity_from_exif
+        """(make, model, iso) from EXIF, or ("", "", None) if unreadable.
 
-            return camera_identity_from_exif(ExifExtractor().extract_exif_data(path))
-        except Exception:
-            return ("", "", None)
+        Delegates to color_calibration so the profile lookup and this
+        banner/dialog path can never disagree about a camera's identity --
+        they previously had separate copies importing a module that does
+        not exist, which made both silently return empty.
+        """
+        from color_calibration import camera_identity_for_file
+
+        return camera_identity_for_file(path)
 
     def _refresh_camera_profile_banner(self, panel: Any, path: str) -> None:
         """Show the panel banner when a saved profile is auto-applied to this file.
 
-        Mirrors apply_camera_profile_defaults' own condition: the profile is
+        Mirrors load_adjustments_for_file's own condition: the profile is
         only applied when the image has no XMP sidecar, so a file the user has
         already edited must not claim a profile is in effect.
         """
