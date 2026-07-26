@@ -89,8 +89,17 @@ _MODELS = {
     },
     "sky": {
         "filename": "skyseg.onnx",
-        "url": "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
-        "sha256": "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39",
+        # fp16 export of the same U^2-Net: 84 MB against the fp32's 168, for
+        # output that is pixel-identical (measured IoU 1.0000, mean absolute
+        # difference 0.00000) and 6% slower -- 30ms on a 320px input.
+        #
+        # The equivalent trade is NOT available for the subject model above.
+        # BiRefNet_lite fp16 halves the download too, but ONNX Runtime's CPU
+        # backend has no native fp16 kernels: it casts around every op, and
+        # the smaller file measured 32% SLOWER (10.1s vs 7.6s per press).
+        # Worth revisiting only where a GPU provider actually runs fp16.
+        "url": "https://huggingface.co/voyagerfromeast/skyseg/resolve/main/skyseg_fp16.onnx",
+        "sha256": "74d87f4a69378a610a6be662f859c38cfbdfdd75ff74bbfc54842965ed6fc9f7",
         "input_size": 320,
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
