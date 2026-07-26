@@ -36,7 +36,7 @@
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
 - **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
 - **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Plus edition also understands plain descriptions like `sunset on beach` — all offline.
-- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs. Every edit is saved to an XMP sidecar; your RAW is never modified.
+- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed, dragged as a gradient, or found for you. Every edit is saved to an XMP sidecar; your RAW is never modified.
 
 <p align="center">
   <img src="docs/images/single-view.jpg" alt="Full-screen single-image view with film strip and star rating" width="900">
@@ -163,7 +163,7 @@ While the Adjust panel is open (**E**):
 | Key | Action |
 |-----|--------|
 | **E** / **Esc** | Close Adjust (returns to browse mode) |
-| **D** / **B** / **X** / **H** | Arm **Dodge** / **Burn** / **Eraser** / **Heal** (press again to disarm) |
+| **D** / **B** / **X** / **H** | Hold to paint **Dodge** / **Burn** / **Eraser** / **Heal** — sweep the pointer, no mouse button. Releasing puts the tool away |
 | **O** | Toggle **Mask** overlay (when a brush tool is armed) |
 | **Two-finger scroll** | Change **Brush Size** when a brush is armed (**Ctrl+scroll** still zooms) |
 | **←** / **→** | Nudge the focused slider (or previous/next image if none focused) |
@@ -171,7 +171,7 @@ While the Adjust panel is open (**E**):
 | **Space** / **Double-click** | Fit / 100% zoom |
 | **J** / **G** / **F** | Clipping / composition guide / focus overlay (same as browse) |
 
-Notes: **Effect Strength** applies only to Dodge/Burn; Heal uses **Size** and **Flow** at full inpaint strength. Browse-only keys (**M**, **P**, histogram **H**) do not apply while Adjust is open — **H** arms Heal instead. By default, edits render inside the Adjust panel and browsing shows original pixels; every edit is written to an XMP sidecar next to the RAW.
+Notes: **Effect Strength** applies only to Dodge/Burn; Heal uses **Size** and **Flow** at full inpaint strength. **Brush Feather** sets edge softness for every brush — 0 is a hard circle, 100 fades from the centre. The panel's tool buttons arm persistently if you would rather not hold a key. Browse-only keys (**M**, **P**, histogram **H**) do not apply while Adjust is open — **H** arms Heal instead. By default, edits render inside the Adjust panel and browsing shows original pixels; every edit is written to an XMP sidecar next to the RAW.
 
 </details>
 
@@ -230,7 +230,7 @@ On Windows, the installer offers **Standard**, **Plus (DirectML)**, and **Plus (
 
 **RAW from all major brands:** Canon (CR2/CR3), Nikon (NEF), Sony (ARW), Fujifilm (RAF), Olympus (ORF), Panasonic (RW2), Adobe DNG, and most other cameras. **Plus:** JPEG, TIFF, HEIF, and animated GIF / WebP.
 
-**Nikon High Efficiency (HE/HE*) NEFs** open using the camera's built-in preview — browsing, culling, and rating all work. Developing these files in Adjust isn't possible yet; standard and lossless NEFs develop as usual.
+**Nikon High Efficiency (HE/HE*) NEFs** open using the camera's built-in preview — browsing, culling and rating all work, and Adjust now edits them from that preview. It is an 8-bit starting point rather than sensor data, so white balance and highlight recovery have much less to work with than on a standard NEF; tone, colour, masks, crop and detail behave as they do on any JPEG. Standard and lossless NEFs develop from sensor data as usual.
 
 **HDR stills** (HEIC / HEIF / AVIF / HDR TIFF) are tone-mapped to standard brightness so browsing stays fast.
 
@@ -337,23 +337,40 @@ Project directions and remaining work that are **not** tied to a particular rele
 
 Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
 
+### 🛠️ In Active Development (Development Branch / Worktree)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| **Local masks** (brush, linear, radial, AI) | **Landed, stabilising** | Stacked mask layers with per-layer adjustments. Brush with Size / Flow / Feather; linear and radial gradients placed by dragging on the photo, with handles to reshape them afterwards; **Smart Object** and **Sky** find a mask in one press; **AI Selection** masks whatever you click. Every mask kind shares one colour overlay (`src/raw_mask_layers.py`, `src/raw_mask_shapes.py`, `src/raw_ai_masks.py`) |
+| **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export with an **AI Detail** slider. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable |
+| **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN as the final export stage, ~65s for a 32MP frame. Being a GAN it invents plausible detail rather than reconstructing it, so its strength is dialable toward a plain resize |
+| **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Profiles record the decode they were calibrated against and warn if it changes |
+| **Manual lens distortion** | **Landed, stabilising** | A Distortion slider for lenses with no profile — positive corrects pincushion, negative barrel. Runs before straighten, since distortion is a property of the capture |
+| **Edit Nikon HE/HE\* NEF** | **Landed, stabilising** | LibRaw still cannot demosaic these, so the editor falls back to the embedded JPEG. An 8-bit display-referred base: white balance and highlight recovery have far less headroom, everything else behaves as it does editing a JPEG |
+| **Generative Editing** (instruction-based) | **In Progress** (`generative-editing` branch) | Provider layer, derived-file lifecycle, Adjust-panel wiring. The remote provider uploads the photo to a third party — opt-in and clearly flagged; a local Windows+NVIDIA provider is the follow-up |
+
+"Landed, stabilising" means the feature is on `development` and working, but has not been through a tagged release.
+
+### 🔮 Planned Future Roadmap (Not Yet in Worktree)
+
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
-| 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
-| 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
-| 3 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 4 | **Object / subject ML masks** | **Medium** | L | Plus-only (model size); Standard stays brush/geometry |
-| 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
-| 8 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
-| 9 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
-| 10 | **HDR Merge** | **High** | M | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
-| 11 | **Panorama Stitching / HDR Panorama** | **Medium** | L | Feature matching, homography warping, and tiled multi-band blending |
+| 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until the next Adjust visit |
+| 2 | **Mask add / subtract** | **High** | M | `MaskLayer.blend` exists and the compositor ignores it. Decide first whether it composes across layers or within one mask, as Lightroom does |
+| 3 | **User-facing upscale strength** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants a slider with a gentler default |
+| 4 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts "not this" points; only positive ones are sent, so an over-reaching selection can be trimmed by brush but not re-solved |
+| 5 | **Local generative provider** (Windows + NVIDIA) | **Medium** | L | Keeps generative edits on-device, removing the third-party upload the remote provider requires |
+| 6 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
+| 7 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
+| 8 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
+| 9 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
+| 10 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
-- **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
+- **Nikon HE-NEF** edits from the embedded JPEG, not sensor data — an 8-bit base, so heavy white-balance and highlight-recovery moves have little to work with.
+- **AI model weights download on first use**, not bundled: the mask, denoise and upscale features each need one online session before they work offline.
+- **Smart Object returns one mask.** It finds everything salient — on a studio scene, eleven separate regions — but hands them back as a single mask. Use AI Selection to isolate one thing.
 
 ---
 
