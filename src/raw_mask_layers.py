@@ -222,14 +222,29 @@ class MaskLayer:
         self._empty_cache = (self.version, result)
         return result
 
+    def effective_bbox(self) -> Optional[tuple]:
+        """Where this layer actually *applies* -- what the compositor needs.
+
+        An inverted layer covers everything OUTSIDE its painted region, so its
+        applying region is the whole frame. Compositing an inverted layer over
+        ``bbox()`` confined the adjustment to the one area where effective
+        alpha is near zero, so Invert appeared to do almost nothing beyond a
+        small patch while the mask overlay showed it correctly.
+        """
+        if self.invert:
+            if not self.enabled:
+                return None
+            h, w = self.alpha.shape[:2]
+            return (0, h, 0, w)
+        return self.bbox()
+
     def bbox(self) -> Optional[tuple]:
         """Non-zero alpha bbox in this layer's own (alpha-resolution) coordinates.
 
-        Computed on ``alpha`` regardless of ``invert`` -- an inverted layer's
-        *effective* coverage is everywhere alpha is low, but its editable
-        (non-trivial) region is still where the painted alpha itself is
-        non-zero; parametric masks (gradient/radial, Phase 2) will instead
-        derive a bbox analytically from their params.
+        Computed on ``alpha`` regardless of ``invert``: this is the *editable*
+        region -- what a brush has touched -- which is what the UI and the mask
+        overlay want. The compositor wants ``effective_bbox()``. Parametric
+        masks (gradient/radial) will derive a bbox analytically from params.
         """
         cached = self._bbox_cache
         if cached is not None and cached[0] == self.version:
@@ -313,7 +328,10 @@ def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
     context, then only the tight bbox is cropped back out of that padded
     result before blending -- the pad-before-filter-crop-after pattern.
     """
-    bbox = layer.bbox()
+    # effective_bbox, not bbox: an inverted layer applies everywhere outside
+    # its painted region, so confining it to the painted bbox made Invert a
+    # near no-op. See MaskLayer.effective_bbox.
+    bbox = layer.effective_bbox()
     if bbox is None:
         return img
     mh, mw = layer.alpha.shape[:2]

@@ -2297,6 +2297,12 @@ _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 #
 # RAWVIEWER_HOLD_TO_PAINT=0 restores the older model, where a hotkey tap
 # latches the tool on until it is tapped off.
+# Below this fraction of the frame, a one-shot AI mask is treated as "not
+# found" rather than added. A segmentation net asked for an absent subject
+# returns a near-empty alpha, not a failure, and 0.2% of the frame is noise
+# rather than a sky.
+_AI_MASK_MIN_COVERAGE = 0.002
+
 HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "1").strip().lower() in (
     "1",
     "true",
@@ -22678,8 +22684,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
+        # A segmentation net asked for something absent does not fail -- it
+        # returns a near-empty alpha. Adding that as a layer left the user with
+        # an "AI Sky" mask covering nothing, which looks like the feature
+        # silently broke. Refuse the layer and say what happened instead.
+        try:
+            import numpy as np
+
+            coverage = float(np.count_nonzero(result > 0.10)) / float(max(1, result.size))
+        except Exception:
+            coverage = 1.0
+        if coverage < _AI_MASK_MIN_COVERAGE:
+            self._show_status(
+                f"No {kind} found in this photo — no mask added.", 4000
+            )
+            return
+
         self._add_mask_layer_from_alpha(result, name=f"AI {kind.capitalize()}")
-        self._show_status(f"{kind.capitalize()} mask added.", 2500)
+        self._show_status(
+            f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
+            "Use Paint / Erase to refine it.",
+            3500,
+        )
 
     def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True):
         """Wrap a model-produced alpha in a MaskLayer and push it on the stack.

@@ -1775,7 +1775,10 @@ class ImageAdjustPanelWidget(QWidget):
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         export_btn.setMinimumHeight(40)
-        layout.addWidget(export_btn)
+        # On the Global page only: it sat in the shared column below both
+        # pages, so a big Export button followed the user into mask editing
+        # where finishing the export is not the next thing they want.
+        self._tab_page_global.layout().addWidget(export_btn)
         self._export_btn = export_btn
         self._is_raw_file = True
         self._rebuild_export_menu()
@@ -3422,9 +3425,12 @@ class ImageAdjustPanelWidget(QWidget):
         ops_row = QHBoxLayout()
         ops_row.setSpacing(6)
         self._mask_add_btn = QPushButton("Add Mask")
-        self._mask_del_btn = QPushButton("Delete")
-        self._mask_dup_btn = QPushButton("Duplicate")
-        for btn in (self._mask_add_btn, self._mask_del_btn, self._mask_dup_btn):
+        # Duplicate removed: duplicating a mask copies coverage AND its
+        # adjustments, which is almost never what is wanted -- the two useful
+        # cases (same region, different adjustment / same adjustment, different
+        # region) both need editing afterwards anyway.
+        self._mask_del_btn = QPushButton("Delete Mask")
+        for btn in (self._mask_add_btn, self._mask_del_btn):
             btn.setObjectName("adjust_db_clear_btn")
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -3432,7 +3438,6 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_add_btn.setToolTip("Add a new empty mask layer — paint it with the Paint brush")
         self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
         self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
-        self._mask_dup_btn.clicked.connect(self._on_mask_duplicate_clicked)
         col.addLayout(ops_row)
 
         tools_row = QHBoxLayout()
@@ -3479,7 +3484,7 @@ class ImageAdjustPanelWidget(QWidget):
         ai_row.setSpacing(6)
         self._mask_ai_subject_btn = QPushButton("Subject")
         self._mask_ai_sky_btn = QPushButton("Sky")
-        self._mask_ai_click_btn = QPushButton("Click")
+        self._mask_ai_click_btn = QPushButton("Select")
         for btn, tip in (
             (
                 self._mask_ai_subject_btn,
@@ -3513,6 +3518,15 @@ class ImageAdjustPanelWidget(QWidget):
         )
         col.addLayout(ai_row)
 
+        # Per-mask parameters, hidden wholesale until a mask exists. Showing a
+        # dozen greyed-out sliders reads as broken rather than as "nothing
+        # selected yet", and it buried Add Mask under controls that could not
+        # do anything.
+        self._mask_params_wrap = QWidget()
+        params_col = QVBoxLayout(self._mask_params_wrap)
+        params_col.setContentsMargins(0, 0, 0, 0)
+        params_col.setSpacing(6)
+
         for key, label, lo, hi, div in self._MASK_SLIDER_SPECS:
             row = QHBoxLayout()
             row.setSpacing(6)
@@ -3537,7 +3551,7 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(val)
             self._mask_sliders[key] = slider
             self._mask_value_labels[key] = val
-            col.addLayout(row)
+            params_col.addLayout(row)
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "
@@ -3545,7 +3559,18 @@ class ImageAdjustPanelWidget(QWidget):
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
-        col.addWidget(hint)
+        params_col.addWidget(hint)
+        col.addWidget(self._mask_params_wrap)
+
+        self._mask_empty_hint = QLabel(
+            "No masks yet. Add Mask paints one by hand, or let Subject / Sky / "
+            "Select find one for you."
+        )
+        self._mask_empty_hint.setWordWrap(True)
+        self._mask_empty_hint.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 10px;"
+        )
+        col.addWidget(self._mask_empty_hint)
 
         sect.add_widget(container)
         self._sync_mask_controls_enabled()
@@ -3611,13 +3636,14 @@ class ImageAdjustPanelWidget(QWidget):
             for i, layer in enumerate(layers):
                 name = layer.name or f"Mask {i + 1}"
                 item = QListWidgetItem(name)
+                # No check box: a click selects the row. The check state was
+                # doubling as an enable toggle and made a single click
+                # ambiguous -- "did I select this or turn it off?".
+                # Qt gives QListWidgetItem the checkable flag by default, so it
+                # has to be cleared, not merely left unset.
                 item.setFlags(
-                    item.flags()
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsEditable
-                )
-                item.setCheckState(
-                    Qt.CheckState.Checked if layer.enabled else Qt.CheckState.Unchecked
+                    (item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    & ~Qt.ItemFlag.ItemIsUserCheckable
                 )
                 self._mask_list.addItem(item)
             if layers:
@@ -3638,7 +3664,17 @@ class ImageAdjustPanelWidget(QWidget):
 
     def _sync_mask_controls_enabled(self) -> None:
         has_layer = self.active_mask_index() is not None
-        for btn in (self._mask_del_btn, self._mask_dup_btn, self._mask_paint_btn,
+        wrap = getattr(self, "_mask_params_wrap", None)
+        if wrap is not None:
+            wrap.setVisible(has_layer)
+        empty_hint = getattr(self, "_mask_empty_hint", None)
+        if empty_hint is not None:
+            empty_hint.setVisible(not has_layer)
+        lst = getattr(self, "_mask_list", None)
+        if lst is not None:
+            # An empty list box is just a hole in the panel.
+            lst.setVisible(has_layer)
+        for btn in (self._mask_del_btn, self._mask_paint_btn,
                     self._mask_erase_btn, self._mask_invert_btn):
             btn.setEnabled(has_layer)
         for slider in self._mask_sliders.values():
@@ -3673,7 +3709,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._sync_mask_controls_enabled()
 
     def _on_mask_item_changed(self, item: QListWidgetItem) -> None:
-        """Rename (edit text) or enable/disable (check state) in place."""
+        """Rename in place. Enable/disable went away with the check box."""
         if self._mask_block:
             return
         row = self._mask_list.row(item)
@@ -3682,11 +3718,6 @@ class ImageAdjustPanelWidget(QWidget):
             return
         layer = stack.layers[row]
         layer.name = item.text()
-        enabled = item.checkState() == Qt.CheckState.Checked
-        if enabled != layer.enabled:
-            layer.enabled = enabled
-            layer.touch()
-            self._emit_preview_and_save()
 
     def _on_mask_delete_clicked(self) -> None:
         idx = self.active_mask_index()
