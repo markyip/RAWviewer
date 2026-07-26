@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Dict
+from typing import Callable, Dict, Sequence
 
 from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -304,6 +304,82 @@ class _LooksRowWidget(QWidget):
     def _on_remove_clicked(self) -> None:
         self._suppress_item_click = True
         self.remove_clicked.emit()
+
+
+class PanelTabBar(QWidget):
+    """Flat underline tab bar for the Adjust panel's top-level pages.
+
+    Not a QTabWidget: that owns its own page stack and draws OS-native tab
+    chrome that fights the panel's flat styling. This is a row of checkable
+    buttons that emits an index -- the caller keeps its pages as ordinary
+    widgets in the existing scroll area, so scroll position, section
+    collapse state and every existing widget reference survive unchanged.
+
+    Selected tab is INK with a 2px EMBER underline; the rest are INK_MUTED.
+    """
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, labels: Sequence[str], parent=None):
+        super().__init__(parent)
+        self._buttons: list[QPushButton] = []
+        self._current = 0
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(18)
+
+        for index, label in enumerate(labels):
+            btn = QPushButton(label.upper())
+            btn.setObjectName("adjust_tab_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet(
+                f"""
+                QPushButton#adjust_tab_btn {{
+                    background: transparent;
+                    border: none;
+                    border-bottom: 2px solid transparent;
+                    color: {theme.INK_MUTED};
+                    font-size: 10px;
+                    font-weight: 700;
+                    padding: 6px 2px;
+                    text-align: left;
+                }}
+                QPushButton#adjust_tab_btn:hover {{
+                    color: {theme.INK};
+                }}
+                QPushButton#adjust_tab_btn:checked {{
+                    color: {theme.INK};
+                    border-bottom: 2px solid {theme.EMBER};
+                }}
+                """
+            )
+            btn.clicked.connect(lambda _checked=False, i=index: self.set_current(i))
+            row.addWidget(btn)
+            self._buttons.append(btn)
+
+        row.addStretch(1)
+        if self._buttons:
+            self._buttons[0].setChecked(True)
+
+    def current(self) -> int:
+        return self._current
+
+    def set_current(self, index: int) -> None:
+        if not self._buttons:
+            return
+        index = max(0, min(len(self._buttons) - 1, int(index)))
+        # Re-assert the checked states even when the index is unchanged: a
+        # click on the already-selected tab would otherwise leave it toggled
+        # off, since these are checkable buttons rather than a button group.
+        for i, btn in enumerate(self._buttons):
+            btn.setChecked(i == index)
+        if index == self._current:
+            return
+        self._current = index
+        self.changed.emit(index)
 
 
 class CollapsibleSection(QWidget):
@@ -866,6 +942,7 @@ class ImageAdjustPanelWidget(QWidget):
         vp.setAutoFillBackground(True)
         vp.setStyleSheet(f"background-color: {theme.SURFACE};")
         card_layout.addWidget(scroll)
+        self._scroll_area = scroll
 
         inner = QWidget()
         inner.setObjectName("adjust_panel_inner")
@@ -954,7 +1031,50 @@ class ImageAdjustPanelWidget(QWidget):
         )
         cp_row.addWidget(self._camera_profile_reset_btn)
         self._camera_profile_row.setVisible(False)
-        layout.addWidget(self._camera_profile_row)
+
+        # Top-level tabs. Masking earned its own page: a mask stack plus the
+        # selected layer's own adjustments is a mode of its own, and buried
+        # under a dozen global sections it read as one more slider group.
+        #
+        # Both pages live in the one existing scroll area as plain widgets and
+        # switching toggles visibility. Every section keeps its identity, so
+        # per-section collapse persistence and all existing widget references
+        # survive the move untouched.
+        self._panel_tabs = PanelTabBar(("Global", "Masks"))
+        self._panel_tabs.changed.connect(self._on_panel_tab_changed)
+        tabs_wrap = QWidget()
+        tabs_wrap.setObjectName("adjust_tabbar_wrap")
+        tabs_wrap.setStyleSheet(
+            f"""
+            QWidget#adjust_tabbar_wrap {{
+                border-bottom: 1px solid {theme.LINE};
+            }}
+            """
+        )
+        tabs_wrap_layout = QVBoxLayout(tabs_wrap)
+        tabs_wrap_layout.setContentsMargins(0, 2, 0, 0)
+        tabs_wrap_layout.setSpacing(0)
+        tabs_wrap_layout.addWidget(self._panel_tabs)
+        layout.addWidget(tabs_wrap)
+
+        self._tab_page_global = QWidget()
+        global_layout = QVBoxLayout(self._tab_page_global)
+        global_layout.setContentsMargins(0, 0, 0, 0)
+        global_layout.setSpacing(6)
+        layout.addWidget(self._tab_page_global)
+
+        self._tab_page_masks = QWidget()
+        masks_layout = QVBoxLayout(self._tab_page_masks)
+        masks_layout.setContentsMargins(0, 0, 0, 0)
+        masks_layout.setSpacing(6)
+        # Without this the lone Masks section stretches to fill the viewport.
+        masks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tab_page_masks)
+        self._tab_page_masks.setVisible(False)
+
+        # The calibration banner reports a global colour shift, so it stays
+        # with Global rather than following the mask workflow.
+        global_layout.addWidget(self._camera_profile_row)
 
         self._tone_curve_row = None
 
@@ -992,19 +1112,30 @@ class ImageAdjustPanelWidget(QWidget):
             self.sect_masks.hide()
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
-        # Add Collapsible Sections to main scroll layout
-        layout.addWidget(self.sect_histogram)
-        layout.addWidget(self.sect_light)
-        layout.addWidget(self.sect_color)
-        layout.addWidget(self.sect_curve)
-        layout.addWidget(self.sect_hsl)
-        layout.addWidget(self.sect_detail)
-        layout.addWidget(self.sect_noise)
-        layout.addWidget(self.sect_effects)
-        layout.addWidget(self.sect_local)
-        layout.addWidget(self.sect_masks)
-        layout.addWidget(self.sect_lut)
-        layout.addWidget(self.sect_transform)
+        # Add Collapsible Sections to their tab pages
+        global_layout.addWidget(self.sect_histogram)
+        global_layout.addWidget(self.sect_light)
+        global_layout.addWidget(self.sect_color)
+        global_layout.addWidget(self.sect_curve)
+        global_layout.addWidget(self.sect_hsl)
+        global_layout.addWidget(self.sect_detail)
+        global_layout.addWidget(self.sect_noise)
+        global_layout.addWidget(self.sect_effects)
+        global_layout.addWidget(self.sect_local)
+        global_layout.addWidget(self.sect_lut)
+        global_layout.addWidget(self.sect_transform)
+
+        # Masks page. Dodge & burn stays on Global for now: it is a signed
+        # exposure map, not a layer in the mask stack, and moving it would
+        # change which tab a long-standing tool lives on rather than just
+        # relocating the mask UI.
+        masks_layout.addWidget(self.sect_masks)
+        # The tab already says MASKS; a "MASKS" accordion header directly
+        # under it is the same word twice, plus a collapse control for the
+        # only thing on the page. Drop the header and keep the section --
+        # its content layout is what every mask control is parented to.
+        self.sect_masks.header.setVisible(False)
+        self.sect_masks.set_expanded(True)
 
         # Build tone curve editor row inside the curve section first
         if _SHOW_TONE_CURVE_UI:
@@ -2722,6 +2853,31 @@ class ImageAdjustPanelWidget(QWidget):
         self._set_lens_correction_checked(checked)
         self.lens_correction_toggled.emit(bool(checked))
         self.editing_finished.emit(self.get_adjustments())
+
+    def _on_panel_tab_changed(self, index: int) -> None:
+        """Show the selected top-level page (0 = Global, 1 = Masks)."""
+        masks = index == 1
+        self._tab_page_global.setVisible(not masks)
+        self._tab_page_masks.setVisible(masks)
+
+        # The Masks page holds one section, so a user who had collapsed it
+        # while it lived at the bottom of Global would land on a page that
+        # looks broken. Opening it on arrival costs nothing -- there is
+        # nothing else on the page to scroll past.
+        if masks:
+            self.sect_masks.set_expanded(True)
+
+        # Each page has its own natural scroll extent; carrying the other
+        # page's offset over lands mid-content for no reason.
+        scroll = getattr(self, "_scroll_area", None)
+        if scroll is not None:
+            scroll.verticalScrollBar().setValue(0)
+
+    def show_masks_tab(self) -> None:
+        """Bring the Masks page forward (used when a mask action starts)."""
+        tabs = getattr(self, "_panel_tabs", None)
+        if tabs is not None:
+            tabs.set_current(1)
 
     def _on_copy_settings_clicked(self) -> None:
         """Snapshot this image's edit settings into the session clipboard.
