@@ -234,7 +234,8 @@ def process_linear_edit_buffer(
     if n_workers > 1:
         return _process_linear_edit_buffer_banded(
             img, merged, n_workers, preview=preview, chroma_denoise=chroma_denoise,
-            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+            use_ai_denoise=use_ai_denoise,
+            cancel_check=cancel_check, progress_cb=progress_cb,
         )
 
     return _process_linear_edit_tail(
@@ -394,7 +395,8 @@ def _process_linear_edit_buffer_banded(
         # exports through the banded full-res path never denoised at all.)
         return _process_linear_edit_tail(
             img, merged, preview=preview, chroma_denoise=chroma_denoise,
-            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+            use_ai_denoise=use_ai_denoise,
+            cancel_check=cancel_check, progress_cb=progress_cb,
         )
     from raw_adjustments import band_ranges, banded_executor
 
@@ -976,10 +978,11 @@ def _process_for_export(
     adj: dict[str, float],
     *,
     use_ai_denoise: bool = False,
+    use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
 ) -> np.ndarray:
-    return process_linear_edit_buffer(
+    processed = process_linear_edit_buffer(
         rgb_linear,
         adj,
         preview=False,
@@ -988,6 +991,58 @@ def _process_for_export(
         cancel_check=cancel_check,
         progress_cb=progress_cb,
     )
+    if use_ai_upscale:
+        processed = _apply_ai_upscale(processed, cancel_check=cancel_check, progress_cb=progress_cb)
+    return processed
+
+
+def _apply_ai_upscale(img: np.ndarray, *, cancel_check=None, progress_cb=None) -> np.ndarray:
+    """Real-ESRGAN x2, applied last so every earlier stage runs at native res.
+
+    Returns the input unchanged if the model is missing or the run fails: an
+    export that silently comes out at 1x is a far better outcome than an
+    export that dies at the final stage after minutes of work. The log line
+    is the record that it happened.
+    """
+    from onnx_realesrgan import RealESRGANONNX, realesrgan_model_available, realesrgan_model_path
+
+    if os.environ.get("RAWVIEWER_EXPORT_REALESRGAN_ONNX", "1") != "1":
+        logger.info("[UPSCALE] AI upscale disabled via RAWVIEWER_EXPORT_REALESRGAN_ONNX=0")
+        return img
+    if not realesrgan_model_available():
+        logger.warning(
+            "[UPSCALE] Upscale model not found at %s -- exporting at native resolution",
+            realesrgan_model_path(),
+        )
+        return img
+
+    h, w = img.shape[:2]
+    logger.info("[UPSCALE] Real-ESRGAN x2: %dx%d -> %dx%d", w, h, w * 2, h * 2)
+
+    def _upscale_progress(frac: float) -> None:
+        if progress_cb is None:
+            return
+        # Same two-arity dance the tonemap/encode stages use -- some callers
+        # supply a plain single-argument callback.
+        try:
+            progress_cb(frac, "upscale")
+        except TypeError:
+            progress_cb(frac)
+
+    try:
+        strength = float(os.environ.get("RAWVIEWER_AI_UPSCALE_STRENGTH", "1.0"))
+    except ValueError:
+        strength = 1.0
+
+    try:
+        return RealESRGANONNX().process(
+            img, progress_callback=_upscale_progress, cancel_check=cancel_check, strength=strength
+        )
+    except ExportCancelled:
+        raise
+    except Exception:
+        logger.warning("[UPSCALE] AI upscale failed -- exporting at native resolution", exc_info=True)
+        return img
 
 
 def _xmp_extratags(embed_xmp_path: Optional[str]) -> list:
@@ -1039,12 +1094,14 @@ def export_adjusted_tiff16(
     *,
     embed_xmp_path: Optional[str] = None,
     use_ai_denoise: bool = False,
+    use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
 ) -> None:
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
     processed = _process_for_export(
-        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+        cancel_check=cancel_check, progress_cb=progress_cb,
     )
     if progress_cb is not None:
         try:
@@ -1067,12 +1124,14 @@ def export_adjusted_jpeg(
     *,
     quality: int = 92,
     use_ai_denoise: bool = False,
+    use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
 ) -> None:
     """Bake adjustments to 8-bit JPEG."""
     processed = _process_for_export(
-        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+        cancel_check=cancel_check, progress_cb=progress_cb,
     )
     if progress_cb is not None:
         try:
@@ -1104,6 +1163,7 @@ def export_adjusted_webp(
     *,
     quality: int = 95,
     use_ai_denoise: bool = False,
+    use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
 ) -> None:
@@ -1113,7 +1173,8 @@ def export_adjusted_webp(
     denoised gradients into visible 16x16 macroblock grid banding.
     """
     processed = _process_for_export(
-        rgb_linear, adj, use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb
+        rgb_linear, adj, use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+        cancel_check=cancel_check, progress_cb=progress_cb,
     )
     if progress_cb is not None:
         try:
@@ -1157,6 +1218,7 @@ def export_adjusted_image(
     cancel_check=None,
     progress_cb=None,
     use_ai_denoise: bool = False,
+    use_ai_upscale: bool = False,
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP)."""
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
@@ -1167,15 +1229,18 @@ def export_adjusted_image(
     if fmt == EXPORT_FORMAT_JPEG:
         export_adjusted_jpeg(
             rgb_linear, adj, output_path,
-            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+            cancel_check=cancel_check, progress_cb=progress_cb,
         )
     elif fmt == EXPORT_FORMAT_WEBP:
         export_adjusted_webp(
             rgb_linear, adj, output_path,
-            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+            cancel_check=cancel_check, progress_cb=progress_cb,
         )
     else:
         export_adjusted_tiff16(
             rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
-            use_ai_denoise=use_ai_denoise, cancel_check=cancel_check, progress_cb=progress_cb,
+            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
+            cancel_check=cancel_check, progress_cb=progress_cb,
         )

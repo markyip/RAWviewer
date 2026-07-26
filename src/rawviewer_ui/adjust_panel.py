@@ -594,7 +594,7 @@ class ImageAdjustPanelWidget(QWidget):
     editing_finished = pyqtSignal(dict)
     preview_changed = pyqtSignal(dict)
     reset_requested = pyqtSignal()
-    export_requested = pyqtSignal(str, dict, bool)  # format id, adjustments, use_ai_denoise
+    export_requested = pyqtSignal(str, dict, bool, bool)  # format id, adjustments, use_ai_denoise, use_ai_upscale
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
     compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
@@ -3616,8 +3616,12 @@ class ImageAdjustPanelWidget(QWidget):
         fund_adj = fundamental_adjustments_for_burst(full_adj)
         self.apply_burst_group_requested.emit(fund_adj, list(self._burst_group_members))
 
-    def _request_export(self, export_format: str, use_ai_denoise: bool = False) -> None:
-        self.export_requested.emit(export_format, self.get_adjustments(), bool(use_ai_denoise))
+    def _request_export(
+        self, export_format: str, use_ai_denoise: bool = False, use_ai_upscale: bool = False
+    ) -> None:
+        self.export_requested.emit(
+            export_format, self.get_adjustments(), bool(use_ai_denoise), bool(use_ai_upscale)
+        )
 
     def _on_slider_value_changed(self, key: str, fmt: Callable[[float], str]) -> None:
         if self._block_emit:
@@ -3806,31 +3810,62 @@ class ImageAdjustPanelWidget(QWidget):
         if is_raw:
             formats.insert(0, ("16-bit TIFF (baked)", "tiff16"))
 
+        # AI submenus appear only for models actually present on disk -- both
+        # are optional downloads, and a menu entry that silently exports an
+        # ordinary file is worse than no entry at all.
         try:
             from onnx_scunet import scunet_model_path
 
-            if os.path.exists(scunet_model_path()):
-                ai_menu = QMenu("AI Denoise (SCUNet)", export_menu)
-                ai_menu.setStyleSheet(export_menu.styleSheet())
-                ai_tip = (
-                    "Uses AI (SCUNet) instead of the Chroma NR method "
-                    "above, for this export only."
-                )
-                for label, fmt in formats:
-                    act = ai_menu.addAction(
-                        label,
-                        lambda _checked=False, f=fmt: self._request_export(f, True),
-                    )
-                    act.setToolTip(ai_tip)
-                export_menu.addMenu(ai_menu)
-                export_menu.addSeparator()
+            denoise_ready = os.path.exists(scunet_model_path())
         except Exception:
-            pass
+            denoise_ready = False
+        try:
+            from onnx_realesrgan import realesrgan_model_available
+
+            upscale_ready = realesrgan_model_available()
+        except Exception:
+            upscale_ready = False
+
+        ai_variants = []
+        if denoise_ready:
+            ai_variants.append((
+                "AI Denoise (SCUNet)",
+                True,
+                False,
+                "Uses AI (SCUNet) instead of the Chroma NR method above, for this export only.",
+            ))
+        if upscale_ready:
+            ai_variants.append((
+                "AI Upscale 2× (Real-ESRGAN)",
+                False,
+                True,
+                "Exports at double the width and height, for this export only.",
+            ))
+        if denoise_ready and upscale_ready:
+            ai_variants.append((
+                "AI Denoise + Upscale 2×",
+                True,
+                True,
+                "Denoise first, then enlarge -- the order that avoids magnifying noise.",
+            ))
+
+        for menu_label, denoise, upscale, tip in ai_variants:
+            ai_menu = QMenu(menu_label, export_menu)
+            ai_menu.setStyleSheet(export_menu.styleSheet())
+            for label, fmt in formats:
+                act = ai_menu.addAction(
+                    label,
+                    lambda _checked=False, f=fmt, d=denoise, u=upscale: self._request_export(f, d, u),
+                )
+                act.setToolTip(tip)
+            export_menu.addMenu(ai_menu)
+        if ai_variants:
+            export_menu.addSeparator()
 
         for label, fmt in formats:
             export_menu.addAction(
                 label,
-                lambda _checked=False, f=fmt: self._request_export(f, False),
+                lambda _checked=False, f=fmt: self._request_export(f, False, False),
             )
         export_btn.setMenu(export_menu)
         if is_raw:

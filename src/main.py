@@ -2400,6 +2400,7 @@ class _AdjustExportWorker(QRunnable):
         process_pool: Any,
         signals: _AdjustExportSignals,
         use_ai_denoise: bool = False,
+        use_ai_upscale: bool = False,
     ):
         super().__init__()
         self.file_path = file_path
@@ -2412,6 +2413,7 @@ class _AdjustExportWorker(QRunnable):
         # adjustments_for_file(self.adj) below -- self.adj is what gets
         # written, so this stays a separate attribute, not an adj key).
         self.use_ai_denoise = bool(use_ai_denoise)
+        self.use_ai_upscale = bool(use_ai_upscale)
         # Set from the export progress dialog's Cancel button (main thread);
         # polled between export stages and between NN-denoise tiles.
         import threading as _threading
@@ -2516,12 +2518,19 @@ class _AdjustExportWorker(QRunnable):
                 if stage_str == "tonemap":
                     pct = 80 + int(frac_val * 10)
                     emit_progress(pct, "Applying Tone & Color…")
+                elif stage_str == "upscale":
+                    # Upscale runs after denoise and before tonemap, so it
+                    # shares the 40-80 band. When both are on they each get
+                    # half of it rather than replaying the same percentages.
+                    lo, span = (60, 20) if self.use_ai_denoise else (40, 40)
+                    emit_progress(lo + int(frac_val * span), "Upscaling (AI)…")
                 elif stage_str == "encode":
                     pct = 90 + int(frac_val * 9)
                     fmt_name = (self.export_format or "JPEG").upper()
                     emit_progress(pct, f"Encoding {fmt_name}…")
                 else:  # denoise
-                    pct = 40 + int(frac_val * 40)
+                    span = 20 if self.use_ai_upscale else 40
+                    pct = 40 + int(frac_val * span)
                     msg = "Denoising (AI)…" if self.use_ai_denoise else "Denoising…"
                     emit_progress(pct, msg)
 
@@ -2534,6 +2543,7 @@ class _AdjustExportWorker(QRunnable):
                 cancel_check=self.cancel_event.is_set,
                 progress_cb=_export_progress,
                 use_ai_denoise=self.use_ai_denoise,
+                use_ai_upscale=self.use_ai_upscale,
             )
             emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
@@ -24822,7 +24832,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
     def _on_adjust_panel_export_requested(
-        self, export_format: str, adj: dict, use_ai_denoise: bool = False
+        self, export_format: str, adj: dict, use_ai_denoise: bool = False,
+        use_ai_upscale: bool = False,
     ) -> None:
         logger = logging.getLogger(__name__)
         path = getattr(self, "current_file_path", None)
@@ -24839,8 +24850,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
         logger.info(
-            "[EXPORT] Requested format=%s for %s (ai_denoise=%s)",
-            export_format, os.path.basename(path), use_ai_denoise,
+            "[EXPORT] Requested format=%s for %s (ai_denoise=%s, ai_upscale=%s)",
+            export_format, os.path.basename(path), use_ai_denoise, use_ai_upscale,
         )
         from PyQt6.QtWidgets import QFileDialog
 
@@ -24985,6 +24996,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pool,
             self._adjust_export_signals,
             use_ai_denoise=use_ai_denoise,
+            use_ai_upscale=use_ai_upscale,
         )
         logger.info("[EXPORT] Handing off to background worker (format=%s)", raw_fmt)
         # Modal progress dialog: freezes app interaction for the duration
