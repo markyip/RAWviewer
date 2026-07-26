@@ -336,29 +336,36 @@ Project directions and remaining work that are **not** tied to a particular rele
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **AI Denoise & Enhance on Export** (Restormer ONNX / Real-ESRGAN 2×) | **In Progress** | Tiled ONNX-powered AI denoising and 2× upscaling for Plus edition export (`src/onnx_restormer.py`) |
-| **Anamorphic Lens Desqueeze** | **In Progress** | Preset selector for fixed desqueeze ratios (1.33× / 1.5× / 1.6× / 2.0×) to restore squeezed anamorphic imagery |
-| **Manual Distortion Correction** (barrel / pincushion) | **In Progress** | Manual slider to correct optical barrel and pincushion lens distortion |
-| **HDR Merge** | **Planned / PoC** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
-| **Panorama Stitching / HDR Panorama** | **Planned / PoC** | Feature matching, homography warping, and tiled multi-band blending |
-| **Focus Stacking** | **Planned / PoC** | Alignment, high-frequency focus measurement, and multi-band pyramid fusion for extended DoF |
+| **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export, with an **AI Detail** slider trading denoise against retained texture. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable (`src/onnx_scunet.py`, `src/onnx_restormer.py`) |
+| **Mask layers + AI masks** | **Landed, stabilising** | Stacked brush mask layers with per-layer adjustments, plus one-click **subject** (BiRefNet), **sky** (U²-Net), and **click-to-segment** (MobileSAM) generation. Weights are fetched on demand, not bundled (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`) |
+| **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Regression-covered against a real RAW (`src/color_calibration.py`) |
+| **Generative Editing** (instruction-based) | **In Progress** (`generative-editing` branch) | Provider layer, derived-file lifecycle, and Adjust-panel wiring. Remote provider uploads the photo to a third party — opt-in and clearly flagged; a local Windows+NVIDIA provider is the follow-up (`src/raw_generative_edit.py`) |
+| **Automatic Lens Correction** (barrel / pincushion) | **Landed, stabilising** | Lens-profile geometry correction from EXIF, with manual override sliders (`src/raw_lens_correction.py`) |
+| **Anamorphic Lens Desqueeze** | **Landed, stabilising** | Preset selector for fixed desqueeze ratios (1.33× / 1.5× / 1.6× / 2.0×) to restore squeezed anamorphic imagery |
+| **HDR Merge** | **Landed, stabilising** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
+| **Panorama Stitching / HDR Panorama** | **Landed, stabilising** | Feature matching, homography warping, and tiled multi-band blending, with automatic border cropping |
+| **Focus Stacking** | **Landed, stabilising** | Alignment with parallax correction, high-frequency focus measurement, and seam-aware multi-band fusion for extended DoF |
+
+"Landed, stabilising" means the feature is on `development` and working, but has not yet been through a tagged release.
 
 ### 🔮 Planned Future Roadmap (Not Yet in Worktree)
 
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
-| 2 | **General local masks** (gradient / radial / second brush beyond D&B) | **Medium–High** | L | D&B + crop already ship; extend private mask schema / UI |
-| 3 | **Object / subject ML masks** | **Medium** | L | Plus-only (model size); Standard stays brush/geometry |
-| 4 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 5 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 6 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
-| 7 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
-| 8 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
+| 2 | **Geometric local masks** (gradient / radial) | **High** | M | Brush mask layers and AI masks now ship; these reuse the same layer stack and only need alpha generators plus UI |
+| 3 | **AI upscaling on export** (Real-ESRGAN 2×) | **Medium–High** | M | The tiled ONNX export path built for denoise carries most of the plumbing; needs a model choice and Plus-edition size budget |
+| 4 | **Local generative provider** (Windows + NVIDIA) | **Medium** | L | Keeps generative edits on-device, removing the third-party upload the remote provider requires |
+| 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
+| 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
+| 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
+| 8 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
+| 9 | **Edit Nikon HE/HE\* NEF as RAW** | **Low** | L+ | LibRaw cannot unpack HE mosaics today → browse-only by design until a decoder exists |
 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
 - **Nikon HE-NEF**: Adjust disabled; embedded JPEG browse only (row 9).
+- **AI mask and denoise weights are downloaded on first use**, not bundled — the features need one online session before they work offline.
 
 ---
 
