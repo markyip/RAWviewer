@@ -61,6 +61,8 @@ from typing import Optional
 
 import numpy as np
 
+from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
+
 MASK_LAYERS_KEY = "_mask_layers_v1"  # XMP serial key, see mask_layers_xmp.py
 MASK_LAYERS_OBJ_KEY = "_mask_layers_obj"  # live MaskLayerStack; never write to XMP
 
@@ -194,22 +196,66 @@ class MaskLayer:
     enabled: bool = True
     invert: bool = False
     blend: str = "add"  # "add" | "subtract" -- reserved for Phase 2 stack composability
+    # Parametric shapes (see raw_mask_shapes). "brush" keeps ``alpha`` as the
+    # source of truth; a gradient keeps ``params`` as the source of truth and
+    # regenerates alpha at whatever resolution is asked for, which is what
+    # makes it re-draggable after reload and resolution-independent between
+    # the preview and export bases.
+    kind: str = "brush"
+    params: dict = field(default_factory=dict)
+    # What produced this layer: "" (hand-painted), "subject", "sky", "sam".
+    # Distinct from ``kind``, which is how the alpha is *stored*. Used to stop
+    # a one-shot AI tool being offered again when its mask already exists --
+    # matching on the layer NAME would break the moment a user renames a row.
+    source: str = ""
     version: int = field(default=0, compare=False, repr=False)
     _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _bbox_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
+    _shape_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def empty(cls, height: int, width: int, **kwargs) -> "MaskLayer":
         return cls(np.zeros((height, width), dtype=np.float32), **kwargs)
 
     def touch(self) -> None:
-        """Call after any in-place mutation of ``alpha`` to invalidate caches."""
+        """Call after any in-place mutation of ``alpha`` or ``params``."""
         self.version += 1
         self._empty_cache = None
         self._bbox_cache = None
+        self._shape_alpha_cache = None
+
+    @property
+    def is_parametric(self) -> bool:
+        from raw_mask_shapes import PARAMETRIC_KINDS
+
+        return self.kind in PARAMETRIC_KINDS
+
+    def alpha_at(self, height: int, width: int) -> np.ndarray:
+        """This layer's alpha at a given resolution.
+
+        A brush layer resizes its buffer; a parametric layer regenerates from
+        params, which is exact at any size rather than an interpolation of a
+        buffer authored at some other one. Cached per (version, shape) because
+        the compositor asks for the same size every tick.
+        """
+        if not self.is_parametric:
+            return resize_alpha_to(self.alpha, height, width)
+        cached = self._shape_alpha_cache
+        if cached is not None and cached[0] == (self.version, height, width):
+            return cached[1]
+        from raw_mask_shapes import generate_alpha
+
+        generated = generate_alpha(self.kind, self.params, height, width)
+        self._shape_alpha_cache = ((self.version, height, width), generated)
+        return generated
 
     def effective_alpha(self) -> np.ndarray:
         return (1.0 - self.alpha) if self.invert else self.alpha
+
+    def effective_alpha_at(self, height: int, width: int) -> np.ndarray:
+        """``alpha_at`` with ``invert`` applied -- what the compositor blends."""
+        a = self.alpha_at(height, width)
+        return (1.0 - a) if self.invert else a
 
     @property
     def is_empty(self) -> bool:
@@ -218,23 +264,50 @@ class MaskLayer:
         cached = self._empty_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        result = not bool(np.any(self.alpha > 1e-4))
+        if self.is_parametric:
+            # Its coverage comes from params, not the (unused) alpha buffer --
+            # testing alpha would call every gradient empty and skip it.
+            result = False
+        else:
+            result = not bool(np.any(self.alpha > 1e-4))
         self._empty_cache = (self.version, result)
         return result
+
+    def effective_bbox(self) -> Optional[tuple]:
+        """Where this layer actually *applies* -- what the compositor needs.
+
+        An inverted layer covers everything OUTSIDE its painted region, so its
+        applying region is the whole frame. Compositing an inverted layer over
+        ``bbox()`` confined the adjustment to the one area where effective
+        alpha is near zero, so Invert appeared to do almost nothing beyond a
+        small patch while the mask overlay showed it correctly.
+        """
+        if self.invert:
+            if not self.enabled:
+                return None
+            h, w = self.alpha.shape[:2]
+            return (0, h, 0, w)
+        return self.bbox()
 
     def bbox(self) -> Optional[tuple]:
         """Non-zero alpha bbox in this layer's own (alpha-resolution) coordinates.
 
-        Computed on ``alpha`` regardless of ``invert`` -- an inverted layer's
-        *effective* coverage is everywhere alpha is low, but its editable
-        (non-trivial) region is still where the painted alpha itself is
-        non-zero; parametric masks (gradient/radial, Phase 2) will instead
-        derive a bbox analytically from their params.
+        Computed on ``alpha`` regardless of ``invert``: this is the *editable*
+        region -- what a brush has touched -- which is what the UI and the mask
+        overlay want. The compositor wants ``effective_bbox()``. Parametric
+        masks (gradient/radial) will derive a bbox analytically from params.
         """
         cached = self._bbox_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        result = _nonzero_bbox(self.alpha)
+        if self.is_parametric:
+            from raw_mask_shapes import alpha_bbox
+
+            h, w = self.alpha.shape[:2]
+            y0, y1, x0, x1 = alpha_bbox(self.kind, self.params, h, w)
+            result = (y0, y1, x0, x1)
+        else:
+            result = _nonzero_bbox(self.alpha)
         self._bbox_cache = (self.version, result)
         return result
 
@@ -245,9 +318,15 @@ class MaskLayer:
             f"{k}={self.adjustments.get(k, 0.0):.4f}" for k in _all_fingerprint_keys()
         )
         enabled_sig = int(self.enabled)
+        shape_sig = ""
+        if self.is_parametric:
+            shape_sig = ":" + self.kind + ":" + ",".join(
+                f"{k}={float(self.params.get(k, 0.0)):.5f}"
+                for k in sorted(self.params)
+            )
         return (
             f"mem:{int(h)}x{int(w)}:v{int(self.version)}:inv{int(self.invert)}"
-            f":en{enabled_sig}:bl{self.blend}:{adj_sig}"
+            f":en{enabled_sig}:bl{self.blend}{shape_sig}:{adj_sig}"
         )
 
 
@@ -313,7 +392,10 @@ def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
     context, then only the tight bbox is cropped back out of that padded
     result before blending -- the pad-before-filter-crop-after pattern.
     """
-    bbox = layer.bbox()
+    # effective_bbox, not bbox: an inverted layer applies everywhere outside
+    # its painted region, so confining it to the painted bbox made Invert a
+    # near no-op. See MaskLayer.effective_bbox.
+    bbox = layer.effective_bbox()
     if bbox is None:
         return img
     mh, mw = layer.alpha.shape[:2]
@@ -331,7 +413,11 @@ def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
     ry0, ry1, rx0, rx1 = y0 - ey0, y1 - ey0, x0 - ex0, x1 - ex0
     adjusted_region = adjusted_padded[ry0:ry1, rx0:rx1]
 
-    alpha_full = resize_alpha_to(layer.effective_alpha(), h, w)
+    # effective_alpha_at, not resize(effective_alpha()): a parametric layer
+    # generates exactly at the target resolution, so the same gradient lands
+    # identically on the half-res preview and the full-res export instead of
+    # being interpolated up from whatever size it was authored at.
+    alpha_full = layer.effective_alpha_at(h, w)
     alpha_region = alpha_full[y0:y1, x0:x1]
     tight_region = img[y0:y1, x0:x1]
     blended = tight_region * (1.0 - alpha_region[..., np.newaxis]) + adjusted_region * alpha_region[..., np.newaxis]
@@ -354,6 +440,7 @@ def stamp_mask_layer_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Accumulate soft brush coverage into ``layer.alpha`` (max-blend, 0..1).
 
@@ -379,7 +466,7 @@ def stamp_mask_layer_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if edge_assist and luminance is not None and luminance.shape[:2] == (h, w):
         from raw_dodge_burn import _edge_assist_gate
@@ -407,6 +494,7 @@ def erase_mask_layer_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Pull ``layer.alpha`` toward zero under a soft circular brush."""
     from raw_dodge_burn import circular_brush_falloff
@@ -420,7 +508,7 @@ def erase_mask_layer_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if edge_assist and luminance is not None and luminance.shape[:2] == (h, w):
         from raw_dodge_burn import _edge_assist_gate

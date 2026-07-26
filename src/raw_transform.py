@@ -16,7 +16,13 @@ slider-based -- no corner-drag UI needed):
   CropAngle              degrees, +CCW, straighten
   PerspectiveVertical    +100 tilts the top away (converging verticals fix)
   PerspectiveHorizontal  +100 tilts the right side away
+  Distortion             +100 corrects pincushion, -100 corrects barrel
   CropLeft/Right/Top/Bottom  additional user crop, inset fraction per edge
+  AnamorphicRatio        desqueeze factor (1.0 = none)
+
+Order matters: distortion is undone FIRST, because it is a property of the
+capture. Straightening a frame whose lines are still bowed leaves the horizon
+fighting the curve.
 """
 
 from __future__ import annotations
@@ -32,10 +38,17 @@ TRANSFORM_KEYS = (
     "CropTop",
     "CropBottom",
     "AnamorphicRatio",
+    "Distortion",
 )
 
 # Keystone strength at slider 100: the far edge shrinks by this fraction.
 _KEYSTONE_MAX = 0.35
+
+# Radial k1 at slider +/-100. 0.30 covers the pincushion of a consumer
+# telephoto zoom and the barrel of a wide prime with headroom to spare; past
+# that, corner resampling softens enough that the cure shows more than the
+# disease did.
+_DISTORTION_MAX = 0.30
 
 
 def has_geometry(adj: dict | None) -> bool:
@@ -52,10 +65,92 @@ def has_geometry(adj: dict | None) -> bool:
             "CropBottom",
         )):
             return True
+        if abs(float(adj.get("Distortion", 0.0) or 0.0)) > 1e-4:
+            return True
         ratio = float(adj.get("AnamorphicRatio", 1.0) or 1.0)
         return abs(ratio - 1.0) > 1e-4
     except Exception:
         return False
+
+
+def _distortion_valid_scale(k: float) -> float:
+    """Largest centred fraction of the frame that samples only real pixels.
+
+    With k > 0 an output pixel samples *outward* of itself, so the corners
+    reach past the frame and would come back as border fill. This module's
+    hard rule is that output never contains pixels the source did not have, so
+    the corrected frame is cropped to the region that stays inside.
+
+    The corner is the worst case: a centred box scaled by s has corner radius s
+    in normalised units, and samples at s*(1 + k*s^2). Solve s*(1 + k*s^2) = 1
+    by bisection -- three lines and exact, versus a cubic root's sign analysis.
+    k <= 0 samples inward everywhere, so nothing needs cropping.
+    """
+    if k <= 0.0:
+        return 1.0
+    lo, hi = 0.0, 1.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if mid * (1.0 + k * mid * mid) < 1.0:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _apply_distortion(img: np.ndarray, k: float, *, preview: bool) -> np.ndarray:
+    """Radial distortion correction, single k1 term, in place of a full profile.
+
+    Output pixel at normalised radius r samples the source at r*(1 + k*r^2)
+    (Brown-Conrady with one term, which is what a single slider can honestly
+    express):
+
+    * k > 0 samples outward, pulling the corners in -- corrects PINCUSHION,
+      where a telephoto bows straight lines inward.
+    * k < 0 samples inward, pushing the corners out -- corrects BARREL, the
+      wide-angle bulge.
+
+    Radius is normalised so the corner is 1.0, which keeps the slider's effect
+    the same on any aspect ratio rather than depending on frame shape.
+    """
+    import cv2
+
+    h, w = img.shape[:2]
+    if h < 8 or w < 8:
+        return img
+
+    cx = (w - 1) * 0.5
+    cy = (h - 1) * 0.5
+    norm = float(np.hypot(cx, cy)) or 1.0
+
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    dx = (xs - cx) / norm
+    dy = (ys - cy) / norm
+    r2 = dx * dx + dy * dy
+    factor = 1.0 + k * r2
+
+    map_x = (cx + dx * factor * norm).astype(np.float32)
+    map_y = (cy + dy * factor * norm).astype(np.float32)
+
+    # BORDER_REPLICATE, not CONSTANT: any out-of-frame sample that survives the
+    # crop below (rounding at the boundary) should smear the edge pixel rather
+    # than introduce a black line the crop was meant to prevent.
+    out = cv2.remap(
+        img,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_NEAREST if preview else cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+    scale = _distortion_valid_scale(k)
+    if scale < 0.999:
+        keep_w = max(8, int(round(w * scale)))
+        keep_h = max(8, int(round(h * scale)))
+        x0 = (w - keep_w) // 2
+        y0 = (h - keep_h) // 2
+        out = out[y0 : y0 + keep_h, x0 : x0 + keep_w]
+    return out
 
 
 def _warped_quad(w: float, h: float, angle_deg: float, pv: float, ph: float) -> np.ndarray:
@@ -163,6 +258,16 @@ def apply_geometry(
         ph = max(-1.0, min(1.0, ph))
 
         out = img
+        # Lens distortion first: it is a property of how the frame was
+        # captured, so it has to be undone before straighten/keystone measure
+        # anything against it. Correcting after rotation would straighten lines
+        # that are still bowed and leave the horizon fighting the curve.
+        dist = float(adj.get("Distortion", 0.0) or 0.0) / 100.0
+        dist = max(-1.0, min(1.0, dist))
+        if abs(dist) > 1e-4:
+            out = _apply_distortion(out, dist * _DISTORTION_MAX, preview=preview)
+            h, w = out.shape[:2]
+
         if abs(angle) > 1e-4 or abs(pv) > 1e-4 or abs(ph) > 1e-4:
             src = np.array(
                 [[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32
@@ -173,7 +278,7 @@ def apply_geometry(
             # and is fine for 640px live-drag / instant overlay feedback.
             flags = cv2.INTER_NEAREST if preview else cv2.INTER_LINEAR
             out = cv2.warpPerspective(
-                img, m, (w, h), flags=flags,
+                out, m, (w, h), flags=flags,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=0,
             )
             iters = 12 if preview else 24

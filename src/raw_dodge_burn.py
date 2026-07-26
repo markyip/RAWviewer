@@ -46,6 +46,19 @@ STRENGTH_KEY = "DodgeBurnStrength"
 DEFAULT_STRENGTH = 1.75  # stops at mask value +/-1.0
 MASK_CLIP = 1.5
 
+# Brush edge softness, 0..1 (the UI's Feather 0..100). Session-level tool state
+# like Size and Flow, deliberately NOT an adjustment key: it describes the
+# brush, not the photo, so it is no more part of an edit than which hand you
+# hold the pen in. Lightroom treats brush feather the same way.
+#
+# 0.70 rather than the 1.0 this was fixed at: at 1.0 only 4.2% of the brush
+# disc reaches 0.9 strength and the disc averages 0.298, so a stamp lays down
+# under a third of its nominal strength and solid coverage needs scrubbing.
+# 0.70 puts ~16% above 0.9 and averages 0.418 -- still visibly soft-edged, but
+# a stroke covers roughly what the cursor ring says it will. Already-saved
+# masks are stored as alpha and are unaffected.
+DEFAULT_BRUSH_FEATHER = 0.70
+
 
 def mask_stage_fingerprint(mask: "DodgeBurnMask") -> str:
     """Cheap stage-cache key: shape + mutation version (no PNG encode)."""
@@ -280,18 +293,35 @@ def circular_brush_falloff(
     cx: float,
     cy: float,
     radius: float,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> np.ndarray:
     """Soft circular brush kernel on ``[y0:y1, x0:x1]`` (peak 1 at center).
 
-    Raised-cosine (Hann) radial profile: full strength at the center, smooth
-    gradient to zero at ``radius``. Hard-clips outside ``radius`` so the
-    axis-aligned stamp bbox corners stay empty (avoids rectangular live blits).
+    Two-radius profile, as every brush-based editor uses: full strength out to
+    ``(1 - feather) * radius``, then a raised-cosine (Hann) fall to zero at
+    ``radius``. Hard-clips outside ``radius`` so the axis-aligned stamp bbox
+    corners stay empty (avoids rectangular live blits).
+
+    ``feather`` is 0..1 (the UI's 0..100). 1.0 is the single-radius Hann this
+    used to be fixed at, which put only 4.2% of the disc above 0.9 strength and
+    averaged 0.298 across it -- so a stamp deposited under a third of its
+    nominal strength and no setting could produce a crisp edge. 0.0 is a hard
+    circle. The default sits between, where a stroke covers what it looks like
+    it covers.
     """
     r = max(1.0, float(radius))
+    fe = max(0.0, min(1.0, float(feather)))
     yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
     dist = np.sqrt((xx - float(cx)) ** 2 + (yy - float(cy)) ** 2)
-    t = np.clip(dist / r, 0.0, 1.0)
-    # Hann window: 1 at center, 0 at edge, continuous first derivative.
+
+    inner = r * (1.0 - fe)
+    if fe <= 1e-4:
+        # Hard edge: no transition band to interpolate across.
+        falloff = (dist <= r).astype(np.float32)
+        return falloff
+    t = np.clip((dist - inner) / max(1e-6, r - inner), 0.0, 1.0)
+    # Hann window over the transition band: 1 at the core, 0 at the edge,
+    # continuous first derivative so repeated stamps do not band.
     falloff = (0.5 * (1.0 + np.cos(np.pi * t))).astype(np.float32)
     falloff[dist > r] = 0.0
     return falloff
@@ -311,6 +341,7 @@ def stamp_brush(
     luma_tol: float = 0.10,
     stroke_baseline: Optional[np.ndarray] = None,
     max_stroke_delta: Optional[float] = None,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Add one soft circular stamp to ``mask`` in place.
 
@@ -337,7 +368,7 @@ def stamp_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     if (
         edge_assist
@@ -383,13 +414,27 @@ def erase_brush(
     chroma: Optional[np.ndarray] = None,
     edge_assist: bool = True,
     luma_tol: float = 0.10,
+    feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
     """Pull mask values toward zero under a soft circular brush.
 
     ``strength`` is 0..~1 per stamp (caller scales by flow × pressure): at 1.0
     the center is fully cleared in one stamp; lower values erase gradually.
-    Same edge-assist gating as ``stamp_brush`` when enabled.
+
+    Erasing deliberately ignores edge assist, unlike ``stamp_brush``. Edge
+    assist exists to stop a *paint* stroke bleeding across a subject boundary,
+    which is help when adding coverage. Applied to the eraser it meant mask
+    sitting on the far side of a luminance edge could not be removed at all --
+    erasing from the dark side of a hard edge left the bright side untouched
+    through twelve full-strength passes. An eraser is what you reach for when
+    the paint went somewhere wrong, so it has to reach wherever the paint got
+    to, including across the very edge assist was protecting.
+
+    The guide/gating arguments stay in the signature so callers need not
+    special-case this brush against ``stamp_brush``, but none of them affect
+    the result any more.
     """
+    del luminance, chroma, edge_assist, luma_tol  # see above: never gate the eraser
     h, w = mask.data.shape
     r = max(1.0, float(radius))
     x0 = max(0, int(cx - r - 1))
@@ -399,16 +444,7 @@ def erase_brush(
     if x1 <= x0 or y1 <= y0:
         return (x0, y0, x1, y1)
 
-    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
-
-    if (
-        edge_assist
-        and luminance is not None
-        and luminance.shape[:2] == (h, w)
-    ):
-        falloff = falloff * _edge_assist_gate(
-            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
-        )
+    falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
     # Multiplicative erase toward zero: factor 1 at edge, (1-strength) at center.
     amount = np.clip(falloff * float(strength), 0.0, 1.0)
@@ -436,8 +472,17 @@ def edge_snap_region(
     luminance edges within the filter radius, which is what makes a rough
     stroke "stick" to a subject's outline instead of bleeding across it.
     ``pad`` extends the filtered region beyond the touched bbox so the
-    guided filter has context outside the stroke (avoids a visible seam at
-    the exact stroke boundary).
+    guided filter has context outside the stroke.
+
+    The result is feathered in over the ``pad`` margin rather than pasted.
+    Pasting it printed the bbox itself into the mask: the filter legitimately
+    changes values inside the rectangle (measured 0.563 -> 0.488 on a plain
+    stroke) while the pixel just outside keeps the unfiltered value, so the
+    rectangle's straight edge landed in the mask as a step ~19x the local
+    gradient -- a visible square around wherever the brush happened to stop.
+    Feathering means the snap fades out before it reaches the boundary, so
+    there is no edge to see. Sides sitting on the image border are not
+    feathered; there is nothing outside them to mismatch.
     """
     from raw_chroma_denoise import apply_guided_filter
 
@@ -463,8 +508,54 @@ def edge_snap_region(
         if sn_peak > 1e-6 and sn_peak < src_peak * 0.85:
             snapped *= src_peak / sn_peak
             np.clip(snapped, -MASK_CLIP, MASK_CLIP, out=snapped)
-    mask.data[y0:y1, x0:x1] = snapped
+
+    weight = _feather_window(
+        y1 - y0,
+        x1 - x0,
+        pad,
+        feather_top=y0 > 0,
+        feather_bottom=y1 < h,
+        feather_left=x0 > 0,
+        feather_right=x1 < w,
+    )
+    mask.data[y0:y1, x0:x1] = src * (1.0 - weight) + snapped * weight
     mask.touch()
+
+
+def _feather_window(
+    height: int,
+    width: int,
+    margin: int,
+    *,
+    feather_top: bool,
+    feather_bottom: bool,
+    feather_left: bool,
+    feather_right: bool,
+) -> np.ndarray:
+    """(H, W) weights: 1 in the interior, easing to 0 over ``margin`` px.
+
+    Separable raised-cosine ramps, only on the requested sides. Clamped to
+    half the extent so a region narrower than 2*margin still gets a smooth
+    window rather than ramps that overlap and re-cross.
+    """
+
+    def axis(n: int, lead: bool, trail: bool) -> np.ndarray:
+        w = np.ones(n, dtype=np.float32)
+        m = int(min(margin, n // 2))
+        if m <= 0:
+            return w
+        # +1 offsets keep the first ramp sample above 0: a hard zero column at
+        # the boundary would make the snap stop one pixel early for no gain.
+        ramp = 0.5 - 0.5 * np.cos(np.pi * (np.arange(m, dtype=np.float32) + 1.0) / (m + 1.0))
+        if lead:
+            w[:m] = ramp
+        if trail:
+            w[n - m :] = ramp[::-1]
+        return w
+
+    wy = axis(height, feather_top, feather_bottom)
+    wx = axis(width, feather_left, feather_right)
+    return np.outer(wy, wx).astype(np.float32)
 
 
 def resize_mask_to(mask: DodgeBurnMask, height: int, width: int) -> np.ndarray:

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Dict
+from typing import Callable, Dict, Sequence
 
-from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -71,7 +71,7 @@ _CHANNEL_CURVE_KEYS_BY_NAME = {
 _SHOW_TONE_CURVE_UI = True
 
 _TRANSFORM_SLIDER_KEYS = frozenset(
-    {"CropAngle", "PerspectiveVertical", "PerspectiveHorizontal"}
+    {"CropAngle", "PerspectiveVertical", "PerspectiveHorizontal", "Distortion"}
 )
 
 # Session-wide copy/paste clipboard for edit settings (survives navigation and
@@ -191,7 +191,28 @@ class AdjustValueLabel(QLabel):
         super().mousePressEvent(event)
 
 
-_SECTION_EXPANDED_SETTINGS_PREFIX = "adjust_panel/section_expanded/"
+# Which sections stand open the first time the editor is opened in a run.
+# Everything else starts collapsed: the panel has a dozen sections, and a
+# fully-expanded column meant scrolling past HSL, Tone Curve and Looks to
+# reach anything, every single launch. Histogram and Light are the two you
+# read or reach for immediately on opening an image.
+_SECTION_DEFAULT_EXPANDED = frozenset({"histogram", "light"})
+
+# Collapse state for the rest of the run, keyed by section settings_key.
+#
+# Deliberately in-process rather than QSettings: persisted across restarts,
+# one session spent opening every section to find something left the panel
+# fully expanded forever after. Session-scoped gives both halves of what is
+# actually wanted -- a predictable starting shape each launch, and a panel
+# that stays exactly as arranged while working through a folder. It survives
+# image navigation and closing/reopening the editor because it outlives the
+# panel widget, not because the widget remembers anything.
+_SECTION_EXPANDED_SESSION: dict[str, bool] = {}
+
+
+def reset_section_expanded_session() -> None:
+    """Forget this run's collapse state (tests; a genuinely fresh panel)."""
+    _SECTION_EXPANDED_SESSION.clear()
 
 
 class _FileDropFrame(QFrame):
@@ -306,12 +327,191 @@ class _LooksRowWidget(QWidget):
         self.remove_clicked.emit()
 
 
+class PanelTabBar(QWidget):
+    """Top-level page selector for the Adjust panel.
+
+    Not a QTabWidget: that owns its own page stack and draws OS-native tab
+    chrome that fights the panel's flat styling. This is a row of checkable
+    buttons that emits an index -- the caller keeps its pages as ordinary
+    widgets in the existing scroll area, so scroll position, section
+    collapse state and every existing widget reference survive unchanged.
+
+    Styling: the row sits on a 1px LINE rule, and the active tab's 2px EMBER
+    segment lands ON that rule rather than floating below it, so the rule
+    reads as one continuous line with a lit section -- a switch on an
+    instrument, not a browser tab. That flushness is the whole detail: it
+    only works while the button's bottom edge and the rule share a baseline,
+    which is why the wrapper carries no bottom padding.
+
+    Type is small, heavily tracked and uppercase, matching the section
+    headers below it, so the panel reads as one typographic system rather
+    than a navigation bar bolted onto a list of controls.
+
+    Colour follows theme.py's rule that EMBER means "currently active", so
+    it appears exactly once here -- on the lit segment. Everything else is
+    carried by weight and value: INK for the active label, INK_FAINT for the
+    rest, which is a wide enough gap to read at a glance without a second
+    accent competing with the photo.
+    """
+
+    changed = pyqtSignal(int)
+
+    def __init__(self, labels: Sequence[str], parent=None):
+        super().__init__(parent)
+        self._buttons: list[QPushButton] = []
+        self._current = 0
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(24)
+        self._badges: list[QLabel] = []
+
+        self._labels = [label.upper() for label in labels]
+        for index, label in enumerate(labels):
+            btn = QPushButton(label.upper())
+            btn.setObjectName("adjust_tab_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setStyleSheet(
+                f"""
+                QPushButton#adjust_tab_btn {{
+                    background: transparent;
+                    border: none;
+                    border-bottom: 2px solid transparent;
+                    color: {theme.INK_FAINT};
+                    font-size: 10px;
+                    font-weight: 700;
+                    letter-spacing: 1.6px;
+                    padding: 9px 1px 8px 1px;
+                    text-align: left;
+                }}
+                QPushButton#adjust_tab_btn:hover {{
+                    color: {theme.INK_MUTED};
+                }}
+                QPushButton#adjust_tab_btn:checked {{
+                    color: {theme.INK};
+                    border-bottom: 2px solid {theme.EMBER};
+                }}
+                """
+            )
+            btn.clicked.connect(lambda _checked=False, i=index: self.set_current(i))
+
+            # The count rides inside the button so the whole thing stays one
+            # target, and is a separate label so it can be typed as data --
+            # tabular, unspaced, quieter -- instead of inheriting the tab's
+            # tracked display setting and reading as part of the word.
+            badge = QLabel("", btn)
+            badge.setObjectName("adjust_tab_badge")
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            badge.hide()
+            self._badges.append(badge)
+
+            row.addWidget(btn)
+            self._buttons.append(btn)
+
+        row.addStretch(1)
+        if self._buttons:
+            self._buttons[0].setChecked(True)
+
+    def set_badge(self, index: int, text: str) -> None:
+        """Set a tab's count chip, or clear it with ""."""
+        if not (0 <= index < len(self._buttons)):
+            return
+        badge = self._badges[index]
+        if not text:
+            badge.hide()
+            self._buttons[index].setText(self._labels[index])
+            self._layout_badge(index)
+            return
+        badge.setText(text)
+        badge.show()
+        self._buttons[index].setText(self._labels[index])
+        self._layout_badge(index)
+
+    def badge_text(self, index: int) -> str:
+        """The count currently shown on a tab ("" when none)."""
+        if not (0 <= index < len(self._badges)):
+            return ""
+        badge = self._badges[index]
+        return badge.text() if badge.isVisible() else ""
+
+    def _badge_style(self, index: int) -> None:
+        active = index == self._current
+        # Not EMBER even when active: theme.py reserves that for the one lit
+        # element, and a count is data, not the thing you are editing.
+        colour = theme.INK_MUTED if active else theme.INK_FAINT
+        self._badges[index].setStyleSheet(
+            f"""
+            QLabel#adjust_tab_badge {{
+                color: {colour};
+                background: {theme.LINE_SOFT};
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 0px;
+                padding: 1px 4px 1px 4px;
+            }}
+            """
+        )
+
+    _BADGE_GAP = 7
+
+    def _layout_badge(self, index: int) -> None:
+        badge = self._badges[index]
+        btn = self._buttons[index]
+        if not badge.isVisible():
+            btn.setMinimumWidth(0)
+            return
+        self._badge_style(index)
+        badge.adjustSize()
+        # Reserve the chip's width by measuring, not by padding the label with
+        # spaces: Qt trims trailing whitespace when it computes a button's
+        # size hint, so the chip landed on top of the last letters ("MAS 3").
+        metrics = btn.fontMetrics()
+        text_w = metrics.horizontalAdvance(self._labels[index])
+        btn.setMinimumWidth(text_w + self._BADGE_GAP + badge.width() + 4)
+        # Optically centred against the cap height of a 10px uppercase label,
+        # which sits above the button's vertical centre once the 2px rule and
+        # its padding are taken off the bottom.
+        badge.move(
+            btn.width() - badge.width() - 1,
+            max(0, (btn.height() - badge.height()) // 2 - 1),
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        for i in range(len(self._buttons)):
+            self._layout_badge(i)
+
+    def current(self) -> int:
+        return self._current
+
+    def set_current(self, index: int) -> None:
+        if not self._buttons:
+            return
+        index = max(0, min(len(self._buttons) - 1, int(index)))
+        # Re-assert the checked states even when the index is unchanged: a
+        # click on the already-selected tab would otherwise leave it toggled
+        # off, since these are checkable buttons rather than a button group.
+        for i, btn in enumerate(self._buttons):
+            btn.setChecked(i == index)
+        if index == self._current:
+            return
+        self._current = index
+        for i in range(len(self._buttons)):
+            self._layout_badge(i)
+        self.changed.emit(index)
+
+
 class CollapsibleSection(QWidget):
     """A clean, Lightroom-style collapsible accordion section for PyQt6.
 
-    When constructed with a ``settings_key``, the expanded/collapsed state
-    persists across sessions (QSettings) -- so a user who never touches HSL
-    doesn't have to keep collapsing it every time they open the editor.
+    With a ``settings_key``, the expanded/collapsed state is remembered for
+    the rest of the run (see ``_SECTION_EXPANDED_SESSION``): rearranging the
+    panel survives switching image and closing/reopening the editor, but each
+    launch starts from the same predictable shape rather than from whatever
+    state a previous session happened to end in.
     """
     def __init__(self, title: str, parent=None, *, settings_key: str | None = None):
         super().__init__(parent)
@@ -397,13 +597,10 @@ class CollapsibleSection(QWidget):
     def _load_expanded_default(self) -> bool:
         if not self._settings_key:
             return True
-        return bool(
-            QSettings("RAWviewer", "RAWviewer").value(
-                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key,
-                True,
-                type=bool,
-            )
-        )
+        remembered = _SECTION_EXPANDED_SESSION.get(self._settings_key)
+        if remembered is not None:
+            return remembered
+        return self._settings_key in _SECTION_DEFAULT_EXPANDED
 
     def _on_header_pressed(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -414,9 +611,7 @@ class CollapsibleSection(QWidget):
         self.content.setVisible(self._expanded)
         self.arrow.setText("▼" if self._expanded else "▶")
         if self._settings_key:
-            QSettings("RAWviewer", "RAWviewer").setValue(
-                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key, self._expanded
-            )
+            _SECTION_EXPANDED_SESSION[self._settings_key] = self._expanded
 
     def add_widget(self, widget: QWidget) -> None:
         self.content_layout.addWidget(widget)
@@ -478,7 +673,35 @@ class AdjustSlider(QSlider):
         # One minimum step per wheel notch: Qt's default is
         # singleStep * wheelScrollLines (3x) which overshoots fine-grained
         # sliders like Straighten's 0.1-degree steps.
-        delta = event.angleDelta().y() or event.angleDelta().x()
+        #
+        # On a trackpad only the HORIZONTAL axis moves the slider. These
+        # sliders run left to right, so a two-finger swipe up or down changing
+        # a horizontal control never matched the gesture -- and it stole the
+        # vertical scroll the pointer was hovering over, so scrolling the panel
+        # snagged and silently edited whichever slider sat under the cursor.
+        # Vertical is now ignored and propagates to the scroll area, which is
+        # what the gesture looks like it should do. The axis is locked to the
+        # dominant component so a slightly diagonal swipe does not do both.
+        #
+        # A real mouse wheel is exempt: it reports vertical only, so applying
+        # this rule to it would leave those users unable to move any slider.
+        # Trackpads report pixelDelta and/or a scroll phase; wheels report
+        # neither.
+        angle = event.angleDelta()
+        pixel = event.pixelDelta()
+        try:
+            phased = event.phase() != Qt.ScrollPhase.NoScrollPhase
+        except (AttributeError, TypeError):
+            phased = False
+        if not pixel.isNull() or phased:
+            dx = angle.x() or pixel.x()
+            dy = angle.y() or pixel.y()
+            if abs(dy) > abs(dx):
+                event.ignore()  # vertical belongs to the panel's scroll area
+                return
+            delta = dx
+        else:
+            delta = angle.y() or angle.x()
         if delta == 0:
             event.ignore()
             return
@@ -594,7 +817,7 @@ class ImageAdjustPanelWidget(QWidget):
     editing_finished = pyqtSignal(dict)
     preview_changed = pyqtSignal(dict)
     reset_requested = pyqtSignal()
-    export_requested = pyqtSignal(str, dict, bool)  # format id, adjustments, use_ai_denoise
+    export_requested = pyqtSignal(str, dict, bool, bool)  # format id, adjustments, use_ai_denoise, use_ai_upscale
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
     compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
@@ -628,10 +851,17 @@ class ImageAdjustPanelWidget(QWidget):
     # resolution and the RGB the model runs on), plus inference is slow
     # enough to need a worker thread and a busy state.
     mask_ai_requested = pyqtSignal(str)
-    # Generative Edit section. Emits the instruction text; the host owns
-    # consent, baking, the provider call, and derived-file creation.
+    # Generative tab. Emits the instruction text; the host owns consent,
+    # baking, the provider call, and derived-file creation.
     generative_requested = pyqtSignal(str)
     generative_cancel_requested = pyqtSignal()
+    # Panel wants the current render to show as the source thumbnail; the
+    # host replies by calling set_generative_source().
+    generative_source_requested = pyqtSignal()
+    # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
+    mask_gradient_tool_changed = pyqtSignal(str)
+    # Selected mask row changed -- the host moves the gradient handles to it.
+    mask_selection_changed = pyqtSignal()
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -870,6 +1100,7 @@ class ImageAdjustPanelWidget(QWidget):
         vp.setAutoFillBackground(True)
         vp.setStyleSheet(f"background-color: {theme.SURFACE};")
         card_layout.addWidget(scroll)
+        self._scroll_area = scroll
 
         inner = QWidget()
         inner.setObjectName("adjust_panel_inner")
@@ -916,15 +1147,24 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(reset_btn)
         layout.addLayout(header)
 
-        hint = QLabel(
-            "E / Esc — close · D/B/X/H brush tools · two-finger scroll = Brush Size"
+        hint = QLabel("E closes · hold D B X H P to paint · scroll = size")
+        # 9px and faint on purpose: it is discoverability for shortcuts, not
+        # content. At 10px across two wrapped lines it was the largest text
+        # block in the header and outweighed the controls underneath. The full
+        # detail lives in this label's tooltip, which is where someone who
+        # actually wants it will look.
+        hint.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.2px;"
         )
-        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
         hint.setToolTip(
             "While Adjust is open:\n"
             "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• D / B / X / H arm Dodge / Burn / Eraser / Heal (press again to disarm; also disarms when the cursor leaves the image)\n"
+            "• Hold D / B / X / H and sweep the pointer over the photo to paint — "
+            "no mouse button needed. Releasing the key stops the stroke and puts "
+            "the tool away. Click a tool button instead if you want it to stay armed\n"
+            "• Eraser removes painted mask and the dodge/burn inside it, "
+            "and unlike the paint brushes it is not held back by Edge Assist\n"
             "• With a brush tool armed, two-finger scroll changes Brush Size "
             "(Ctrl+scroll still zooms)\n"
             "• Brush Flow changes how opaque the brush preview looks"
@@ -958,7 +1198,64 @@ class ImageAdjustPanelWidget(QWidget):
         )
         cp_row.addWidget(self._camera_profile_reset_btn)
         self._camera_profile_row.setVisible(False)
-        layout.addWidget(self._camera_profile_row)
+
+        # Top-level tabs. Masking earned its own page: a mask stack plus the
+        # selected layer's own adjustments is a mode of its own, and buried
+        # under a dozen global sections it read as one more slider group.
+        #
+        # Both pages live in the one existing scroll area as plain widgets and
+        # switching toggles visibility. Every section keeps its identity, so
+        # per-section collapse persistence and all existing widget references
+        # survive the move untouched.
+        self._panel_tabs = PanelTabBar(("Global", "Masks", "Generate"))
+        self._panel_tabs.changed.connect(self._on_panel_tab_changed)
+        tabs_wrap = QWidget()
+        tabs_wrap.setObjectName("adjust_tabbar_wrap")
+        tabs_wrap.setStyleSheet(
+            f"""
+            QWidget#adjust_tabbar_wrap {{
+                border-bottom: 1px solid {theme.LINE};
+            }}
+            """
+        )
+        tabs_wrap_layout = QVBoxLayout(tabs_wrap)
+        # No bottom padding: the active tab's ember segment has to land on the
+        # wrapper's rule, not above it, or the line reads as two things.
+        tabs_wrap_layout.setContentsMargins(0, 4, 0, 0)
+        tabs_wrap_layout.setSpacing(0)
+        tabs_wrap_layout.addWidget(self._panel_tabs)
+        layout.addWidget(tabs_wrap)
+
+        self._tab_page_global = QWidget()
+        global_layout = QVBoxLayout(self._tab_page_global)
+        global_layout.setContentsMargins(0, 0, 0, 0)
+        global_layout.setSpacing(6)
+        layout.addWidget(self._tab_page_global)
+
+        self._tab_page_masks = QWidget()
+        masks_layout = QVBoxLayout(self._tab_page_masks)
+        masks_layout.setContentsMargins(0, 0, 0, 0)
+        masks_layout.setSpacing(6)
+        # Without this the lone Masks section stretches to fill the viewport.
+        masks_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tab_page_masks)
+        self._tab_page_masks.setVisible(False)
+
+        # Generate page. Every other tab changes how the current file is
+        # rendered; this one sends the image somewhere and writes a *new*
+        # file, so it gets its own page rather than a section that would sit
+        # in a stack of sliders and imply it behaves like them.
+        self._tab_page_generate = QWidget()
+        generate_layout = QVBoxLayout(self._tab_page_generate)
+        generate_layout.setContentsMargins(0, 0, 0, 0)
+        generate_layout.setSpacing(6)
+        generate_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self._tab_page_generate)
+        self._tab_page_generate.setVisible(False)
+
+        # The calibration banner reports a global colour shift, so it stays
+        # with Global rather than following the mask workflow.
+        global_layout.addWidget(self._camera_profile_row)
 
         self._tone_curve_row = None
 
@@ -995,22 +1292,40 @@ class ImageAdjustPanelWidget(QWidget):
         if not _SHOW_DODGE_BURN_UI:
             self.sect_masks.hide()
         self.sect_generate = CollapsibleSection("Generative Edit", settings_key="generate")
+        self.sect_anamorphic = CollapsibleSection("Anamorphic", settings_key="anamorphic")
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
-        # Add Collapsible Sections to main scroll layout
-        layout.addWidget(self.sect_histogram)
-        layout.addWidget(self.sect_light)
-        layout.addWidget(self.sect_color)
-        layout.addWidget(self.sect_curve)
-        layout.addWidget(self.sect_hsl)
-        layout.addWidget(self.sect_detail)
-        layout.addWidget(self.sect_noise)
-        layout.addWidget(self.sect_effects)
-        layout.addWidget(self.sect_local)
-        layout.addWidget(self.sect_masks)
-        layout.addWidget(self.sect_generate)
-        layout.addWidget(self.sect_lut)
-        layout.addWidget(self.sect_transform)
+        # Add Collapsible Sections to their tab pages
+        global_layout.addWidget(self.sect_histogram)
+        global_layout.addWidget(self.sect_light)
+        global_layout.addWidget(self.sect_color)
+        global_layout.addWidget(self.sect_curve)
+        global_layout.addWidget(self.sect_hsl)
+        global_layout.addWidget(self.sect_detail)
+        global_layout.addWidget(self.sect_noise)
+        global_layout.addWidget(self.sect_effects)
+        global_layout.addWidget(self.sect_local)
+        global_layout.addWidget(self.sect_lut)
+        global_layout.addWidget(self.sect_transform)
+        global_layout.addWidget(self.sect_anamorphic)
+
+        # Masks page. Dodge & burn stays on Global for now: it is a signed
+        # exposure map, not a layer in the mask stack, and moving it would
+        # change which tab a long-standing tool lives on rather than just
+        # relocating the mask UI.
+        masks_layout.addWidget(self.sect_masks)
+        # The tab already says MASKS; a "MASKS" accordion header directly
+        # under it is the same word twice, plus a collapse control for the
+        # only thing on the page. Drop the header and keep the section --
+        # its content layout is what every mask control is parented to.
+        self.sect_masks.header.setVisible(False)
+        self.sect_masks.set_expanded(True)
+
+        # Generate page -- same treatment as Masks: the tab already names it,
+        # so the accordion header would be the word twice.
+        generate_layout.addWidget(self.sect_generate)
+        self.sect_generate.header.setVisible(False)
+        self.sect_generate.set_expanded(True)
 
         # Build tone curve editor row inside the curve section first
         if _SHOW_TONE_CURVE_UI:
@@ -1168,6 +1483,7 @@ class ImageAdjustPanelWidget(QWidget):
                 target_sect = self.sect_noise
             elif spec.key in {
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
+                "Distortion",
             }:
                 target_sect = self.sect_transform
             elif spec.key in {
@@ -1372,21 +1688,38 @@ class ImageAdjustPanelWidget(QWidget):
         self._burn_btn = QPushButton("Burn (B)")
         self._erase_btn = QPushButton("Eraser (X)")
         self._heal_btn = QPushButton("Heal (H)")
+        # All four brushes sit in one Mode row. Heal used to live on its own
+        # labelled row, which read as a separate kind of thing; it is the same
+        # kind of thing -- a brush you arm, that shares Brush Size and Flow
+        # and the same mask overlay. What differs (it ignores Effect Strength
+        # and Edge Assist) is a property of the tool, not a reason to file it
+        # somewhere else.
         for btn, tip in (
             (
                 self._dodge_btn,
                 "Dodge (D) — brush to brighten; soft falloff, edge-snaps on release.\n"
+                "Hold the key and sweep to paint — no mouse button needed.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
                 self._burn_btn,
                 "Burn (B) — brush to darken; soft falloff, edge-snaps on release.\n"
+                "Hold the key and sweep to paint — no mouse button needed.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
                 self._erase_btn,
-                "Eraser (X) — remove dodge/burn or heal paint under the brush.\n"
+                "Eraser (X) — remove dodge/burn and heal paint under the brush,\n"
+                "along with the effect inside it. Not limited by Edge Assist,\n"
+                "so it can reach paint that spilled across an edge.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
+            ),
+            (
+                self._heal_btn,
+                "Heal (H) — brush to remove smudges / dust (OpenCV inpaint at full strength).\n"
+                "Only Brush Size and Brush Flow apply; Effect Strength and Edge\n"
+                "Assist are for Dodge/Burn. Paint the defect; release to fill\n"
+                "from neighbors. Two-finger scroll changes Brush Size.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
@@ -1398,59 +1731,54 @@ class ImageAdjustPanelWidget(QWidget):
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
         self._erase_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._erase_btn, on))
+        self._heal_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._heal_btn, on))
         db_container_layout.addLayout(db_row)
 
-        heal_row = QHBoxLayout()
-        heal_row.setSpacing(6)
-        heal_mode_lbl = QLabel("Heal")
-        heal_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-        heal_mode_lbl.setMinimumWidth(78)
-        heal_row.addWidget(heal_mode_lbl)
-        self._heal_btn.setObjectName("adjust_db_btn")
-        self._heal_btn.setCheckable(True)
-        self._heal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._heal_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._heal_btn.setToolTip(
-            "Heal (H) — brush to remove smudges / dust (OpenCV inpaint at full strength).\n"
-            "Only Brush Size and Brush Flow apply; Effect Strength is for Dodge/Burn only.\n"
-            "Paint the defect; release to fill from neighbors.\n"
-            "Two-finger scroll changes Brush Size; Ctrl+scroll zooms."
-        )
-        self._heal_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._heal_btn, on))
-        heal_row.addWidget(self._heal_btn, 1)
-        self._heal_clear_btn = QPushButton("Clear Heal")
-        self._heal_clear_btn.setObjectName("adjust_db_clear_btn")
-        self._heal_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._heal_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._heal_clear_btn.setToolTip("Erase the spot-heal mask for this image")
-        self._heal_clear_btn.setEnabled(False)
-        self._heal_clear_btn.clicked.connect(self.spot_heal_clear_requested.emit)
-        heal_row.addWidget(self._heal_clear_btn, 1)
-        db_container_layout.addLayout(heal_row)
+        # Both clears on one labelled row. They were split across two rows,
+        # one of them a bare "Clear" whose scope you had to already know --
+        # side by side under "Clear", each button only has to name its target.
+        clear_row = QHBoxLayout()
+        clear_row.setSpacing(6)
+        clear_lbl = QLabel("Clear")
+        clear_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        clear_lbl.setMinimumWidth(78)
+        clear_row.addWidget(clear_lbl)
 
-        db_actions_row = QHBoxLayout()
-        db_actions_row.setSpacing(6)
-        db_actions_spacer = QLabel("")
-        db_actions_spacer.setMinimumWidth(78)
-        db_actions_row.addWidget(db_actions_spacer)
-        self._db_clear_btn = QPushButton("Clear")
+        self._db_clear_btn = QPushButton("Dodge / Burn")
         self._db_clear_btn.setObjectName("adjust_db_clear_btn")
         self._db_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._db_clear_btn.setToolTip("Erase the dodge/burn brush mask for this image")
+        self._db_clear_btn.setToolTip("Erase the whole dodge/burn brush mask for this image")
         self._db_clear_btn.setEnabled(False)
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
-        db_actions_row.addWidget(self._db_clear_btn, 1)
+        clear_row.addWidget(self._db_clear_btn, 1)
+
+        self._heal_clear_btn = QPushButton("Heal")
+        self._heal_clear_btn.setObjectName("adjust_db_clear_btn")
+        self._heal_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._heal_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._heal_clear_btn.setToolTip("Erase the whole spot-heal mask for this image")
+        self._heal_clear_btn.setEnabled(False)
+        self._heal_clear_btn.clicked.connect(self.spot_heal_clear_requested.emit)
+        clear_row.addWidget(self._heal_clear_btn, 1)
+        db_container_layout.addLayout(clear_row)
+
+        db_actions_row = QHBoxLayout()
+        db_actions_row.setSpacing(6)
+        db_actions_lbl = QLabel("Options")
+        db_actions_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_actions_lbl.setMinimumWidth(78)
+        db_actions_row.addWidget(db_actions_lbl)
 
         self._db_show_mask_btn = QPushButton("Mask (M)")
         self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")
         self._db_show_mask_btn.setCheckable(True)
         self._db_show_mask_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_show_mask_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._db_show_mask_btn.setEnabled(False)
         self._db_show_mask_btn.setToolTip(
-            "Overlay the active brush mask (red/blue = dodge/burn, green = heal).\n"
-            "Turns on automatically when a brush tool is armed. Shortcut: M"
+            "Overlay the brush mask (red/blue = dodge/burn, green = heal).\n"
+            "Always available, with or without a tool armed -- arming one just\n"
+            "turns it on for you. Shortcut: M"
         )
         self._db_show_mask_btn.toggled.connect(self._on_mask_btn_toggled)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
@@ -1513,6 +1841,32 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row.addWidget(self._db_strength_slider, 1)
         db_container_layout.addLayout(db_strength_row)
 
+        # Brush Feather. Session tool state like Size and Flow -- it describes
+        # the brush, not the photo, so it is not an adjustment key and is not
+        # written to the sidecar (Lightroom treats brush feather the same way).
+        db_feather_row = QHBoxLayout()
+        db_feather_row.setSpacing(6)
+        db_feather_lbl = QLabel("Brush Feather")
+        db_feather_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_feather_lbl.setMinimumWidth(78)
+        db_feather_row.addWidget(db_feather_lbl)
+        self._db_feather_slider = AdjustSlider(Qt.Orientation.Horizontal)
+        self._db_feather_slider.setRange(0, 100)
+        from raw_dodge_burn import DEFAULT_BRUSH_FEATHER as _DEFAULT_FEATHER
+
+        self._db_feather_slider.setValue(int(round(_DEFAULT_FEATHER * 100)))
+        self._db_feather_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._db_feather_slider.setToolTip(
+            "Edge softness: 0 paints a hard-edged circle, 100 fades from the "
+            "very centre.\nThe brush was fixed at 100 before this slider "
+            "existed, which is why solid coverage needed scrubbing."
+        )
+        self._db_feather_slider.valueChanged.connect(
+            lambda _v: self.dodge_burn_brush_changed.emit()
+        )
+        db_feather_row.addWidget(self._db_feather_slider, 1)
+        db_container_layout.addLayout(db_feather_row)
+
         # Stops-per-mask-unit (persisted as DodgeBurnStrength). Distinct from
         # Brush Flow, which only controls per-stroke accumulation while painting.
         # Heal mode disables this row — inpaint always runs at full strength.
@@ -1551,6 +1905,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._build_masks_section(self.sect_masks)
         self._build_generate_section(self.sect_generate)
 
+        self._build_anamorphic_section(self.sect_anamorphic)
         self._build_looks_section(self.sect_lut)
 
         self._calibrate_btn = QPushButton("🎯 Calibrate Camera from Color Checker...")
@@ -1584,7 +1939,10 @@ class ImageAdjustPanelWidget(QWidget):
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         export_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         export_btn.setMinimumHeight(40)
-        layout.addWidget(export_btn)
+        # On the Global page only: it sat in the shared column below both
+        # pages, so a big Export button followed the user into mask editing
+        # where finishing the export is not the next thing they want.
+        self._tab_page_global.layout().addWidget(export_btn)
         self._export_btn = export_btn
         self._is_raw_file = True
         self._rebuild_export_menu()
@@ -1851,31 +2209,6 @@ class ImageAdjustPanelWidget(QWidget):
         self._crop_action_wrap.setVisible(False)
         layout.addWidget(self._crop_action_wrap)
 
-        # Anamorphic Desqueeze dropdown
-        from raw_adjustments import ANAMORPHIC_DESQUEEZE_PRESETS
-
-        anamorphic_row = QHBoxLayout()
-        anamorphic_row.setSpacing(6)
-        ana_lbl = QLabel("Anamorphic")
-        ana_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-        ana_lbl.setMinimumWidth(78)
-        anamorphic_row.addWidget(ana_lbl)
-
-        self._anamorphic_combo = QComboBox()
-        self._anamorphic_combo.setObjectName("adjust_nr_combo")
-        self._anamorphic_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._anamorphic_combo.setToolTip(
-            "Anamorphic lens desqueeze (1.33x, 1.5x, 1.6x, 2.0x) — stretches image width to restore natural proportions."
-        )
-        for label, val in ANAMORPHIC_DESQUEEZE_PRESETS:
-            self._anamorphic_combo.addItem(label, val)
-        self._anamorphic_combo.currentIndexChanged.connect(self._on_anamorphic_changed)
-        anamorphic_row.addWidget(self._anamorphic_combo, 1)
-
-        ana_wrap = QWidget()
-        ana_wrap.setLayout(anamorphic_row)
-        layout.addWidget(ana_wrap)
-
         sect.add_widget(wrap)
         self._crop_active = False
         self._crop_insets = (0.0, 0.0, 0.0, 0.0)
@@ -2010,6 +2343,77 @@ class ImageAdjustPanelWidget(QWidget):
         current["Temperature"] = float(temperature)
         current["Tint"] = float(tint)
         self.set_adjustments(current)
+        self._emit_preview_and_save()
+
+    def _build_anamorphic_section(self, sect: CollapsibleSection) -> None:
+        """Desqueeze ratio as one row of exclusive buttons.
+
+        Its own section rather than a row buried under Transform's crop
+        controls: desqueeze is a property of the lens the frame was shot with,
+        not a framing decision, and it was the only dropdown in a panel where
+        every other discrete choice is a button row.
+
+        Buttons over a combo box because there are five fixed ratios and the
+        current one should be readable without opening anything -- the same
+        reason the WB presets and crop aspect pills are pills.
+        """
+        from raw_adjustments import ANAMORPHIC_DESQUEEZE_PRESETS
+
+        wrap = QWidget()
+        col = QVBoxLayout(wrap)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self._anamorphic_btns: list[QPushButton] = []
+        for label, value in ANAMORPHIC_DESQUEEZE_PRESETS:
+            # "Off (1.0x)" -> "1.0x": the row reads as a scale, and Off is
+            # simply the ratio that changes nothing.
+            text = "1.0x" if abs(value - 1.0) < 1e-6 else label
+            btn = QPushButton(text)
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(
+                f"Desqueeze {text} — stretch width to restore natural proportions"
+                if abs(value - 1.0) > 1e-6
+                else "No desqueeze (native capture proportions)"
+            )
+            btn.setProperty("anamorphic_ratio", float(value))
+            btn.clicked.connect(
+                lambda _checked=False, v=float(value): self._on_anamorphic_selected(v)
+            )
+            row.addWidget(btn, 1)
+            self._anamorphic_btns.append(btn)
+        col.addLayout(row)
+
+        hint = QLabel("Only for footage shot through an anamorphic adapter.")
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        hint.setWordWrap(True)
+        col.addWidget(hint)
+
+        sect.add_widget(wrap)
+        self._sync_anamorphic_buttons(1.0)
+
+    def _sync_anamorphic_buttons(self, ratio: float) -> None:
+        """Check the button matching ``ratio`` (nearest within tolerance)."""
+        buttons = getattr(self, "_anamorphic_btns", None)
+        if not buttons:
+            return
+        for btn in buttons:
+            value = float(btn.property("anamorphic_ratio") or 1.0)
+            btn.setChecked(abs(value - float(ratio)) < 1e-3)
+
+    def _on_anamorphic_selected(self, ratio: float) -> None:
+        # Exclusive by construction: re-clicking the active ratio must not
+        # untoggle it into a state where nothing is selected, so the sync
+        # re-asserts checked state rather than trusting the click.
+        self._sync_anamorphic_buttons(ratio)
+        if self._block_emit:
+            return
+        self._anamorphic_ratio = float(ratio)
         self._emit_preview_and_save()
 
     def _build_looks_section(self, sect: CollapsibleSection) -> None:
@@ -2572,18 +2976,9 @@ class ImageAdjustPanelWidget(QWidget):
                 self._db_mask_strength_slider.blockSignals(False)
                 if hasattr(self, "_db_mask_strength_value"):
                     self._db_mask_strength_value.setText(f"{stops:.2f}")
-            if hasattr(self, "_anamorphic_combo"):
-                ratio = float(merged.get("AnamorphicRatio", 1.0) or 1.0)
-                idx = 0
-                for i in range(self._anamorphic_combo.count()):
-                    if abs(float(self._anamorphic_combo.itemData(i) or 1.0) - ratio) < 1e-3:
-                        idx = i
-                        break
-                self._anamorphic_combo.blockSignals(True)
-                try:
-                    self._anamorphic_combo.setCurrentIndex(idx)
-                finally:
-                    self._anamorphic_combo.blockSignals(False)
+            ratio = float(merged.get("AnamorphicRatio", 1.0) or 1.0)
+            self._anamorphic_ratio = ratio
+            self._sync_anamorphic_buttons(ratio)
             self._sync_wb_preset_combo(float(merged.get("Temperature", self._as_shot_temperature)))
             # Refresh "As Shot" label with the file's Kelvin when known.
             combo = getattr(self, "_wb_preset_combo", None)
@@ -2730,6 +3125,39 @@ class ImageAdjustPanelWidget(QWidget):
         self.lens_correction_toggled.emit(bool(checked))
         self.editing_finished.emit(self.get_adjustments())
 
+    def _on_panel_tab_changed(self, index: int) -> None:
+        """Show the selected top-level page (0 = Global, 1 = Masks, 2 = Generate)."""
+        masks = index == 1
+        generate = index == 2
+        self._tab_page_global.setVisible(not masks and not generate)
+        self._tab_page_masks.setVisible(masks)
+        self._tab_page_generate.setVisible(generate)
+
+        # Each page holds one section, so a user who had collapsed it while it
+        # lived at the bottom of Global would land on a page that looks
+        # broken. Opening it on arrival costs nothing -- there is nothing else
+        # on the page to scroll past.
+        if masks:
+            self.sect_masks.set_expanded(True)
+        if generate:
+            self.sect_generate.set_expanded(True)
+            # The source is whatever the current render looks like now, so it
+            # is re-read on arrival rather than cached from the last visit.
+            self._refresh_generate_source()
+            self._refresh_generate_availability()
+
+        # Each page has its own natural scroll extent; carrying the other
+        # page's offset over lands mid-content for no reason.
+        scroll = getattr(self, "_scroll_area", None)
+        if scroll is not None:
+            scroll.verticalScrollBar().setValue(0)
+
+    def show_masks_tab(self) -> None:
+        """Bring the Masks page forward (used when a mask action starts)."""
+        tabs = getattr(self, "_panel_tabs", None)
+        if tabs is not None:
+            tabs.set_current(1)
+
     def _on_copy_settings_clicked(self) -> None:
         """Snapshot this image's edit settings into the session clipboard.
 
@@ -2795,11 +3223,7 @@ class ImageAdjustPanelWidget(QWidget):
         out["LensCorrectionEnabled"] = (
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
         )
-        if hasattr(self, "_anamorphic_combo"):
-            data = self._anamorphic_combo.currentData()
-            out["AnamorphicRatio"] = float(data) if data is not None else 1.0
-        else:
-            out["AnamorphicRatio"] = 1.0
+        out["AnamorphicRatio"] = float(getattr(self, "_anamorphic_ratio", 1.0) or 1.0)
         if self._tone_curve_row is not None:
             self._channel_curve_cache[self._current_curve_channel] = (
                 self._tone_curve_row.serialized_points()
@@ -2877,34 +3301,25 @@ class ImageAdjustPanelWidget(QWidget):
         self.dodge_burn_mode_changed.emit(mode)
 
     def _sync_dodge_burn_mask_button_enabled(self, armed: bool) -> None:
-        """Mask overlay is available while a brush tool is armed, and stays
-        available afterward if a previously-painted dodge/burn/heal mask
-        still has data (e.g. a loaded edit) so the user can inspect it
-        without re-arming a tool.
+        """Mask overlay is always togglable; arming merely turns it on for you.
 
-        Default on when arming a tool so paint coverage is visible immediately
-        (especially important for Heal).
+        It used to be disabled unless a tool was armed or a painted mask
+        already held data. That made the one control for "show me what is
+        masked" unavailable exactly when someone wanted to find out whether
+        anything was masked -- and now that releasing a hotkey disarms, it
+        would grey out the instant a stroke finished. Viewing is not editing;
+        it needs no armed tool.
+
+        Arming still checks it by default so paint coverage shows immediately
+        (which matters most for Heal), unless the user has hidden it.
         """
         btn = getattr(self, "_db_show_mask_btn", None)
         if btn is None:
             return
-        has_data = bool(
-            getattr(self, "_db_mask_has_data", False)
-            or getattr(self, "_heal_mask_has_data", False)
-        )
-        available = bool(armed or has_data)
-        btn.setEnabled(available)
+        btn.setEnabled(True)
         # setChecked below fires the button's own `toggled` signal, which
         # _on_mask_btn_toggled already forwards to dodgeBurnMaskToggled --
         # no need (and no longer any need) to emit it again here.
-        if not available:
-            if btn.isChecked():
-                self._block_emit = True
-                try:
-                    btn.setChecked(False)
-                finally:
-                    self._block_emit = False
-            return
         if armed and not btn.isChecked() and not self._mask_user_hidden:
             self._block_emit = True
             try:
@@ -3096,6 +3511,15 @@ class ImageAdjustPanelWidget(QWidget):
         """0..1: per-stamp delta at the brush center before pressure scaling."""
         return float(self._db_strength_slider.value()) / 100.0
 
+    def dodge_burn_brush_feather(self) -> float:
+        """0..1 edge softness for every brush (dodge/burn, heal, mask paint)."""
+        slider = getattr(self, "_db_feather_slider", None)
+        if slider is None:
+            from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
+
+            return float(DEFAULT_BRUSH_FEATHER)
+        return float(slider.value()) / 100.0
+
     def dodge_burn_edge_assist(self) -> bool:
         btn = getattr(self, "_db_edge_btn", None)
         return True if btn is None else bool(btn.isChecked())
@@ -3122,6 +3546,13 @@ class ImageAdjustPanelWidget(QWidget):
 
     def dodge_burn_show_mask(self) -> bool:
         return bool(self._db_show_mask_btn.isChecked())
+
+    def request_mask_overlay_visible(self) -> None:
+        """Switch the mask overlay on unless the user has turned it off."""
+        btn = getattr(self, "_db_show_mask_btn", None)
+        if btn is None or self._mask_user_hidden or btn.isChecked():
+            return
+        btn.setChecked(True)  # fires _on_mask_btn_toggled -> dodgeBurnMaskToggled
 
     def toggle_dodge_burn_show_mask(self) -> None:
         if not self._db_show_mask_btn.isEnabled():
@@ -3152,24 +3583,61 @@ class ImageAdjustPanelWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _build_generate_section(self, sect: "CollapsibleSection") -> None:
-        """Instruction box + Generate/Cancel.
+        """Source → instruction → generate, as a page rather than a section.
 
-        Unlike every other section here, this one produces a NEW FILE
-        rather than changing the current render -- so it is a button and
-        a wait, not a slider you scrub. The wording says so plainly; a
-        photographer who thinks this is another adjustment will be
-        surprised when a second file shows up in the folder.
+        Unlike every other tab here, this one produces a NEW FILE rather than
+        changing the current render -- so it is a button and a wait, not a
+        slider you scrub. The wording says so plainly; a photographer who
+        thinks this is another adjustment will be surprised when a second file
+        shows up in the folder.
+
+        The source thumbnail is the reason this is a page. What gets sent is
+        the *current render*, edits baked in -- so the same instruction on the
+        same RAW gives different results depending on how it is graded. Naming
+        that in prose would be missed; showing the exact pixels cannot be.
         """
         from PyQt6.QtWidgets import QPlainTextEdit
 
         container = QWidget()
         col = QVBoxLayout(container)
         col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(6)
+        col.setSpacing(10)
+
+        # -- Source ----------------------------------------------------
+        col.addWidget(self._mask_section_head("Source", "sent to the model"))
+
+        self._gen_source_thumb = QLabel()
+        self._gen_source_thumb.setMinimumHeight(104)
+        self._gen_source_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._gen_source_thumb.setStyleSheet(
+            f"""
+            QLabel {{
+                background-color: {theme.VOID};
+                border: 1px solid {theme.LINE};
+                border-radius: 4px;
+                color: {theme.INK_FAINT};
+                font-size: 10px;
+            }}
+            """
+        )
+        self._gen_source_thumb.setText("Open an image in the editor")
+        col.addWidget(self._gen_source_thumb)
+
+        self._gen_source_caption = QLabel("")
+        self._gen_source_caption.setWordWrap(True)
+        self._gen_source_caption.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 9px;"
+        )
+        col.addWidget(self._gen_source_caption)
+
+        col.addWidget(self._mask_rule())
+
+        # -- Instruction -----------------------------------------------
+        col.addWidget(self._mask_section_head("Instruction"))
 
         blurb = QLabel(
-            "Describe a change. Creates a new edited copy next to the "
-            "original — your RAW is not altered."
+            "Describe the change you want. This writes a new edited copy "
+            "next to the original — your RAW is never altered."
         )
         blurb.setWordWrap(True)
         blurb.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
@@ -3190,6 +3658,8 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             """
         )
+        self._gen_instruction.setMinimumHeight(72)
+        self._gen_instruction.setMaximumHeight(96)
         col.addWidget(self._gen_instruction)
 
         row = QHBoxLayout()
@@ -3236,6 +3706,37 @@ class ImageAdjustPanelWidget(QWidget):
             self._gen_run_btn.setEnabled(False)
             self._gen_status.setText("Generative editing unavailable.")
 
+    def _refresh_generate_source(self) -> None:
+        """Ask the host for the pixels that would be sent right now."""
+        self.generative_source_requested.emit()
+
+    def set_generative_source(self, image, caption: str = "") -> None:
+        """Show the exact render that Generate would send.
+
+        ``image`` is a QImage (or None when no image is open). The host owns
+        the edit-base resolution, so it does the downscale; this only fits the
+        result to the label.
+        """
+        from PyQt6.QtGui import QPixmap
+
+        thumb = getattr(self, "_gen_source_thumb", None)
+        if thumb is None:
+            return
+        if image is None or image.isNull():
+            thumb.setPixmap(QPixmap())
+            thumb.setText("Open an image in the editor")
+            self._gen_source_caption.setText("")
+            return
+        pix = QPixmap.fromImage(image).scaled(
+            max(1, thumb.width() - 2),
+            160,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        thumb.setText("")
+        thumb.setPixmap(pix)
+        self._gen_source_caption.setText(caption or "")
+
     def generative_instruction(self) -> str:
         return self._gen_instruction.toPlainText().strip()
 
@@ -3272,6 +3773,48 @@ class ImageAdjustPanelWidget(QWidget):
             self._gen_status.setText("")
             self._refresh_generate_availability()
 
+    @staticmethod
+    def _mask_section_head(title: str, note: str = "") -> QWidget:
+        """Small tracked heading, optionally with a right-aligned note.
+
+        Groups the Masks tab by what a control acts on -- the stack, a new
+        mask, the selected mask, the brush, the effect -- so a control's
+        meaning comes from where it sits rather than from reading every label.
+        """
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        label = QLabel(title.upper())
+        label.setStyleSheet(
+            f"color: {theme.INK}; font-size: 9px; font-weight: 700; "
+            "letter-spacing: 1.4px;"
+        )
+        row.addWidget(label)
+        row.addStretch(1)
+        if note:
+            hint = QLabel(note)
+            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 9px;")
+            row.addWidget(hint)
+        return wrap
+
+    @staticmethod
+    def _mask_family_label(text: str) -> QLabel:
+        """"you draw it" / "it finds it" -- the split is who chooses."""
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.6px;"
+        )
+        return label
+
+    @staticmethod
+    def _mask_rule() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background-color: {theme.LINE_SOFT}; border: none;")
+        return line
+
     def _build_masks_section(self, sect: "CollapsibleSection") -> None:
         self._mask_stack = None  # live raw_mask_layers.MaskLayerStack (host-owned)
         self._mask_block = False
@@ -3284,7 +3827,8 @@ class ImageAdjustPanelWidget(QWidget):
         col.setSpacing(6)
 
         self._mask_list = QListWidget()
-        self._mask_list.setMaximumHeight(110)
+        self._mask_list.setMaximumHeight(140)
+        self._mask_list.setIconSize(QSize(self._MASK_ICON_BOX, self._MASK_ICON_BOX))
         self._mask_list.setStyleSheet(
             f"""
             QListWidget {{
@@ -3294,51 +3838,102 @@ class ImageAdjustPanelWidget(QWidget):
                 color: {theme.INK};
                 font-size: 11px;
             }}
+            QListWidget::item {{
+                padding: 3px 4px 3px 7px;
+                border-left: 2px solid transparent;
+            }}
+            QListWidget::item:hover {{
+                background-color: {theme.RAISED};
+            }}
             QListWidget::item:selected {{
-                background-color: {theme.EMBER_DIM};
+                /* A lit leading edge, not a filled block: EMBER marks the
+                   active thing the same way it does on the tab rule, so the
+                   panel reads as one system and the two never compete for
+                   the same glance. */
+                background-color: {theme.RAISED};
+                border-left: 2px solid {theme.EMBER};
                 color: {theme.INK};
             }}
             """
         )
         self._mask_list.currentRowChanged.connect(self._on_mask_row_changed)
         self._mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self._mask_stack_head = self._mask_section_head("Masks", "top paints last")
+        col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
 
-        ops_row = QHBoxLayout()
-        ops_row.setSpacing(6)
-        self._mask_add_btn = QPushButton("Add Mask")
-        self._mask_del_btn = QPushButton("Delete")
-        self._mask_dup_btn = QPushButton("Duplicate")
-        for btn in (self._mask_add_btn, self._mask_del_btn, self._mask_dup_btn):
-            btn.setObjectName("adjust_db_clear_btn")
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            ops_row.addWidget(btn, 1)
-        self._mask_add_btn.setToolTip("Add a new empty mask layer — paint it with the Paint brush")
+        # Adding an empty mask is a STACK operation, so it lives with the
+        # stack rather than among the tools that make a mask of some kind.
+        self._mask_add_btn = QPushButton("New empty mask")
+        self._mask_add_btn.setObjectName("adjust_db_clear_btn")
+        self._mask_add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_add_btn.setToolTip(
+            "Start another empty mask. Paint already makes the first one for you."
+        )
         self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
-        self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
-        self._mask_dup_btn.clicked.connect(self._on_mask_duplicate_clicked)
-        col.addLayout(ops_row)
+        col.addWidget(self._mask_add_btn)
 
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(6)
+        # Delete is created here but belongs to "This mask" below -- it acts on
+        # the selected mask, not on the set of them.
+        # Duplicate removed: duplicating a mask copies coverage AND its
+        # adjustments, which is almost never what is wanted -- the two useful
+        # cases (same region, different adjustment / same adjustment, different
+        # region) both need editing afterwards anyway.
+        self._mask_del_btn = QPushButton("✕")
+        self._mask_del_btn.setObjectName("adjust_mask_delete_btn")
+        self._mask_del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_del_btn.setFixedWidth(34)
+        self._mask_del_btn.setToolTip("Delete this mask")
+        # Weight follows consequence: Erase and Invert are reversible and read
+        # as ordinary buttons; deleting throws work away, so it stays neutral
+        # until you reach for it and only then turns the palette's one red.
+        self._mask_del_btn.setStyleSheet(
+            f"""
+            QPushButton#adjust_mask_delete_btn {{
+                background: transparent;
+                border: 1px solid {theme.LINE};
+                border-radius: 5px;
+                color: {theme.INK_FAINT};
+                font-size: 13px;
+            }}
+            QPushButton#adjust_mask_delete_btn:hover {{
+                color: {theme.HIST_R};
+                border-color: {theme.HIST_R};
+            }}
+            QPushButton#adjust_mask_delete_btn:disabled {{
+                color: {theme.INK_FAINT};
+                border-color: {theme.LINE_SOFT};
+            }}
+            """
+        )
+        self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
+
+        tools_row = QHBoxLayout()   # "This mask": Erase, Invert, and delete
+        tools_row.setSpacing(5)
         self._mask_paint_btn = QPushButton("Paint")
         self._mask_erase_btn = QPushButton("Erase")
         self._mask_invert_btn = QPushButton("Invert")
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Brush coverage into the selected mask (max-blend; repeated "
-                "strokes saturate toward full coverage).\nUses the Local "
-                "section's Brush Size / Flow / Edge Assist settings.",
+                "Paint (hold P) — brush coverage into the selected mask.\n\n"
+                "Repeated strokes build toward full coverage. With no mask yet, "
+                "this makes one.\nSize, Flow, Feather and Edge Assist come from "
+                "the Local section.",
             ),
             (
                 self._mask_erase_btn,
-                "Remove coverage from the selected mask under the brush.",
+                "Erase (hold X) — remove coverage from the selected mask under "
+                "the brush.\n\n"
+                "Use it to trim what Smart Object, Sky or AI Selection got wrong.",
             ),
             (
                 self._mask_invert_btn,
-                "Apply this mask's adjustments everywhere EXCEPT the painted region.",
+                "Invert — apply this mask's adjustments everywhere EXCEPT its "
+                "covered area.\n\n"
+                "Mask the subject, then invert to adjust the background instead.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
@@ -3346,7 +3941,6 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            tools_row.addWidget(btn, 1)
         self._mask_paint_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_paint_btn, on)
         )
@@ -3354,7 +3948,9 @@ class ImageAdjustPanelWidget(QWidget):
             lambda on: self._on_mask_tool_toggled(self._mask_erase_btn, on)
         )
         self._mask_invert_btn.toggled.connect(self._on_mask_invert_toggled)
-        col.addLayout(tools_row)
+        # Assembled after the AI/gradient rows below so the sections read in
+        # working order: what you have, how to make one, what to do to it.
+
 
         # AI selection row (raw_ai_masks). Subject/Sky are one-shot: they
         # generate a whole layer and hand it back. Click is a *mode* --
@@ -3362,32 +3958,42 @@ class ImageAdjustPanelWidget(QWidget):
         # cursor handling, then each canvas click adds a SAM point prompt.
         ai_row = QHBoxLayout()
         ai_row.setSpacing(6)
-        self._mask_ai_subject_btn = QPushButton("Subject")
+        self._mask_ai_subject_btn = QPushButton("Smart Object")
         self._mask_ai_sky_btn = QPushButton("Sky")
-        self._mask_ai_click_btn = QPushButton("Click")
+        self._mask_ai_click_btn = QPushButton("AI Selection")
         for btn, tip in (
             (
                 self._mask_ai_subject_btn,
-                "Select the main subject automatically (BiRefNet).\n"
-                "Creates a new mask layer you can then brush or erase.",
+                "Smart Object — one press, no aiming.\n\n"
+                "Finds whatever stands out in the photo and masks it. It "
+                "returns ONE mask:\nif two people stand together they come "
+                "back in the same mask, not two.\nTo mask just one of them, "
+                "use AI Selection instead.\n\n"
+                "Makes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_sky_btn,
-                "Select the sky automatically.\n"
-                "Creates a new mask layer you can then brush or erase.",
+                "Sky — one press.\n\n"
+                "Masks the sky. If the photo has none, nothing is added and "
+                "it says so.\n\n"
+                "Makes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_click_btn,
-                "Click anything in the photo to select it (MobileSAM).\n"
-                "Click again to add to the selection; the first click may "
-                "pause briefly while the image is analysed.",
+                "AI Selection — you choose what gets masked, not the app.\n\n"
+                "Click a thing in the photo and it masks that thing: a jacket, "
+                "one flower,\none person in a group. Click more spots to add "
+                "them to the SAME mask.\n\n"
+                "Use this when Smart Object picks the wrong thing, or when you "
+                "want part\nof something rather than all of it.\n\n"
+                "The first click pauses briefly while the photo is analysed.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            ai_row.addWidget(btn, 1)
+            ai_row.addWidget(btn, 1)  # "it finds it" family
         self._mask_ai_click_btn.setCheckable(True)
         self._mask_ai_subject_btn.clicked.connect(
             lambda: self.mask_ai_requested.emit("subject")
@@ -3396,7 +4002,126 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_ai_click_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
         )
+
+
+        # Gradient tools. Armed, not one-shot: the shape comes from a drag on
+        # the photo (Lightroom/darktable both work this way -- a gradient
+        # placed without seeing the image is a guess), so the button arms the
+        # drag and the canvas defines the geometry.
+        grad_row = QHBoxLayout()
+        grad_row.setSpacing(6)
+        self._mask_linear_btn = QPushButton("Linear")
+        self._mask_radial_btn = QPushButton("Radial")
+        for btn, tip in (
+            (
+                self._mask_linear_btn,
+                "Linear gradient — drag across the photo to set the direction "
+                "and how far the fade runs.\nDrag down from the top for a sky.",
+            ),
+            (
+                self._mask_radial_btn,
+                "Radial gradient — drag a box; the ellipse is inscribed in it.\n"
+                "Full strength at the centre, fading to the edge.",
+            ),
+        ):
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            grad_row.addWidget(btn, 1)  # joins Paint in "you draw it"
+        self._mask_linear_btn.toggled.connect(
+            lambda on: self._on_gradient_tool_toggled(self._mask_linear_btn, "linear", on)
+        )
+        self._mask_radial_btn.toggled.connect(
+            lambda on: self._on_gradient_tool_toggled(self._mask_radial_btn, "radial", on)
+        )
+        # ---- Add a mask: the six ways, split by who chooses ----------------
+        col.addWidget(self._mask_rule())
+        col.addWidget(self._mask_section_head("Add a mask"))
+
+        col.addWidget(self._mask_family_label("you draw it"))
+        draw_row = QHBoxLayout()
+        draw_row.setSpacing(5)
+        draw_row.addWidget(self._mask_paint_btn, 1)
+        grad_items = []
+        while grad_row.count():
+            grad_items.append(grad_row.takeAt(0).widget())
+        for w in grad_items:
+            if w is not None:
+                draw_row.addWidget(w, 1)
+        col.addLayout(draw_row)
+
+        col.addWidget(self._mask_family_label("it finds it"))
         col.addLayout(ai_row)
+
+        # ---- This mask: what you can do to the selected one -----------------
+        col.addWidget(self._mask_rule())
+        self._mask_this_head = self._mask_section_head("This mask")
+        col.addWidget(self._mask_this_head)
+        tools_row.addWidget(self._mask_erase_btn, 1)
+        tools_row.addWidget(self._mask_invert_btn, 1)
+        tools_row.addWidget(self._mask_del_btn)
+        col.addLayout(tools_row)
+
+        # Brush controls, mirrored from the Local section. Local lives on the
+        # GLOBAL tab, so while masking they were on the other page: you had to
+        # leave the masks, change Size, and come back. These are the same
+        # values, kept in step both ways -- not a second set of settings.
+        self._mask_brush_sliders: dict = {}
+        brush_wrap = QWidget()
+        brush_col = QVBoxLayout(brush_wrap)
+        brush_col.setContentsMargins(0, 0, 0, 0)
+        brush_col.setSpacing(4)
+        brush_col.addWidget(self._mask_rule())
+        brush_col.addWidget(self._mask_section_head("Brush", "while painting"))
+        for label, source_attr in (
+            ("Brush Size", "_db_size_slider"),
+            ("Brush Flow", "_db_strength_slider"),
+            ("Brush Feather", "_db_feather_slider"),
+        ):
+            source = getattr(self, source_attr, None)
+            if source is None:
+                continue
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            lbl.setMinimumWidth(78)
+            row.addWidget(lbl)
+            mirror = AdjustSlider(Qt.Orientation.Horizontal)
+            mirror.setRange(source.minimum(), source.maximum())
+            mirror.setValue(source.value())
+            mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            mirror.setToolTip(source.toolTip())
+            # Two-way, guarded against the echo: each side blocks the other's
+            # signals while writing, or a drag ping-pongs between them.
+            mirror.valueChanged.connect(
+                lambda v, src=source: self._mirror_brush_value(src, v)
+            )
+            source.valueChanged.connect(
+                lambda v, dst=mirror: self._mirror_brush_value(dst, v)
+            )
+            row.addWidget(mirror, 1)
+            brush_col.addLayout(row)
+            self._mask_brush_sliders[label] = mirror
+        col.addWidget(brush_wrap)
+        self._mask_brush_wrap = brush_wrap
+        # Tool state, not part of the mask: it appears when a brush is in your
+        # hand and goes away again, so it never sits among the mask's own
+        # controls claiming to be one of them.
+        brush_wrap.setVisible(False)
+
+        # Per-mask parameters, hidden wholesale until a mask exists. Showing a
+        # dozen greyed-out sliders reads as broken rather than as "nothing
+        # selected yet", and it buried Add Mask under controls that could not
+        # do anything.
+        self._mask_params_wrap = QWidget()
+        params_col = QVBoxLayout(self._mask_params_wrap)
+        params_col.setContentsMargins(0, 0, 0, 0)
+        params_col.setSpacing(6)
+        params_col.addWidget(self._mask_rule())
+        params_col.addWidget(self._mask_section_head("Adjust", "inside the mask"))
 
         for key, label, lo, hi, div in self._MASK_SLIDER_SPECS:
             row = QHBoxLayout()
@@ -3422,15 +4147,26 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(val)
             self._mask_sliders[key] = slider
             self._mask_value_labels[key] = val
-            col.addLayout(row)
+            params_col.addLayout(row)
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "
-            "Brush Size / Flow / Edge Assist come from the Local section."
+            "Brush Size / Flow / Feather / Edge Assist come from the Local section."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
-        col.addWidget(hint)
+        params_col.addWidget(hint)
+        col.addWidget(self._mask_params_wrap)
+
+        self._mask_empty_hint = QLabel(
+            "No masks yet. Paint one by hand, drag a Linear or Radial gradient, or "
+            "let Subject / Sky / Select find one for you."
+        )
+        self._mask_empty_hint.setWordWrap(True)
+        self._mask_empty_hint.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 10px;"
+        )
+        col.addWidget(self._mask_empty_hint)
 
         sect.add_widget(container)
         self._sync_mask_controls_enabled()
@@ -3479,8 +4215,23 @@ class ImageAdjustPanelWidget(QWidget):
 
     def arm_mask_paint(self) -> None:
         """Arm the mask Paint brush (used right after Add Mask)."""
-        if not self._mask_paint_btn.isChecked():
-            self._mask_paint_btn.setChecked(True)  # fires _on_mask_tool_toggled
+        self.set_mask_layer_mode("paint")
+
+    def set_mask_layer_mode(self, mode: str | None) -> bool:
+        """Arm a mask brush by name, or disarm with None.
+
+        Force-selects rather than toggling, because the hotkeys that call this
+        are momentary: a held key must always arm its own tool, and releasing
+        is what stops it. Returns whether a tool ended up armed.
+        """
+        wanted = (mode or "").strip().lower()
+        for btn, name in self._mask_tool_buttons():
+            if name == wanted:
+                if not btn.isChecked():
+                    btn.setChecked(True)  # fires _on_mask_tool_toggled
+                return self.mask_layer_mode() is not None
+        self.disarm_mask_layer_tools()
+        return False
 
     def select_mask_index(self, index: int) -> None:
         if 0 <= index < self._mask_list.count():
@@ -3496,13 +4247,17 @@ class ImageAdjustPanelWidget(QWidget):
             for i, layer in enumerate(layers):
                 name = layer.name or f"Mask {i + 1}"
                 item = QListWidgetItem(name)
+                icon = self._mask_row_icon(layer)
+                if icon is not None:
+                    item.setIcon(icon)
+                # No check box: a click selects the row. The check state was
+                # doubling as an enable toggle and made a single click
+                # ambiguous -- "did I select this or turn it off?".
+                # Qt gives QListWidgetItem the checkable flag by default, so it
+                # has to be cleared, not merely left unset.
                 item.setFlags(
-                    item.flags()
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsEditable
-                )
-                item.setCheckState(
-                    Qt.CheckState.Checked if layer.enabled else Qt.CheckState.Unchecked
+                    (item.flags() | Qt.ItemFlag.ItemIsEditable)
+                    & ~Qt.ItemFlag.ItemIsUserCheckable
                 )
                 self._mask_list.addItem(item)
             if layers:
@@ -3512,6 +4267,123 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_block = False
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        self._sync_mask_tab_badge()
+        self.mask_selection_changed.emit()
+
+    def set_ai_tool_used(self, kind: str, used: bool) -> None:
+        """Disable a one-shot AI tool whose mask this photo already has.
+
+        Smart Object and Sky return the same result every time -- pressing
+        either again cannot find "the next" object, it just repeats itself.
+        Leaving the button live and explaining afterwards makes the user
+        discover that by failing; the button says so up front instead.
+
+        AI Selection is never disabled: every click genuinely adds something.
+        """
+        btn = {
+            "subject": getattr(self, "_mask_ai_subject_btn", None),
+            "sky": getattr(self, "_mask_ai_sky_btn", None),
+        }.get(kind)
+        if btn is None:
+            return
+        if not hasattr(self, "_ai_tool_tips"):
+            self._ai_tool_tips = {}
+        self._ai_tool_tips.setdefault(kind, btn.toolTip())
+        btn.setEnabled(not used)
+        if used:
+            label = "Smart Object" if kind == "subject" else "Sky"
+            btn.setToolTip(
+                f"{label} — already masked in this photo.\n\n"
+                f"It would return exactly the same selection again. Select the "
+                f"existing\n{label} mask to adjust it, delete it to start over, "
+                f"or use AI Selection\nto pick a specific object instead."
+            )
+        else:
+            btn.setToolTip(self._ai_tool_tips.get(kind, btn.toolTip()))
+
+    @staticmethod
+    def _mirror_brush_value(target, value: int) -> None:
+        """Copy a brush value to its twin without triggering it back."""
+        if target is None or target.value() == int(value):
+            return
+        target.blockSignals(True)
+        try:
+            target.setValue(int(value))
+        finally:
+            target.blockSignals(False)
+        # The twin's own valueChanged is suppressed above, so emit the panel
+        # signal here -- otherwise dragging the mirror would move the value
+        # but never reach the brush cursor or the stamping code.
+        target.sliderReleased.emit()
+
+    _MASK_ICON_BOX = 34
+
+    def _mask_row_icon(self, layer):
+        """The mask's actual shape, white on black, for its row.
+
+        A row that says "Mask 3" tells you nothing about which region it
+        covers; the shape is recognisable at a glance, the way a layer
+        thumbnail is in any editor. Rendered from the layer's own alpha (or
+        generated, for a gradient) so it is the mask, not an illustration.
+
+        Aspect is preserved inside a square box: a portrait mask drawn as a
+        square would misreport where its coverage sits.
+        """
+        from PyQt6.QtGui import QIcon, QImage, QPixmap
+
+        try:
+            import numpy as np
+
+            box = self._MASK_ICON_BOX
+            h, w = layer.alpha.shape[:2]
+            if h < 1 or w < 1:
+                return None
+            scale = float(box) / float(max(h, w))
+            th, tw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+
+            cache = getattr(self, "_mask_icon_cache", None)
+            if cache is None:
+                cache = self._mask_icon_cache = {}
+            key = (id(layer), int(getattr(layer, "version", 0)), th, tw)
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+
+            alpha = layer.alpha_at(th, tw)
+            grey = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
+            buf = np.ascontiguousarray((grey * 255.0).astype(np.uint8))
+            img = QImage(buf.data, tw, th, buf.strides[0], QImage.Format.Format_Grayscale8)
+            icon = QIcon(QPixmap.fromImage(img.copy()))
+
+            # Bounded: a long session editing many photos would otherwise keep
+            # every mask thumbnail it has ever drawn.
+            if len(cache) > 64:
+                cache.clear()
+            cache[key] = icon
+            return icon
+        except Exception:
+            return None
+
+    def _sync_mask_brush_visible(self) -> None:
+        """Show the Brush sliders only while a mask brush is armed."""
+        wrap = getattr(self, "_mask_brush_wrap", None)
+        if wrap is None:
+            return
+        wrap.setVisible(self.mask_layer_mode() in ("paint", "erase"))
+
+    def _sync_mask_tab_badge(self) -> None:
+        """Show how many masks this photo has on the Masks tab itself.
+
+        Without it, the only way to learn whether a photo carries masks is to
+        leave the tab you are on and look -- and a mask you have forgotten
+        about is exactly the one that makes an edit confusing.
+        """
+        tabs = getattr(self, "_panel_tabs", None)
+        if tabs is None:
+            return
+        stack = getattr(self, "_mask_stack", None)
+        count = len(getattr(stack, "layers", []) or []) if stack is not None else 0
+        tabs.set_badge(1, str(count) if count else "")
 
     # -- internals ------------------------------------------------------
 
@@ -3523,7 +4395,28 @@ class ImageAdjustPanelWidget(QWidget):
 
     def _sync_mask_controls_enabled(self) -> None:
         has_layer = self.active_mask_index() is not None
-        for btn in (self._mask_del_btn, self._mask_dup_btn, self._mask_paint_btn,
+        wrap = getattr(self, "_mask_params_wrap", None)
+        if wrap is not None:
+            wrap.setVisible(has_layer)
+        empty_hint = getattr(self, "_mask_empty_hint", None)
+        if empty_hint is not None:
+            empty_hint.setVisible(not has_layer)
+        lst = getattr(self, "_mask_list", None)
+        if lst is not None:
+            # An empty list box is just a hole in the panel.
+            lst.setVisible(has_layer)
+        for attr in ("_mask_stack_head", "_mask_this_head"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.setVisible(has_layer)
+        if not has_layer:
+            self._sync_mask_brush_visible()
+        add_btn = getattr(self, "_mask_add_btn", None)
+        if add_btn is not None:
+            # Only meaningful once one mask exists: with none, every tool below
+            # already creates its own, so a "New Mask" button just adds a step.
+            add_btn.setVisible(has_layer)
+        for btn in (self._mask_del_btn, self._mask_paint_btn,
                     self._mask_erase_btn, self._mask_invert_btn):
             btn.setEnabled(has_layer)
         for slider in self._mask_sliders.values():
@@ -3556,9 +4449,10 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        self.mask_selection_changed.emit()
 
     def _on_mask_item_changed(self, item: QListWidgetItem) -> None:
-        """Rename (edit text) or enable/disable (check state) in place."""
+        """Rename in place. Enable/disable went away with the check box."""
         if self._mask_block:
             return
         row = self._mask_list.row(item)
@@ -3567,11 +4461,6 @@ class ImageAdjustPanelWidget(QWidget):
             return
         layer = stack.layers[row]
         layer.name = item.text()
-        enabled = item.checkState() == Qt.CheckState.Checked
-        if enabled != layer.enabled:
-            layer.enabled = enabled
-            layer.touch()
-            self._emit_preview_and_save()
 
     def _on_mask_delete_clicked(self) -> None:
         idx = self.active_mask_index()
@@ -3586,6 +4475,18 @@ class ImageAdjustPanelWidget(QWidget):
     def _on_mask_tool_toggled(self, btn: QPushButton, checked: bool) -> None:
         if self._mask_block:
             return
+        if checked and btn is self._mask_paint_btn and self.active_mask_index() is None:
+            # Paint makes its own mask, like every other coverage tool. Without
+            # this it was the one tool that silently did nothing until you had
+            # pressed Add Mask first.
+            self.mask_add_requested.emit()
+            if self.active_mask_index() is None:
+                self._mask_block = True
+                try:
+                    btn.setChecked(False)
+                finally:
+                    self._mask_block = False
+                return
         if checked:
             self._mask_block = True
             try:
@@ -3598,7 +4499,55 @@ class ImageAdjustPanelWidget(QWidget):
             # pipeline -- only one may be armed.
             if self.dodge_burn_mode() is not None:
                 self.set_dodge_burn_mode(None)
+            # Same reason in the other direction: a gradient drag also starts
+            # with a press on the photo.
+            if self.gradient_tool() is not None:
+                self.disarm_gradient_tools()
+        self._sync_mask_brush_visible()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
+
+    def _on_gradient_tool_toggled(self, btn, kind: str, checked: bool) -> None:
+        """Exclusive with the other gradient tool and with the brush tools."""
+        if self._mask_block:
+            return
+        self._mask_block = True
+        try:
+            if checked:
+                other = (
+                    self._mask_radial_btn if kind == "linear" else self._mask_linear_btn
+                )
+                other.setChecked(False)
+                # One brush pipeline, one armed tool: a gradient drag and a
+                # paint stroke both start with a press on the photo.
+                for b in (
+                    self._mask_paint_btn,
+                    self._mask_erase_btn,
+                    self._mask_ai_click_btn,
+                ):
+                    b.setChecked(False)
+        finally:
+            self._mask_block = False
+        self.mask_gradient_tool_changed.emit(kind if checked else "")
+
+    def gradient_tool(self) -> str | None:
+        for btn, kind in (
+            (getattr(self, "_mask_linear_btn", None), "linear"),
+            (getattr(self, "_mask_radial_btn", None), "radial"),
+        ):
+            if btn is not None and btn.isChecked():
+                return kind
+        return None
+
+    def disarm_gradient_tools(self) -> None:
+        self._mask_block = True
+        try:
+            for name in ("_mask_linear_btn", "_mask_radial_btn"):
+                btn = getattr(self, name, None)
+                if btn is not None:
+                    btn.setChecked(False)
+        finally:
+            self._mask_block = False
+        self.mask_gradient_tool_changed.emit("")
 
     def _on_mask_invert_toggled(self, checked: bool) -> None:
         if self._mask_block:
@@ -3748,8 +4697,12 @@ class ImageAdjustPanelWidget(QWidget):
         fund_adj = fundamental_adjustments_for_burst(full_adj)
         self.apply_burst_group_requested.emit(fund_adj, list(self._burst_group_members))
 
-    def _request_export(self, export_format: str, use_ai_denoise: bool = False) -> None:
-        self.export_requested.emit(export_format, self.get_adjustments(), bool(use_ai_denoise))
+    def _request_export(
+        self, export_format: str, use_ai_denoise: bool = False, use_ai_upscale: bool = False
+    ) -> None:
+        self.export_requested.emit(
+            export_format, self.get_adjustments(), bool(use_ai_denoise), bool(use_ai_upscale)
+        )
 
     def _on_slider_value_changed(self, key: str, fmt: Callable[[float], str]) -> None:
         if self._block_emit:
@@ -3780,11 +4733,6 @@ class ImageAdjustPanelWidget(QWidget):
         if index > 0 and hasattr(self, "_chroma_nr_amount_slider"):
             if self._chroma_nr_amount_slider.value() < 1:
                 self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
-        self._emit_preview_and_save()
-
-    def _on_anamorphic_changed(self, index: int) -> None:
-        if self._block_emit:
-            return
         self._emit_preview_and_save()
 
     def _sync_chroma_nr_amount_row_visible(self) -> None:
@@ -3938,31 +4886,62 @@ class ImageAdjustPanelWidget(QWidget):
         if is_raw:
             formats.insert(0, ("16-bit TIFF (baked)", "tiff16"))
 
+        # AI submenus appear only for models actually present on disk -- both
+        # are optional downloads, and a menu entry that silently exports an
+        # ordinary file is worse than no entry at all.
         try:
             from onnx_scunet import scunet_model_path
 
-            if os.path.exists(scunet_model_path()):
-                ai_menu = QMenu("AI Denoise (SCUNet)", export_menu)
-                ai_menu.setStyleSheet(export_menu.styleSheet())
-                ai_tip = (
-                    "Uses AI (SCUNet) instead of the Chroma NR method "
-                    "above, for this export only."
-                )
-                for label, fmt in formats:
-                    act = ai_menu.addAction(
-                        label,
-                        lambda _checked=False, f=fmt: self._request_export(f, True),
-                    )
-                    act.setToolTip(ai_tip)
-                export_menu.addMenu(ai_menu)
-                export_menu.addSeparator()
+            denoise_ready = os.path.exists(scunet_model_path())
         except Exception:
-            pass
+            denoise_ready = False
+        try:
+            from onnx_realesrgan import realesrgan_model_available
+
+            upscale_ready = realesrgan_model_available()
+        except Exception:
+            upscale_ready = False
+
+        ai_variants = []
+        if denoise_ready:
+            ai_variants.append((
+                "AI Denoise (SCUNet)",
+                True,
+                False,
+                "Uses AI (SCUNet) instead of the Chroma NR method above, for this export only.",
+            ))
+        if upscale_ready:
+            ai_variants.append((
+                "AI Upscale 2× (Real-ESRGAN)",
+                False,
+                True,
+                "Exports at double the width and height, for this export only.",
+            ))
+        if denoise_ready and upscale_ready:
+            ai_variants.append((
+                "AI Denoise + Upscale 2×",
+                True,
+                True,
+                "Denoise first, then enlarge -- the order that avoids magnifying noise.",
+            ))
+
+        for menu_label, denoise, upscale, tip in ai_variants:
+            ai_menu = QMenu(menu_label, export_menu)
+            ai_menu.setStyleSheet(export_menu.styleSheet())
+            for label, fmt in formats:
+                act = ai_menu.addAction(
+                    label,
+                    lambda _checked=False, f=fmt, d=denoise, u=upscale: self._request_export(f, d, u),
+                )
+                act.setToolTip(tip)
+            export_menu.addMenu(ai_menu)
+        if ai_variants:
+            export_menu.addSeparator()
 
         for label, fmt in formats:
             export_menu.addAction(
                 label,
-                lambda _checked=False, f=fmt: self._request_export(f, False),
+                lambda _checked=False, f=fmt: self._request_export(f, False, False),
             )
         export_btn.setMenu(export_menu)
         if is_raw:

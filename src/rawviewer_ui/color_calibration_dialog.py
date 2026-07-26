@@ -251,6 +251,7 @@ class ColorCalibrationDialog(QDialog):
         iso: Optional[int] = None,
         parent: Optional[QWidget] = None,
         has_factory_profile: Optional[bool] = None,
+        source_file: Optional[str] = None,
     ):
         super().__init__(parent)
         # True  -> LibRaw ships a colour matrix for this body; calibrating
@@ -264,6 +265,10 @@ class ColorCalibrationDialog(QDialog):
         self.make = make or "Camera"
         self.model = model or "Model"
         self.iso = iso
+        # The frame the chart was shot on, so the saved profile can record
+        # whether the WB guardrail was active for it -- see
+        # color_calibration.current_decode_signature.
+        self.source_file = source_file
         self.calibrated_profile: Optional[Dict[str, Any]] = None
 
         iso_str = f" (ISO {iso})" if iso else ""
@@ -467,7 +472,10 @@ class ColorCalibrationDialog(QDialog):
 
         wb_mode = self.wb_combo.currentData() or "auto"
         profile = calibrate_camera_curves_and_hsl(sampled, wb_mode=wb_mode)
-        save_camera_profile(self.make, self.model, profile, iso=self.iso)
+        save_camera_profile(
+            self.make, self.model, profile, iso=self.iso,
+            source_file=self.source_file,
+        )
         self.calibrated_profile = profile
 
         QMessageBox.information(

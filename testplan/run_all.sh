@@ -36,6 +36,7 @@ run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
 run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
+run "brush feather" testplan/auto/t_brush_feather.py
 run "gallery closes editor" testplan/auto/t_gallery_closes_editor.py
 run "gallery hover prefetch" testplan/auto/t_gallery_hover_prefetch.py
 run "editor skip unsupported" testplan/auto/t_editor_skip_unsupported.py
@@ -64,17 +65,27 @@ run "redundant full re-display" testplan/auto/t_redundant_full_redisplay.py
 run "capture-time-only sort" testplan/auto/t_capture_time_only_sort.py
 run "resolution crossfade decision" testplan/auto/t_resolution_crossfade_decision.py
 run "focus stacking" testplan/auto/t_focus_stacking.py
+run "Real-ESRGAN x2 upscale" testplan/auto/t_realesrgan_upscale.py
+run "adjust panel tabs" testplan/auto/t_adjust_panel_tabs.py
+run "adjust section defaults" testplan/auto/t_adjust_section_defaults.py
+run "slider wheel axis" testplan/auto/t_slider_wheel_axis.py
+run "transform distortion + anamorphic" testplan/auto/t_transform_distortion.py
+run "tap-to-paint + eraser reach" testplan/auto/t_tap_to_paint.py
 run "mask layers (Phase 0 perf spike)" testplan/auto/t_mask_layers.py
+run "masks tab cleanup + invert scope" testplan/auto/t_masks_ui_cleanup.py
+run "mask gradients (linear/radial)" testplan/auto/t_mask_gradients.py
+run "HE/HE* NEF editing" testplan/auto/t_he_nef_editing.py
 run "mask layers drag-time throttling" testplan/auto/t_mask_layers_drag_throttle.py
 run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py
 run "HDR per-image recovery weights" testplan/auto/t_hdr_per_image_weights.py
 run "masks panel (headless UI)" testplan/auto/t_masks_panel.py
 run "camera profile apply" testplan/auto/t_camera_profile_apply.py
+run "camera profile decode signature" testplan/auto/t_profile_decode_signature.py
 run "colorchecker auto-detect (cv2.mcc)" testplan/auto/t_colorchecker_autodetect.py
 run "AI masks (raw_ai_masks)" testplan/auto/t_ai_masks.py
 run "generative edit providers" testplan/auto/t_generative_edit.py
 run "generative derived files" testplan/auto/t_generative_derived.py
-run "generative panel + consent (headless UI)" testplan/auto/t_generative_panel.py
+run "generative panel + consent (headless UI)" testplan/auto/t_generative_panel.py t_generative_tab.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

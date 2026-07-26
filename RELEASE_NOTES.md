@@ -3,6 +3,45 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
+## 🚧 Unreleased (on `development`)
+
+### Local masks, reworked
+
+- **Masks moved to their own tab** in the Adjust panel, grouped by what each control acts on: the stack, the six ways to make a mask, what you can do to the selected one, the brush, and the mask's own adjustments.
+- **Linear and radial gradients**, placed by dragging on the photo the way you would expect, with handles afterwards to move, resize or re-aim them. Stored as geometry rather than pixels, so they stay re-draggable after a reload, land identically on preview and export, and cost a few hundred bytes in the sidecar instead of a full-size image.
+- **Every mask kind now shows a colour overlay** — brush, gradients, Smart Object, Sky, AI Selection. The selected mask reads in the accent colour, the rest recede. Previously a mask made by anything other than the brush was invisible.
+- **Mask rows show the mask**, not just a name: each row renders that mask's own shape.
+- **Brush Feather** joins Size and Flow, and all three are reachable from the Masks tab. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
+- **Smart Object** (was "Subject") and **AI Selection** (was "Click") are renamed to say who is choosing — the app, or you — and every mask tool now explains itself on hover. Asking for a mask the photo already has selects the existing one instead of stacking a duplicate.
+- **Invert now works across the whole frame.** It was applying only inside the painted region, which is the one place an inverted mask has no effect.
+
+### Brushes
+
+- **Hold D / B / X / H and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's tool buttons still arm persistently if you prefer that.
+- **The eraser actually erases.** It was held back by Edge Assist, so paint that had spilled across an edge could not be removed; worse, releasing the brush put back about a third of what you had just erased. Both fixed.
+- **The mask overlay toggles with no tool armed** — checking whether anything is masked no longer requires picking up a brush.
+
+### Editing and transform
+
+- **Nikon HE/HE\* NEF files can be edited**, via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as it does editing a JPEG.
+- **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
+- **Anamorphic desqueeze updates the live preview** and moved to its own section as buttons. It was correct on export all along; the preview simply never refreshed.
+- **Panel sliders respond to horizontal trackpad swipes only**, so scrolling the panel no longer snags on whichever slider is under the pointer.
+
+### Colour
+
+- **Camera profiles record the decode they were calibrated against** and say so if it changes. A profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
+
+### Smaller download
+
+- **The sky model is half the size** (168 MB → 84 MB) for pixel-identical output. The subject model stays as it is: both smaller variants were measured and both ran slower than they were worth.
+
+### Panel
+
+- **Sections start collapsed** apart from Histogram and Light, and remember how you arrange them for the rest of the session.
+
+---
+
 ## 🚀 Version 3.1.0
 **Release Date: July 22, 2026**
 

@@ -2333,13 +2333,33 @@ class _AdjustCompareOriginalWorker(QRunnable):
 # (overlay scales original to match).
 _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 
-# Prototype: hold-to-paint brush control. When on, a brush hotkey (D/B/X/H) held
-# down paints while the pointer sweeps -- no click needed -- and painting stops
-# on release. The panel tool buttons stay as the persistent "brush context"
-# (cursor preview + wheel-to-resize) decoupled from the held-key paint gate.
-# Default off so the shipped click-drag flow is unchanged; enable with
-# RAWVIEWER_HOLD_TO_PAINT=1 to trial the feel.
-HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "").strip().lower() in (
+# Hold-to-paint brush control, now the default. A brush hotkey (D/B/X/H) held
+# down paints while the pointer sweeps -- no click needed -- and on release the
+# stroke closes AND the tool disarms. The key press is the whole interaction:
+# hold to paint, let go to put the tool away, with no separate arm and disarm
+# step to remember.
+#
+# The panel tool buttons remain a persistent, click-to-arm alternative for
+# anyone who wants the tool to stay put; only the hotkeys are momentary.
+#
+# RAWVIEWER_HOLD_TO_PAINT=0 restores the older model, where a hotkey tap
+# latches the tool on until it is tapped off.
+# Below this fraction of the frame, a one-shot AI mask is treated as "not
+# found" rather than added. A segmentation net asked for an absent subject
+# returns a near-empty alpha, not a failure, and 0.2% of the frame is noise
+# rather than a sky.
+_AI_MASK_MIN_COVERAGE = 0.002
+
+# Layer names match the buttons that make them -- a row called "AI Subject"
+# under a button called "Smart Object" is a puzzle the user has to solve.
+_AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
+
+# Mean absolute alpha difference below which two masks are "the same mask".
+# Generous enough to survive the sidecar's 8-bit round trip (1/255 = 0.004),
+# tight enough that a few brush strokes read as a genuine edit.
+_AI_MASK_SAME_TOLERANCE = 0.01
+
+HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "1").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -2447,6 +2467,7 @@ class _AdjustExportWorker(QRunnable):
         process_pool: Any,
         signals: _AdjustExportSignals,
         use_ai_denoise: bool = False,
+        use_ai_upscale: bool = False,
     ):
         super().__init__()
         self.file_path = file_path
@@ -2459,6 +2480,7 @@ class _AdjustExportWorker(QRunnable):
         # adjustments_for_file(self.adj) below -- self.adj is what gets
         # written, so this stays a separate attribute, not an adj key).
         self.use_ai_denoise = bool(use_ai_denoise)
+        self.use_ai_upscale = bool(use_ai_upscale)
         # Set from the export progress dialog's Cancel button (main thread);
         # polled between export stages and between NN-denoise tiles.
         import threading as _threading
@@ -2563,12 +2585,19 @@ class _AdjustExportWorker(QRunnable):
                 if stage_str == "tonemap":
                     pct = 80 + int(frac_val * 10)
                     emit_progress(pct, "Applying Tone & Color…")
+                elif stage_str == "upscale":
+                    # Upscale runs after denoise and before tonemap, so it
+                    # shares the 40-80 band. When both are on they each get
+                    # half of it rather than replaying the same percentages.
+                    lo, span = (60, 20) if self.use_ai_denoise else (40, 40)
+                    emit_progress(lo + int(frac_val * span), "Upscaling (AI)…")
                 elif stage_str == "encode":
                     pct = 90 + int(frac_val * 9)
                     fmt_name = (self.export_format or "JPEG").upper()
                     emit_progress(pct, f"Encoding {fmt_name}…")
                 else:  # denoise
-                    pct = 40 + int(frac_val * 40)
+                    span = 20 if self.use_ai_upscale else 40
+                    pct = 40 + int(frac_val * span)
                     msg = "Denoising (AI)…" if self.use_ai_denoise else "Denoising…"
                     emit_progress(pct, msg)
 
@@ -2581,6 +2610,7 @@ class _AdjustExportWorker(QRunnable):
                 cancel_check=self.cancel_event.is_set,
                 progress_cb=_export_progress,
                 use_ai_denoise=self.use_ai_denoise,
+                use_ai_upscale=self.use_ai_upscale,
             )
             emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
@@ -9045,6 +9075,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
+            self.single_image_adjust_panel.mask_selection_changed.connect(
+                self._on_mask_selection_changed
+            )
+            self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
+                self._on_mask_gradient_tool_changed
+            )
             self.single_image_adjust_panel.mask_ai_requested.connect(
                 self._on_mask_ai_requested
             )
@@ -9053,6 +9089,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.generative_cancel_requested.connect(
                 self._on_generative_cancel_requested
+            )
+            self.single_image_adjust_panel.generative_source_requested.connect(
+                self._on_generative_source_requested
             )
             self.single_image_adjust_panel.mask_layer_mode_changed.connect(
                 self._on_mask_layer_mode_changed
@@ -9149,6 +9188,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if editing_features_enabled():
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
+                    self.gpu_view.gradientDragged.connect(self._on_gradient_dragged)
+                    self.gpu_view.gradientParamsEdited.connect(
+                        self._on_gradient_params_edited
+                    )
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
@@ -21534,8 +21577,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if dng_prefers_embedded_preview_first(file_path):
                 return False
-            if self._nef_he_compressed(file_path):
-                return False
+            # HE/HE* NEF is editable via its embedded JPEG (8-bit
+            # display-referred base -- see
+            # UnifiedImageProcessor._embedded_jpeg_edit_base). Every
+            # adjustment except the ones that need scene-linear headroom
+            # behaves as it does on the JPEG editing path that already ships,
+            # so gating the whole editor off was more restrictive than the
+            # limitation warranted.
             key = os.path.normcase(os.path.abspath(file_path))
             if key in _LIBRAW_UNSUPPORTED_PATHS:
                 return False
@@ -21656,8 +21704,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._show_auto_dismiss_notice(
                 "Editing not available for this file",
                 detail=(
-                    "Adjust needs a demosaiced RAW base. "
-                    "JPEG/HEIC and unsupported RAW (e.g. Nikon HE/HE*) are browse-only."
+                    "This file has neither a demosaicable RAW base nor a "
+                    "usable embedded preview to edit."
                 ),
                 duration_ms=2000,
             )
@@ -22544,6 +22592,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
+            elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
+                # Disarmed by any route -- Esc, the toolbar, a file switch,
+                # the leave-image auto-disarm. A latched paint gate left open
+                # here would keep stamping under a tool the user has put away.
+                gv.end_key_paint()
         self._sync_dodge_burn_mask_overlay()
 
     def _any_brush_tool_armed(self) -> bool:
@@ -22584,6 +22637,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # sensible next action after Add is painting coverage.
         if hasattr(panel, "arm_mask_paint"):
             panel.arm_mask_paint()
+
+    def ensure_mask_layer_for_painting(self) -> bool:
+        """Make a mask to paint into if there is not one yet.
+
+        Paint used to require pressing Add Mask first, which made brushing the
+        only coverage tool that took two presses -- Subject, Sky, Select and
+        the gradients all create their own layer. Returns True if a layer is
+        available to paint into.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return False
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is not None and stack.layers and panel.active_mask_index() is not None:
+            return True
+        self._on_mask_layer_add()
+        stack = getattr(self, "_mask_layer_stack", None)
+        return bool(stack is not None and stack.layers)
 
     def _on_mask_layer_delete(self, index: int) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -22677,6 +22748,38 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         )
 
+    def _on_generative_source_requested(self) -> None:
+        """Hand the Generate tab the exact pixels a request would send.
+
+        Deliberately the same _ai_mask_source_rgb() the request itself uses,
+        rather than a separately-derived preview: a thumbnail that could
+        disagree with what is actually uploaded would be worse than none.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not hasattr(panel, "set_generative_source"):
+            return
+        try:
+            from PyQt6.QtGui import QImage
+
+            rgb = self._ai_mask_source_rgb()
+            if rgb is None:
+                panel.set_generative_source(None, "")
+                return
+            h, w = rgb.shape[:2]
+            buf = np.ascontiguousarray(
+                np.clip(rgb * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            )
+            image = QImage(
+                buf.data, w, h, buf.strides[0], QImage.Format.Format_RGB888
+            ).copy()
+
+            source = str(getattr(self, "current_file_path", "") or "")
+            name = os.path.basename(source) if source else ""
+            caption = f"{name} — {w} × {h}, your current edits baked in"
+            panel.set_generative_source(image, caption.strip(" —"))
+        except Exception:
+            panel.set_generative_source(None, "")
+
     def _ask_generative_consent(self, endpoint: str) -> bool:
         from PyQt6.QtWidgets import QMessageBox
 
@@ -22763,6 +22866,131 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return buf
         return None
 
+    def _sync_gradient_handles(self) -> None:
+        """Show handles for the selected mask when it is a gradient.
+
+        Selection-driven, like every other editor's: handles for every gradient
+        at once would be unreadable on a stack, and handles for none would make
+        a placed gradient un-adjustable.
+        """
+        gv = getattr(self, "gpu_view", None)
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if gv is None or not hasattr(gv, "set_gradient_overlay"):
+            return
+        layer = None
+        if panel is not None and getattr(self, "_adjust_overlay_visible", False):
+            stack = panel.mask_layer_stack()
+            index = panel.active_mask_index()
+            if stack is not None and index is not None and 0 <= index < len(stack.layers):
+                candidate = stack.layers[index]
+                if getattr(candidate, "is_parametric", False):
+                    layer = candidate
+        if layer is None:
+            gv.set_gradient_overlay("", {})
+        else:
+            gv.set_gradient_overlay(layer.kind, layer.params)
+
+    def _on_gradient_params_edited(self, kind: str, params: dict, is_end: bool) -> None:
+        """A handle drag reshaped the selected gradient."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        stack = panel.mask_layer_stack()
+        index = panel.active_mask_index()
+        if stack is None or index is None or not (0 <= index < len(stack.layers)):
+            return
+        layer = stack.layers[index]
+        if not getattr(layer, "is_parametric", False) or layer.kind != kind:
+            return
+        layer.params = dict(params or {})
+        layer.touch()
+        self._sync_mask_layer_overlay()
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+    def _on_mask_gradient_tool_changed(self, kind: str) -> None:
+        """Arm/disarm gradient-drag mode on the canvas."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        if hasattr(gv, "set_gradient_drag_kind"):
+            gv.set_gradient_drag_kind(kind or None)
+        if kind:
+            self._gradient_drag_layer_index = None
+            self._show_status(
+                "Drag across the photo to place the gradient."
+                if kind == "linear"
+                else "Drag a box on the photo to place the gradient.",
+                0,
+            )
+        else:
+            self._gradient_drag_layer_index = None
+
+    def _on_gradient_dragged(
+        self, kind: str, x0: float, y0: float, x1: float, y1: float, is_end: bool
+    ) -> None:
+        """Create the gradient layer on the first drag sample, then update it.
+
+        One layer per drag, not one per sample: the first move creates it and
+        every later move rewrites its params, so dragging previews the real
+        mask live and the whole gesture is a single undoable edit rather than
+        a hundred stacked layers.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        if panel is None or mask_shape is None:
+            return
+
+        from raw_mask_shapes import params_from_drag
+
+        params = params_from_drag(kind, x0, y0, x1, y1)
+        index = getattr(self, "_gradient_drag_layer_index", None)
+
+        if index is None:
+            import numpy as np
+
+            from raw_mask_layers import MaskLayer, MaskLayerStack
+
+            stack = panel.mask_layer_stack()
+            if stack is None:
+                stack = MaskLayerStack([])
+                panel.set_mask_layer_stack(stack)
+            layer = MaskLayer(
+                np.zeros((128, 128), dtype=np.float32),
+                kind=kind,
+                params=params,
+                name="Linear Gradient" if kind == "linear" else "Radial Gradient",
+            )
+            stack.layers.append(layer)
+            index = len(stack.layers) - 1
+            self._gradient_drag_layer_index = index
+            # set_mask_layer_stack rebuilds the row list and re-syncs the
+            # sliders -- the same route the AI mask path uses to publish a new
+            # layer, rather than a second way of doing it.
+            panel.set_mask_layer_stack(stack)
+            panel.select_mask_index(index)
+        else:
+            stack = panel.mask_layer_stack()
+            if stack is None or not (0 <= index < len(stack.layers)):
+                return
+            layer = stack.layers[index]
+            layer.params = params
+            layer.touch()
+
+        self._sync_mask_layer_overlay()
+        self._sync_gradient_handles()
+        # Same publish path as every other mask edit: hand the adjustments back
+        # so the preview re-renders and the sidecar records the change.
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+        if is_end:
+            self._gradient_drag_layer_index = None
+            # The tool stays armed so a second gradient needs no second click
+            # on the button, matching how the brush tools behave.
+            self._show_status(
+                "Gradient placed. Adjust its sliders, or drag again for another.",
+                3000,
+            )
+
     def _on_mask_ai_requested(self, kind: str) -> None:
         """One-shot AI mask (Subject / Sky) -> a new mask layer."""
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -22840,10 +23068,87 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
-        self._add_mask_layer_from_alpha(result, name=f"AI {kind.capitalize()}")
-        self._show_status(f"{kind.capitalize()} mask added.", 2500)
+        # A segmentation net asked for something absent does not fail -- it
+        # returns a near-empty alpha. Adding that as a layer left the user with
+        # an "AI Sky" mask covering nothing, which looks like the feature
+        # silently broke. Refuse the layer and say what happened instead.
+        try:
+            import numpy as np
 
-    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True):
+            coverage = float(np.count_nonzero(result > 0.10)) / float(max(1, result.size))
+        except Exception:
+            coverage = 1.0
+        if coverage < _AI_MASK_MIN_COVERAGE:
+            self._show_status(
+                f"No {kind} found in this photo — no mask added.", 4000
+            )
+            return
+
+        # Pressing Smart Object twice does not find "the next" object: the
+        # model is a saliency segmenter with no notion of instances and no
+        # memory, so it returns a byte-identical matte every time. Without
+        # this the second press silently stacked a duplicate layer whose
+        # adjustments then compound on the same pixels.
+        existing = self._find_equivalent_mask_layer(result)
+        if existing is not None:
+            panel.select_mask_index(existing)
+            self._sync_mask_layer_overlay()
+            self._show_status(
+                f"That {kind} is already masked — selected it. "
+                "Use AI Selection to pick a specific object.",
+                4000,
+            )
+            return
+
+        self._add_mask_layer_from_alpha(
+            result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()), source=kind
+        )
+        self._show_status(
+            f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
+            "Use Paint / Erase to refine it.",
+            3500,
+        )
+
+    def _find_equivalent_mask_layer(self, alpha) -> Optional[int]:
+        """Index of an existing layer already covering the same pixels, or None.
+
+        Compared on mean absolute difference rather than exact equality: a
+        layer the user has since brushed is no longer the model's output and
+        SHOULD be treated as a different mask, but one that merely round-
+        tripped through the sidecar's 8-bit alpha is the same mask and must
+        not be duplicated.
+        """
+        import numpy as np
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        for index, layer in enumerate(getattr(stack, "layers", []) or []):
+            if getattr(layer, "is_parametric", False) or not layer.enabled:
+                continue
+            try:
+                other = layer.alpha
+                if other.shape != alpha.shape:
+                    continue
+                if float(np.abs(other - alpha).mean()) <= _AI_MASK_SAME_TOLERANCE:
+                    return index
+            except Exception:
+                continue
+        return None
+
+    def _sync_ai_tool_availability(self) -> None:
+        """Grey out a one-shot AI tool whose mask this photo already has."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not hasattr(panel, "set_ai_tool_used"):
+            return
+        stack = getattr(self, "_mask_layer_stack", None)
+        present = {
+            getattr(layer, "source", "")
+            for layer in (getattr(stack, "layers", []) or [])
+        }
+        for kind in ("subject", "sky"):
+            panel.set_ai_tool_used(kind, kind in present)
+
+    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True,
+                                   source: str = ""):
         """Wrap a model-produced alpha in a MaskLayer and push it on the stack.
 
         The layer is an ordinary MaskLayer from here on -- brushable,
@@ -22862,7 +23167,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             stack = MaskLayerStack()
             self._mask_layer_stack = stack
 
-        layer = MaskLayer(np.ascontiguousarray(alpha, dtype=np.float32), name=name)
+        layer = MaskLayer(
+            np.ascontiguousarray(alpha, dtype=np.float32), name=name, source=source
+        )
+        # Turn the overlay on for a mask the user did not paint: they cannot
+        # judge what a model selected without seeing it, and hunting for the
+        # Mask button first is a step nobody should have to take.
+        if panel is not None and hasattr(panel, "request_mask_overlay_visible"):
+            panel.request_mask_overlay_visible()
         layer.touch()
         stack.layers.append(layer)
         panel.set_mask_layer_stack(stack)
@@ -22947,7 +23259,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_mask_layer_stack(stack)
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
         else:
-            self._sam_layer = self._add_mask_layer_from_alpha(alpha, name="AI Selection")
+            self._sam_layer = self._add_mask_layer_from_alpha(
+                alpha, name="AI Selection", source="sam"
+            )
         return True
 
     def _reset_ai_mask_state(self) -> None:
@@ -22962,12 +23276,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if bar is not None:
             bar.showMessage(message, timeout)
 
+    def _on_mask_selection_changed(self) -> None:
+        """Selecting a different mask row moves the handles with it."""
+        self._sync_gradient_handles()
+        self._sync_mask_layer_overlay()
+        # Deleting a row goes through here too, which is what re-enables a
+        # tool once its mask is gone.
+        self._sync_ai_tool_availability()
+
     def _on_mask_layer_mode_changed(self, mode) -> None:
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
+            elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
+                # Disarmed by any route -- Esc, the toolbar, a file switch,
+                # the leave-image auto-disarm. A latched paint gate left open
+                # here would keep stamping under a tool the user has put away.
+                gv.end_key_paint()
         # Show painted coverage while a mask brush is armed: reuse the
         # dodge/burn overlay path with a shim (alpha 0..1 renders in the
         # overlay's dodge tint).
@@ -22978,22 +23305,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if panel is None or gv is None or not hasattr(gv, "update_dodge_burn_mask"):
             return
-        mode_fn = getattr(panel, "mask_layer_mode", None)
-        if mode_fn is None or mode_fn() is None:
-            # Leaving mask-brush mode: fall back to whatever the dodge/burn
-            # overlay state should be showing.
+        stack = getattr(self, "_mask_layer_stack", None)
+        layers = list(getattr(stack, "layers", []) or [])
+        if not layers:
+            # No mask stack: whatever the dodge/burn overlay wants to show.
             self._sync_dodge_burn_mask_overlay()
             return
-        stack = getattr(self, "_mask_layer_stack", None)
-        idx = panel.active_mask_index()
-        if stack is None or idx is None:
+        if not panel.dodge_burn_show_mask():
             return
+        # Deliberately NOT gated on a brush tool being armed. It used to be,
+        # which meant a subject, sky, point-select or gradient mask showed no
+        # overlay at all unless you happened to arm Paint first -- the mask
+        # was there and invisible.
         try:
-            from raw_dodge_burn import DodgeBurnMask
-
-            layer = stack.layers[idx]
-            if panel.dodge_burn_show_mask():
-                gv.update_dodge_burn_mask(DodgeBurnMask(layer.alpha))
+            if hasattr(gv, "update_mask_layer_overlay"):
+                gv.update_mask_layer_overlay(layers, panel.active_mask_index())
         except Exception:
             pass
 
@@ -23078,15 +23404,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             luma, chroma_guide = self._ensure_brush_guides(mh, mw)
             edge_on = bool(panel.dodge_burn_edge_assist())
+            feather = float(panel.dodge_burn_brush_feather())
             if mode == "erase":
                 erase_mask_layer_brush(
                     layer, mx, my, radius, strength,
                     luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                    feather=feather,
                 )
             else:
                 stamp_mask_layer_brush(
                     layer, mx, my, radius, strength,
                     luminance=luma, chroma=chroma_guide, edge_assist=edge_on,
+                    feather=feather,
                 )
 
             # Live coverage overlay while painting (throttled with is_end flush).
@@ -23124,8 +23453,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None or not hasattr(panel, "set_dodge_burn_mode"):
             return False
+
+        # Mask brushes take the same momentary route as dodge/burn: hold to
+        # paint, release to put the tool away. The Masks tab's buttons stay
+        # the persistent alternative -- a mask stroke is usually longer than a
+        # dodge dab, and an armed tool that painted on pointer movement alone
+        # could not be moved across the photo without drawing on the way.
+        if mode in ("mask_paint", "mask_erase"):
+            return self._handle_mask_brush_key_down(panel, mode)
+
         if not HOLD_TO_PAINT:
+            # The tap both arms the tool and latches painting on: sweeping the
+            # pointer stamps with no mouse button down. Requiring a click
+            # after the keystroke made the user arm the same tool twice for
+            # one decision.
             panel.set_dodge_burn_mode(mode)
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None:
+                if panel.dodge_burn_mode() is not None:
+                    if hasattr(gv, "begin_latched_paint"):
+                        gv.begin_latched_paint()
+                elif hasattr(gv, "end_key_paint"):
+                    # Same key again toggled the tool back off.
+                    gv.end_key_paint()
             return True
         # Multi-key: last key wins. A different brush key pressed mid-hold ends
         # the current stroke before the new tool takes over; releasing back to
@@ -23140,8 +23490,56 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.begin_key_paint()
         return True
 
+    def _masks_tab_is_forward(self) -> bool:
+        """True when the Adjust panel is showing its Masks page."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        tabs = getattr(panel, "_panel_tabs", None) if panel is not None else None
+        try:
+            return tabs is not None and tabs.current() == 1
+        except Exception:
+            return False
+
+    def _handle_mask_brush_key_down(self, panel, mode: str) -> bool:
+        """Arm a mask brush from P / X and open the paint gate."""
+        if not hasattr(panel, "set_mask_layer_mode"):
+            return False
+        # Paint makes its own mask, exactly as the button does -- otherwise the
+        # key would silently do nothing on a photo with no masks yet.
+        if mode == "mask_paint" and not self.ensure_mask_layer_for_painting():
+            return False
+        if panel.active_mask_index() is None:
+            self._show_status("No mask to erase yet — paint one first.", 2500)
+            return False
+
+        if hasattr(panel, "show_masks_tab"):
+            panel.show_masks_tab()
+        armed = panel.set_mask_layer_mode(
+            "paint" if mode == "mask_paint" else "erase"
+        )
+        if not armed:
+            return False
+
+        gv = getattr(self, "gpu_view", None)
+        if getattr(self, "_brush_key_held", None) not in (None, mode):
+            if gv is not None and hasattr(gv, "end_key_paint"):
+                gv.end_key_paint()
+        self._brush_key_held = mode
+        if gv is not None and hasattr(gv, "begin_key_paint"):
+            gv.begin_key_paint()
+        return True
+
     def _handle_brush_key_up(self, mode: str) -> bool:
-        """Route a brush hotkey release: close the hold-stroke for that key."""
+        """Route a brush hotkey release: close the stroke and disarm the tool.
+
+        Releasing puts the tool away, so the key press is the entire
+        interaction -- hold to paint, let go to stop. Leaving it armed meant
+        the next pointer move over the photo could still paint under a tool
+        the user had stopped using.
+
+        Only the hotkey is momentary; the panel's tool buttons still arm
+        persistently, so click-to-arm remains available for anyone who wants
+        the tool to stay put.
+        """
         if not HOLD_TO_PAINT:
             return False
         if getattr(self, "_brush_key_held", None) != mode:
@@ -23151,6 +23549,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None and hasattr(gv, "end_key_paint"):
             gv.end_key_paint()
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return True
+        if mode in ("mask_paint", "mask_erase"):
+            if hasattr(panel, "disarm_mask_layer_tools"):
+                panel.disarm_mask_layer_tools()
+        elif hasattr(panel, "disarm_dodge_burn"):
+            panel.disarm_dodge_burn()
         return True
 
     def _abort_hold_to_paint(self) -> None:
@@ -23163,6 +23569,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None and hasattr(gv, "end_key_paint"):
             gv.end_key_paint()
+        # Same disarm as a real release: a tool left armed by a swallowed
+        # key-up would keep painting on the next pointer move.
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "disarm_dodge_burn"):
+            panel.disarm_dodge_burn()
 
     def _on_brush_tool_left_image(self) -> None:
         """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo.
@@ -23192,6 +23603,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv.set_dodge_burn_brush_radius(panel.dodge_burn_brush_radius())
         if hasattr(gv, "set_dodge_burn_brush_flow"):
             gv.set_dodge_burn_brush_flow(panel.dodge_burn_brush_strength())
+        if hasattr(gv, "set_dodge_burn_brush_feather"):
+            gv.set_dodge_burn_brush_feather(panel.dodge_burn_brush_feather())
 
     def _on_dodge_burn_resume_after_resize(self) -> None:
         """Fingers lifted after a mid-stroke two-finger brush resize.
@@ -23452,6 +23865,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
 
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
+        # Route to whichever overlay this photo actually has. Mask layers were
+        # falling through to the dodge/burn sync, which knows nothing about
+        # them, so the Mask button did nothing while masking.
+        stack = getattr(self, "_mask_layer_stack", None)
+        if getattr(stack, "layers", None):
+            gv = getattr(self, "gpu_view", None)
+            if not show and gv is not None and hasattr(gv, "hide_mask_overlay"):
+                gv.hide_mask_overlay()
+                return
+            self._sync_mask_layer_overlay()
+            return
         self._sync_dodge_burn_mask_overlay()
 
     def _on_adjust_panel_reset(self) -> None:
@@ -23586,7 +24010,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             sx = mw / max(1, disp_w)
             radius = max(2.0, panel.dodge_burn_brush_radius() * sx)
             strength = panel.dodge_burn_brush_strength() * max(0.05, float(pressure))
-            stamp_heal_brush(mask, mx, my, radius, strength)
+            stamp_heal_brush(
+                mask, mx, my, radius, strength,
+                feather=float(panel.dodge_burn_brush_feather()),
+            )
             if hasattr(panel, "set_spot_heal_mask_present"):
                 panel.set_spot_heal_mask_present(not mask.is_empty)
 
@@ -23747,6 +24174,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self._dodge_burn_chroma_guide = None
 
             edge_on = bool(panel.dodge_burn_edge_assist())
+            brush_feather = float(panel.dodge_burn_brush_feather())
             t_stamp = time.perf_counter()
             if mode == "erase":
                 # Flow × pressure → erase amount (1.0 clears center in one stamp).
@@ -23762,13 +24190,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     luminance=luma,
                     chroma=chroma_guide,
                     edge_assist=edge_on,
+                    feather=brush_feather,
                 )
                 if panel is not None and hasattr(panel, "set_dodge_burn_mask_present"):
                     panel.set_dodge_burn_mask_present(not mask.is_empty)
                 # Also erase heal coverage under the same brush.
                 heal = getattr(self, "_spot_heal_mask", None)
                 if heal is not None and heal.data.shape == (mh, mw):
-                    erase_heal_brush(heal, mx, my, radius, erase_amt)
+                    erase_heal_brush(
+                        heal, mx, my, radius, erase_amt, feather=brush_feather
+                    )
                     if panel is not None and hasattr(panel, "set_spot_heal_mask_present"):
                         panel.set_spot_heal_mask_present(not heal.is_empty)
             else:
@@ -23784,6 +24215,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     edge_assist=edge_on,
                     stroke_baseline=getattr(self, "_dodge_burn_mask_at_stroke_start", None),
                     max_stroke_delta=max_stroke_cap,
+                    feather=brush_feather,
                 )
             stamp_ms = (time.perf_counter() - t_stamp) * 1000.0
             perf_acc = getattr(self, "_dodge_burn_stroke_perf", None)
@@ -23876,7 +24308,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         # gaussian at the cursor instead of a flat block.
                         r_disp = max(2.0, float(panel.dodge_burn_brush_radius()))
                         d_disp = circular_brush_falloff(
-                            0, ph, 0, pw, pt.x() - px0, pt.y() - py0, r_disp
+                            0, ph, 0, pw, pt.x() - px0, pt.y() - py0, r_disp,
+                            brush_feather,
                         ) * float(delta) * (1.0 if mode == "dodge" else -1.0)
 
                     stops = float(
@@ -23947,6 +24380,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
 
             if is_end:
+                # Snap the WHOLE stroke, not just the final stamp. Passing the
+                # last stamp's bbox filtered a square patch of a longer stroke
+                # and left the rest untouched, so the boundary between snapped
+                # and unsnapped mask cut a straight line through solid paint --
+                # the reported "square" around wherever the brush stopped. The
+                # accumulated dirty rect ends in unpainted mask, where a
+                # transition has nothing to show.
+                stroke_region = getattr(self, "_dodge_burn_stroke_dirty", None) or bbox
                 self._dodge_burn_stroke_active = False
                 self._dodge_burn_stroke_baseline = None
                 self._dodge_burn_stroke_work = None
@@ -23968,9 +24409,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             )
                     except Exception:
                         luminance = None
-                if luminance is not None:
+                # Never edge-snap an erase stroke. Edge snap is a guided
+                # filter that pulls mask edges onto image edges -- a tidy-up
+                # for paint. Run over a region the user just cleared, it
+                # smears surrounding mask straight back into the hole:
+                # measured at +35% of the erased area returning the instant
+                # the brush was released, so the eraser visibly ADDED
+                # coverage, which is the opposite of the tool's job.
+                if luminance is not None and mode != "erase":
                     t_snap = time.perf_counter()
-                    edge_snap_region(mask, luminance, bbox)
+                    edge_snap_region(mask, luminance, stroke_region)
                     perf_mark(
                         "db_edge_snap",
                         (time.perf_counter() - t_snap) * 1000.0,
@@ -25004,7 +25452,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
     def _on_adjust_panel_export_requested(
-        self, export_format: str, adj: dict, use_ai_denoise: bool = False
+        self, export_format: str, adj: dict, use_ai_denoise: bool = False,
+        use_ai_upscale: bool = False,
     ) -> None:
         logger = logging.getLogger(__name__)
         path = getattr(self, "current_file_path", None)
@@ -25021,8 +25470,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
         logger.info(
-            "[EXPORT] Requested format=%s for %s (ai_denoise=%s)",
-            export_format, os.path.basename(path), use_ai_denoise,
+            "[EXPORT] Requested format=%s for %s (ai_denoise=%s, ai_upscale=%s)",
+            export_format, os.path.basename(path), use_ai_denoise, use_ai_upscale,
         )
         from PyQt6.QtWidgets import QFileDialog
 
@@ -25167,6 +25616,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             pool,
             self._adjust_export_signals,
             use_ai_denoise=use_ai_denoise,
+            use_ai_upscale=use_ai_upscale,
         )
         logger.info("[EXPORT] Handing off to background worker (format=%s)", raw_fmt)
         # Modal progress dialog: freezes app interaction for the duration
@@ -25972,7 +26422,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not (make or model):
                 panel.set_camera_profile_active("")
                 return
-            label = describe_camera_profile(make, model, iso=iso_val)
+            label = describe_camera_profile(make, model, iso=iso_val, file_path=path)
             panel.set_camera_profile_active(
                 label or "", make=make, model=model, iso=iso_val
             )
@@ -26037,7 +26487,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 factory = None
 
             dlg = ColorCalibrationDialog(
-                img, make, model, iso=iso_val, parent=self, has_factory_profile=factory
+                img, make, model, iso=iso_val, parent=self,
+                has_factory_profile=factory,
+                source_file=getattr(self, "current_file_path", None),
             )
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.calibrated_profile:
                 profile = dlg.calibrated_profile
@@ -30876,7 +31328,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 Qt.Key.Key_B: "burn",
                 Qt.Key.Key_X: "erase",
                 Qt.Key.Key_H: "heal",
+                # P paints into the selected mask. It toggles RAW recovery in
+                # browse, but browse keys do not apply while Adjust is open.
+                Qt.Key.Key_P: "mask_paint",
             }.get(key)
+            # X means "erase" in whichever brush system is in play: the mask
+            # one when the Masks tab is forward, dodge/burn otherwise. One key,
+            # one meaning -- the alternative was a second erase key whose only
+            # job is to say which mask system you meant.
+            if brush_mode == "erase" and self._masks_tab_is_forward():
+                brush_mode = "mask_erase"
             if brush_mode is not None and not ctrl_or_cmd:
                 if self._handle_brush_key_down(brush_mode):
                     return True
@@ -33794,7 +34255,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     Qt.Key.Key_B: "burn",
                     Qt.Key.Key_X: "erase",
                     Qt.Key.Key_H: "heal",
+                    Qt.Key.Key_P: "mask_paint",
                 }.get(event.key())
+                # Release matches whatever the press armed, not what the tab
+                # says now: switching tabs mid-stroke must not orphan the hold.
+                held = getattr(self, "_brush_key_held", None)
+                if brush_mode == "erase" and held == "mask_erase":
+                    brush_mode = "mask_erase"
                 if brush_mode is not None and self._handle_brush_key_up(brush_mode):
                     return True
 

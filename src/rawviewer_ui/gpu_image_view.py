@@ -43,6 +43,13 @@ from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
 from rawviewer_ui.widgets import stamp_rawviewer_export_drag
 
 
+# Mask overlay tints, taken from theme.py rather than picked: EMBER is
+# reserved there for "what's currently active", which is exactly what the
+# selected mask is. BURN is a cool low-chroma steel that recedes behind it.
+_MASK_TINT_ACTIVE = (217, 105, 30)   # theme.EMBER
+_MASK_TINT_OTHER = (91, 122, 140)    # theme.BURN
+
+
 class CompareHandleItem(QGraphicsEllipseItem):
     """A custom comparison view split divider handle.
     It renders a prominent white circle with a dark border, and draws two vertical
@@ -476,6 +483,15 @@ class GpuImageView(QGraphicsView):
     # host's cue to edge-snap the touched region and trigger the exact
     # (worker-thread) re-render.
     dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
+    # Gradient mask drag: kind, x0, y0, x1, y1 (all normalised 0..1 to the
+    # image), is_end. Normalised in the view because this is where the image
+    # extent is known -- the host would otherwise have to reverse-engineer it
+    # from whichever buffer tier happens to be current.
+    gradientDragged = pyqtSignal(str, float, float, float, float, bool)
+    # An existing gradient reshaped by dragging one of its handles: kind, the
+    # full updated params, is_end. Params rather than a delta so the host never
+    # has to replicate the handle maths.
+    gradientParamsEdited = pyqtSignal(str, dict, bool)
     # Mouse left the photo (or the view) while a brush tool was armed — host
     # should disarm Dodge/Burn/Eraser/Heal so the tool does not stay sticky.
     brushToolLeftImage = pyqtSignal()
@@ -575,7 +591,19 @@ class GpuImageView(QGraphicsView):
         self._dodge_burn_brush_flow = 0.55
         self._brush_cursor_pixmap_r = -1.0
         self._brush_cursor_pixmap_flow = -1.0
+        self._brush_cursor_pixmap_feather = -1.0
+        self._dodge_burn_brush_feather = 0.70
         self._scene.addItem(self._brush_cursor_item)
+
+        # Gradient-mask handles (selected parametric layer only).
+        from rawviewer_ui.gradient_handles import GradientHandleItem
+
+        self._gradient_handles = GradientHandleItem()
+        self._scene.addItem(self._gradient_handles)
+        self._gradient_overlay_kind = ""
+        self._gradient_overlay_params: dict = {}
+        self._gradient_active_handle = None
+        self._gradient_grab = None
 
         # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
         self._rgb_item = RgbGlImageItem()
@@ -788,6 +816,97 @@ class GpuImageView(QGraphicsView):
                 -data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
             ).astype(np.uint8)
         return overlay
+
+    def hide_mask_overlay(self) -> None:
+        """Take the overlay down (the Mask toggle going off)."""
+        self._mask_overlay_wanted = False
+        self._mask_item.hide()
+        self._mask_item.setPixmap(QPixmap())
+        self._mask_overlay_shape = None
+
+    def update_mask_layer_overlay(self, layers, active_index) -> None:
+        """Colour overlay for the mask stack, whatever tool made each mask.
+
+        One overlay for every kind of mask -- brush, linear, radial, subject,
+        sky, point-select -- because once a mask exists, how it was made does
+        not change what you do next. Colouring by provenance would compete
+        with the one thing that matters here: which mask am I editing.
+
+        So the encoding is selection, and it borrows the palette rule
+        theme.py already states -- EMBER means "what's currently active":
+
+            selected mask   EMBER   the one your sliders are driving
+            other masks     BURN    context, cool and low-chroma so it recedes
+
+        Alpha tracks coverage with a floor, so a feathered edge at 10% still
+        reads as masked rather than fading into the photo.
+        """
+        # No _mask_overlay_wanted gate here. That flag is owned by the
+        # dodge/burn overlay path and is only ever set when THAT path runs, so
+        # gating on it meant a mask-layer overlay could never draw unless a
+        # dodge/burn mask happened to be showing too -- which is why subject,
+        # sky and gradient masks appeared to have no overlay at all. The host
+        # already decides visibility (panel.dodge_burn_show_mask); the view's
+        # job is to draw what it is handed.
+        self._mask_overlay_wanted = True
+        import numpy as np
+
+        entries = []
+        for i, layer in enumerate(layers or []):
+            if not getattr(layer, "enabled", True):
+                continue
+            entries.append((i, layer))
+        if not entries:
+            self._mask_item.hide()
+            self._mask_item.setPixmap(QPixmap())
+            self._mask_overlay_shape = None
+            return
+
+        # Mask resolution, not display: the graphics item scales it up, which
+        # is what keeps this off the per-tick cost curve.
+        ref = entries[0][1]
+        h, w = ref.alpha.shape[:2]
+        for _i, layer in entries:
+            lh, lw = layer.alpha.shape[:2]
+            if lh * lw > h * w:
+                h, w = lh, lw
+
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        # Selected last so it wins where masks overlap -- you are looking at
+        # the one you are editing.
+        order = [e for e in entries if e[0] != active_index]
+        order += [e for e in entries if e[0] == active_index]
+        for index, layer in order:
+            try:
+                alpha = layer.effective_alpha_at(h, w)
+            except Exception:
+                continue
+            cov = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
+            on = cov > 0.02
+            if not bool(on.any()):
+                continue
+            tint = _MASK_TINT_ACTIVE if index == active_index else _MASK_TINT_OTHER
+            rgba[on, 0] = tint[0]
+            rgba[on, 1] = tint[1]
+            rgba[on, 2] = tint[2]
+            rgba[on, 3] = np.clip(cov[on] * 165.0 + 45.0, 0, 255).astype(np.uint8)
+
+        rgba = np.ascontiguousarray(rgba)
+        qimg = QImage(
+            rgba.data, rgba.shape[1], rgba.shape[0], rgba.strides[0],
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
+        self._mask_overlay_shape = (h, w)
+        self._mask_overlay_is_heal = None  # not the dodge/burn overlay's state
+        self._mask_item.setOffset(0, 0)
+        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
+            self._mask_item.setTransform(
+                QTransform().scale(self._img_w / w, self._img_h / h)
+            )
+        else:
+            self._mask_item.setTransform(QTransform())
+        self._mask_item.show()
 
     def update_dodge_burn_mask(self, mask, dirty_bbox=None) -> None:
         """Refresh the red/blue mask overlay when Show Mask is on.
@@ -1752,12 +1871,159 @@ class GpuImageView(QGraphicsView):
             # design (accepted trade-off) -- stamp at full strength.
             self.dodgeBurnStroke.emit(pt, 1.0, False)
 
+    def set_gradient_drag_kind(self, kind: str | None) -> None:
+        """Arm gradient-drag mode for "linear"/"radial", or None to disarm.
+
+        Deliberately separate from the brush gate: a gradient is defined by one
+        press-drag-release, not by accumulated stamps, so sharing the brush's
+        stroke plumbing would mean teaching every stamp path to ignore it.
+        """
+        self._gradient_kind = kind or None
+        self._gradient_origin = None
+        if kind:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def gradient_drag_kind(self) -> str | None:
+        return getattr(self, "_gradient_kind", None)
+
+    def _normalised_image_point(self, view_pos) -> tuple:
+        pt = self._clamped_scene_point(view_pos)
+        w = max(1, int(getattr(self, "_img_w", 0) or 1) - 1)
+        h = max(1, int(getattr(self, "_img_h", 0) or 1) - 1)
+        return (
+            max(0.0, min(1.0, pt.x() / float(w))),
+            max(0.0, min(1.0, pt.y() / float(h))),
+        )
+
+    def _gradient_press(self, view_pos) -> bool:
+        if not self.gradient_drag_kind() or not self._has_pixmap:
+            return False
+        if not self._view_pos_on_image(view_pos):
+            return False
+        self._gradient_origin = self._normalised_image_point(view_pos)
+        return True
+
+    def _gradient_move(self, view_pos) -> bool:
+        origin = getattr(self, "_gradient_origin", None)
+        if origin is None or not self.gradient_drag_kind():
+            return False
+        x1, y1 = self._normalised_image_point(view_pos)
+        self.gradientDragged.emit(
+            self.gradient_drag_kind(), origin[0], origin[1], x1, y1, False
+        )
+        return True
+
+    def _gradient_release(self, view_pos) -> bool:
+        origin = getattr(self, "_gradient_origin", None)
+        if origin is None or not self.gradient_drag_kind():
+            return False
+        x1, y1 = self._normalised_image_point(view_pos)
+        self._gradient_origin = None
+        self.gradientDragged.emit(
+            self.gradient_drag_kind(), origin[0], origin[1], x1, y1, True
+        )
+        return True
+
+    def set_gradient_overlay(self, kind: str, params: dict) -> None:
+        """Show handles for the selected gradient mask (or hide with kind="")."""
+        self._gradient_overlay_kind = kind or ""
+        self._gradient_overlay_params = dict(params or {})
+        item = getattr(self, "_gradient_handles", None)
+        if item is None:
+            return
+        if not kind or not self._has_pixmap:
+            item.clear()
+            return
+        item.set_geometry(kind, self._gradient_overlay_params, self._img_w, self._img_h)
+
+    def _gradient_hit_tolerance(self) -> float:
+        """Grab radius in IMAGE pixels, from a fixed screen radius.
+
+        A tolerance fixed in image pixels is untouchable on a 40MP frame fitted
+        to a window and enormous at 400% zoom.
+        """
+        scale = abs(self.transform().m11()) or 1.0
+        return 12.0 / scale
+
+    def _gradient_handle_press(self, view_pos) -> bool:
+        """Claim the press if it landed on a handle of the shown gradient."""
+        if not self._gradient_overlay_kind or not self._has_pixmap:
+            return False
+        from rawviewer_ui.gradient_handles import hit_test
+
+        pt = self._clamped_scene_point(view_pos)
+        handle = hit_test(
+            self._gradient_overlay_kind,
+            self._gradient_overlay_params,
+            pt.x(),
+            pt.y(),
+            self._img_w,
+            self._img_h,
+            tolerance=self._gradient_hit_tolerance(),
+        )
+        if handle is None:
+            return False
+        self._gradient_active_handle = handle
+        # Snapshot for the whole-gradient move, which is a translation from
+        # where the gesture started rather than a jump to the cursor.
+        self._gradient_grab = (dict(self._gradient_overlay_params), pt.x(), pt.y())
+        return True
+
+    def _gradient_handle_move(self, view_pos, *, is_end: bool) -> bool:
+        handle = getattr(self, "_gradient_active_handle", None)
+        if handle is None:
+            return False
+        from rawviewer_ui.gradient_handles import apply_drag
+
+        pt = self._clamped_scene_point(view_pos)
+        params = apply_drag(
+            self._gradient_overlay_kind,
+            self._gradient_overlay_params,
+            handle,
+            pt.x(),
+            pt.y(),
+            self._img_w,
+            self._img_h,
+            grab=self._gradient_grab,
+        )
+        self._gradient_overlay_params = params
+        item = getattr(self, "_gradient_handles", None)
+        if item is not None:
+            item.set_geometry(
+                self._gradient_overlay_kind, params, self._img_w, self._img_h
+            )
+        if is_end:
+            self._gradient_active_handle = None
+            self._gradient_grab = None
+        self.gradientParamsEdited.emit(
+            self._gradient_overlay_kind, dict(params), bool(is_end)
+        )
+        return True
+
+    def begin_latched_paint(self) -> None:
+        """Tap-to-paint: a brush hotkey tap armed the tool and latched it on.
+
+        Same gate as ``begin_key_paint`` -- pointer movement stamps with no
+        mouse button held -- except it stays open after the key comes back
+        up. The tool is live until something disarms it (tapping the same key
+        again, Esc, choosing another tool, switching image), so there is
+        nothing to hold down: tap, sweep, tap off.
+        """
+        self._db_paint_latched = True
+        self.begin_key_paint()
+
+    def is_paint_latched(self) -> bool:
+        return bool(getattr(self, "_db_paint_latched", False))
+
     def end_key_paint(self) -> None:
         """Hotkey released (or focus lost): close any active hold-stroke.
 
         Idempotent -- safe to call when no hold is in progress, which is what
         the focus-loss safety net relies on.
         """
+        self._db_paint_latched = False
         self._db_key_held = False
         self._brush_resizing = False
         self._resize_axis = None
@@ -1815,6 +2081,12 @@ class GpuImageView(QGraphicsView):
         self._dodge_burn_brush_flow = max(0.05, min(1.0, float(flow)))
         self._refresh_brush_cursor_placement()
 
+    def set_dodge_burn_brush_feather(self, feather: float) -> None:
+        """Edge softness 0..1 — must track the slider or the on-image ring
+        stops describing what a stroke will actually cover."""
+        self._dodge_burn_brush_feather = max(0.0, min(1.0, float(feather)))
+        self._refresh_brush_cursor_placement()
+
     def _refresh_brush_cursor_placement(self) -> None:
         center = None
         if not self._brush_cursor_item.pixmap().isNull():
@@ -1833,10 +2105,17 @@ class GpuImageView(QGraphicsView):
         """Soft radial preview: size from radius, opacity from flow. No hard ring."""
         r = float(getattr(self, "_dodge_burn_brush_radius", 40.0))
         flow = float(getattr(self, "_dodge_burn_brush_flow", 0.55))
-        # Rebuild when radius moves by >=0.5px or flow by >=2%.
+        feather = float(getattr(self, "_dodge_burn_brush_feather", 0.70))
+        # Rebuild when radius moves by >=0.5px, or flow/feather by >=2%.
+        # Feather MUST be part of this key: without it the preview keeps the
+        # softness it was first built with and stops describing what paints.
         if (
             abs(r - float(getattr(self, "_brush_cursor_pixmap_r", -1.0))) < 0.5
             and abs(flow - float(getattr(self, "_brush_cursor_pixmap_flow", -1.0)))
+            < 0.02
+            and abs(
+                feather - float(getattr(self, "_brush_cursor_pixmap_feather", -1.0))
+            )
             < 0.02
         ):
             if not self._brush_cursor_item.pixmap().isNull():
@@ -1847,7 +2126,9 @@ class GpuImageView(QGraphicsView):
 
             ri = max(2, int(np.ceil(r)))
             size = 2 * ri + 1
-            falloff = circular_brush_falloff(0, size, 0, size, float(ri), float(ri), r)
+            falloff = circular_brush_falloff(
+                0, size, 0, size, float(ri), float(ri), r, feather
+            )
             rgba = np.zeros((size, size, 4), dtype=np.uint8)
             # Soft white fill; peak alpha scales with Brush Flow so the preview
             # matches how strong each stamp will land.
@@ -1865,11 +2146,13 @@ class GpuImageView(QGraphicsView):
             self._brush_cursor_item.setPixmap(QPixmap.fromImage(qimg))
             self._brush_cursor_pixmap_r = r
             self._brush_cursor_pixmap_flow = flow
+            self._brush_cursor_pixmap_feather = feather
         except Exception:
             # Fallback: empty — cursor still hidden OS-side while armed.
             self._brush_cursor_item.setPixmap(QPixmap())
             self._brush_cursor_pixmap_r = -1.0
             self._brush_cursor_pixmap_flow = -1.0
+            self._brush_cursor_pixmap_feather = -1.0
 
     def _place_brush_cursor(self, scene_pt: QPointF) -> None:
         self._ensure_brush_cursor_pixmap()
@@ -2072,6 +2355,20 @@ class GpuImageView(QGraphicsView):
 
     # ------------------------------------------------------------------ events
     def mousePressEvent(self, event) -> None:
+        # Gradient drag is checked first: it owns the whole press-drag-release
+        # while armed, and must not also be interpreted as a brush stamp or a
+        # pan.
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Handles first: with a gradient tool still armed, a press on an
+            # existing handle must adjust that gradient rather than start a new
+            # one on top of it.
+            if self._gradient_handle_press(event.position().toPoint()):
+                event.accept()
+                return
+        if event.button() == Qt.MouseButton.LeftButton and self.gradient_drag_kind():
+            if self._gradient_press(event.position().toPoint()):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and self._dodge_burn_mode:
             if self._has_pixmap:
                 view_pos = event.position().toPoint()
@@ -2121,6 +2418,14 @@ class GpuImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if getattr(self, "_gradient_active_handle", None) is not None:
+            if self._gradient_handle_move(event.position().toPoint(), is_end=False):
+                event.accept()
+                return
+        if getattr(self, "_gradient_origin", None) is not None:
+            if self._gradient_move(event.position().toPoint()):
+                event.accept()
+                return
         if self._dodge_burn_mode and self._has_pixmap:
             view_pos = event.position().toPoint()
             button_painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
@@ -2206,6 +2511,18 @@ class GpuImageView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and getattr(
+            self, "_gradient_active_handle", None
+        ) is not None:
+            if self._gradient_handle_move(event.position().toPoint(), is_end=True):
+                event.accept()
+                return
+        if event.button() == Qt.MouseButton.LeftButton and getattr(
+            self, "_gradient_origin", None
+        ) is not None:
+            if self._gradient_release(event.position().toPoint()):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and getattr(
             self, "_dodge_burn_painting", False
         ):

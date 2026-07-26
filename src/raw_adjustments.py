@@ -82,6 +82,13 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "CropRight": 0.0,
     "CropTop": 0.0,
     "CropBottom": 0.0,
+    # Manual radial lens distortion, -100..+100 (see raw_transform.py).
+    # Positive corrects PINCUSHION (telephoto bowing lines inward), negative
+    # corrects BARREL (wide-angle bulge). Independent of the automatic
+    # profile-based LensCorrectionEnabled above, which is baked in at decode
+    # time and only fires when a lens profile actually matches -- this is the
+    # by-hand fallback for every lens that has no profile.
+    "Distortion": 0.0,
     # Anamorphic lens desqueeze factor (1.0 = Off, 1.33 = 1.33x, 1.5 = 1.5x, 1.6 = 1.6x, 2.0 = 2.0x).
     "AnamorphicRatio": 1.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
@@ -286,6 +293,7 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("CropAngle", "Straighten", -450, 450, 0.0, scale=0.1, fmt=lambda x: f"{x:+.1f}°"),
     _slider_linear("PerspectiveVertical", "Vertical", -100, 100, 0.0),
     _slider_linear("PerspectiveHorizontal", "Horizontal", -100, 100, 0.0),
+    _slider_linear("Distortion", "Distortion", -100, 100, 0.0),
     # Per-edge crop-inset sliders were removed by request: cropping stays out
     # of the UI until a proper interactive overlay (visible crop rectangle
     # with drag handles) exists. raw_transform.apply_geometry still honors
@@ -498,13 +506,55 @@ def _parse_rating_value(raw: object) -> int:
         return 0
 
 
+_XMP_ROOT_CACHE: "OrderedDict[str, tuple[tuple[int, int], object]]" = OrderedDict()
+_XMP_ROOT_CACHE_MAX = 8
+_XMP_ROOT_CACHE_LOCK = threading.Lock()
+
+
+def _cached_xmp_root(xmp_path: str):
+    """Parsed root element for a sidecar, memoised on (mtime_ns, size).
+
+    A single ``load_adjustments_for_file`` calls ~11 different parse helpers,
+    each of which used to re-read and re-parse the whole sidecar.  On a mask-
+    heavy sidecar (>1 MB of base64 PNG) that parse dominates load time, so the
+    root is shared across helpers instead.
+
+    Callers must treat the returned tree as read-only -- the sidecar *write*
+    path mutates its tree and so deliberately parses its own fresh copy.
+    Returns ``None`` if the file is missing or malformed.
+    """
+    if not xmp_path:
+        return None
+    try:
+        st = os.stat(xmp_path)
+    except OSError:
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    with _XMP_ROOT_CACHE_LOCK:
+        hit = _XMP_ROOT_CACHE.get(xmp_path)
+        if hit is not None and hit[0] == sig:
+            _XMP_ROOT_CACHE.move_to_end(xmp_path)
+            return hit[1]
+    try:
+        root = ET.parse(xmp_path).getroot()
+    except Exception:
+        return None
+    with _XMP_ROOT_CACHE_LOCK:
+        _XMP_ROOT_CACHE[xmp_path] = (sig, root)
+        _XMP_ROOT_CACHE.move_to_end(xmp_path)
+        while len(_XMP_ROOT_CACHE) > _XMP_ROOT_CACHE_MAX:
+            _XMP_ROOT_CACHE.popitem(last=False)
+    return root
+
+
 def parse_xmp_rating(xmp_path: str) -> int:
     """Parse xmp:Rating from a sidecar without loading adjustment sliders."""
     if not xmp_path or not os.path.isfile(xmp_path):
         return 0
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return 0
         ns = {
             "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
             "xmp": "http://ns.adobe.com/xap/1.0/",
@@ -719,8 +769,9 @@ def _parse_point_curve_from_xmp(xmp_path: str, tag_name: str) -> str:
 
     points: list[tuple[float, float]] = []
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {
             "rdf": RDF_NS,
             "crs": CRS_NS,
@@ -779,8 +830,9 @@ def _parse_crs_child_text_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {"rdf": RDF_NS, "crs": CRS_NS}
         for desc in root.findall(".//rdf:Description", ns):
             for child in desc:
@@ -806,8 +858,9 @@ def _parse_crs_string_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {"rdf": RDF_NS, "crs": CRS_NS}
         for desc in root.findall(".//rdf:Description", ns):
             for key, val in desc.attrib.items():
@@ -887,6 +940,38 @@ def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
     return adj
 
 
+_PROFILE_STALE_WARNED: set = set()
+
+
+def _warn_if_profile_decode_stale(prof, make, model, iso_val, image_path) -> None:
+    """Log once per profile when the decode it was calibrated against changed.
+
+    Once per key, not once per file: this runs for every image from the body,
+    and a per-file warning would bury the one line that matters under a
+    folder's worth of duplicates. The profile is still applied -- it is the
+    user's measurement and may well still be closer than nothing; what is not
+    acceptable is the change happening silently.
+    """
+    try:
+        from color_calibration import normalize_camera_key, profile_decode_mismatch
+
+        reason = profile_decode_mismatch(prof, image_path)
+        if not reason:
+            return
+        key = normalize_camera_key(make, model, iso=iso_val)
+        if key in _PROFILE_STALE_WARNED:
+            return
+        _PROFILE_STALE_WARNED.add(key)
+        logger.warning(
+            "[CALIBRATION] Camera profile for %s may no longer match this "
+            "decode: %s (still applied)",
+            key,
+            reason,
+        )
+    except Exception:
+        pass
+
+
 def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
     adj = dict(DEFAULT_ADJUSTMENTS)
     as_shot = read_as_shot_temperature(image_path)
@@ -910,6 +995,7 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
             if make or model:
                 prof = get_camera_profile(make, model, iso=iso_val)
                 if prof:
+                    _warn_if_profile_decode_stale(prof, make, model, iso_val, image_path)
                     if "temperature_shift" in prof:
                         adj["Temperature"] = float(adj.get("Temperature", as_shot)) + float(prof["temperature_shift"])
                     if "tint_shift" in prof:
@@ -1144,9 +1230,10 @@ def parse_xmp_adjustments(xmp_path: str) -> dict[str, float]:
     """Parse Lightroom-compatible crs adjustment sliders from an XMP sidecar file."""
     adjustments = {}
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
-        
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return adjustments
+
         ns = {
             'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
             'x': 'adobe:ns:meta/',
@@ -2007,6 +2094,7 @@ EXCLUDED_BURST_GROUP_KEYS = frozenset({
     "CropTop",
     "CropBottom",
     "AnamorphicRatio",
+    "Distortion",
     "LensCorrectionEnabled",
     "DodgeBurnStrength",
 })

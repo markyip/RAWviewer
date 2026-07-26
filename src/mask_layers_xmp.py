@@ -27,7 +27,17 @@ from typing import Optional
 
 import numpy as np
 
-from raw_mask_layers import MaskLayer, MaskLayerStack, SUPPORTED_ADJUSTMENT_KEYS, _hsl_keys
+from raw_mask_layers import (
+    SUPPORTED_ADJUSTMENT_KEYS,
+    MaskLayer,
+    MaskLayerStack,
+    _hsl_keys,
+)
+from raw_mask_shapes import PARAMETRIC_KINDS
+
+# Reference resolution for a deserialized parametric layer's placeholder
+# alpha; see the comment at its construction below.
+_SHAPE_REF_DIM = 128
 
 
 def _encode_alpha(alpha: np.ndarray) -> str:
@@ -38,6 +48,47 @@ def _encode_alpha(alpha: np.ndarray) -> str:
     if not ok:
         return ""
     return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+# Brush alpha is stored at half linear resolution. A mask buffer is far
+# lower-frequency than the image it masks, and the compositor already resizes
+# every layer to the render resolution (raw_mask_layers.resize_alpha_to), so
+# the stored size is just another input to a resize that happens regardless.
+# Nothing records the resolution -- it is implicit in the PNG -- so sidecars
+# written by earlier versions at full resolution keep loading unchanged.
+#
+# Measured on a 4111x2744 two-layer stack: sidecar 1399 KB -> 312 KB and
+# decode 119 ms -> 28 ms, for a worst-case alpha error of 0.12 (AI cutout) to
+# 0.20 (soft brush). Half is the floor that is safe for *both* mask kinds --
+# soft-brush error plateaus below this, but hard-edged AI cutouts degrade
+# steadily (max error 0.53 at 1/8), which reads as haloing along the subject.
+#
+# This does not compound across save/load: main.py resizes a layer back to the
+# working resolution before painting into it, so a re-save always re-encodes
+# from full-resolution pixels.
+_ALPHA_STORE_DIV = 2
+
+# Below this, halving saves bytes that do not matter and risks mangling a
+# small mask, so such buffers are stored verbatim.
+_ALPHA_STORE_MIN_DIM = 64
+
+
+def _downscale_for_store(alpha: np.ndarray) -> np.ndarray:
+    """Alpha at its storage resolution (see _ALPHA_STORE_DIV)."""
+    if _ALPHA_STORE_DIV <= 1 or alpha is None or getattr(alpha, "ndim", 0) != 2:
+        return alpha
+    h, w = alpha.shape[:2]
+    if min(h, w) < _ALPHA_STORE_MIN_DIM * _ALPHA_STORE_DIV:
+        return alpha
+    import cv2
+
+    # INTER_AREA, not INTER_LINEAR: averaging over the source footprint keeps
+    # a soft brush's falloff intact instead of point-sampling through it.
+    return cv2.resize(
+        alpha,
+        (w // _ALPHA_STORE_DIV, h // _ALPHA_STORE_DIV),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def _decode_alpha(serial: str) -> Optional[np.ndarray]:
@@ -67,7 +118,31 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     for layer in stack.layers:
         if layer.is_empty and not layer.adjustments:
             continue
-        alpha_serial = _encode_alpha(layer.alpha)
+        # A parametric mask stores its geometry, not its pixels: a few dozen
+        # bytes instead of a frame-sized PNG, exact at any resolution, and
+        # still re-draggable after a reload. Encoding its generated alpha
+        # would throw all three away.
+        if getattr(layer, "is_parametric", False):
+            entries.append(
+                {
+                    "kind": layer.kind,
+                    "params": {
+                        k: round(float(v), 5) for k, v in (layer.params or {}).items()
+                    },
+                    "adjustments": {
+                        k: round(float(v), 4)
+                        for k, v in layer.adjustments.items()
+                        if k in _all_keys() and abs(float(v)) > 1e-4
+                    },
+                    "name": layer.name,
+                    "enabled": bool(layer.enabled),
+                    "invert": bool(layer.invert),
+                    "blend": layer.blend,
+                    "source": layer.source,
+                }
+            )
+            continue
+        alpha_serial = _encode_alpha(_downscale_for_store(layer.alpha))
         if not alpha_serial:
             continue
         adjustments = {
@@ -83,6 +158,7 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
                 "enabled": bool(layer.enabled),
                 "invert": bool(layer.invert),
                 "blend": layer.blend,
+                "source": layer.source,
             }
         )
     if not entries:
@@ -103,22 +179,45 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        alpha = _decode_alpha(str(entry.get("alpha", "")))
-        if alpha is None:
-            continue
         adjustments = entry.get("adjustments") or {}
         if not isinstance(adjustments, dict):
             adjustments = {}
-        layers.append(
-            MaskLayer(
-                alpha,
-                adjustments={k: float(v) for k, v in adjustments.items()},
-                name=str(entry.get("name", "") or ""),
-                enabled=bool(entry.get("enabled", True)),
-                invert=bool(entry.get("invert", False)),
-                blend=str(entry.get("blend", "add") or "add"),
+        common = {
+            "adjustments": {k: float(v) for k, v in adjustments.items()},
+            "name": str(entry.get("name", "") or ""),
+            "enabled": bool(entry.get("enabled", True)),
+            "invert": bool(entry.get("invert", False)),
+            "blend": str(entry.get("blend", "add") or "add"),
+            "source": str(entry.get("source", "") or ""),
+        }
+
+        kind = str(entry.get("kind", "") or "brush")
+        if kind in PARAMETRIC_KINDS:
+            params = entry.get("params") or {}
+            if not isinstance(params, dict):
+                continue
+            # A parametric layer's alpha buffer is never read -- alpha_at
+            # generates from params at the caller's resolution. But its SHAPE is
+            # the coordinate space bbox() reports in, which the compositor then
+            # scales to the frame, so it cannot be 1x1: a radial's analytic
+            # bbox would quantise to the whole frame and give up the
+            # bbox-limited compute that keeps a mask tick inside the preview
+            # budget. _SHAPE_REF_DIM is small enough to be free (64 KB) and
+            # fine enough that the scaled bbox lands within a couple of pixels.
+            layers.append(
+                MaskLayer(
+                    np.zeros((_SHAPE_REF_DIM, _SHAPE_REF_DIM), dtype=np.float32),
+                    kind=kind,
+                    params={k: float(v) for k, v in params.items()},
+                    **common,
+                )
             )
-        )
+            continue
+
+        alpha = _decode_alpha(str(entry.get("alpha", "")))
+        if alpha is None:
+            continue
+        layers.append(MaskLayer(alpha, **common))
     if not layers:
         return None
     return MaskLayerStack(layers=layers)

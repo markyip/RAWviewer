@@ -685,12 +685,29 @@ class UnifiedImageProcessor:
                 )
                 return None
 
-            # Nikon HE/HE* (and any other demosaic-failed NEF): browse shows
-            # embedded JPEG, but Adjust must not use that as an edit base —
-            # no scene-linear demosaic is available.
+            # Nikon HE/HE* (and any other demosaic-failed NEF): no scene-linear
+            # demosaic exists, so fall back to the embedded JPEG as the edit
+            # base. It is 8-bit display-referred rather than scene-linear, so
+            # white balance and highlight recovery have far less to work with
+            # than on a real RAW base -- but every other adjustment (tone,
+            # colour, masks, crop, detail) behaves exactly as it does on the
+            # JPEG/TIFF editing path that already ships, and editing the
+            # embedded JPEG beats the file being browse-only.
             if file_path.lower().endswith(".nef"):
+                embedded = self._embedded_jpeg_edit_base(
+                    file_path, use_full_resolution=use_full_resolution
+                )
+                if embedded is not None:
+                    logging.getLogger(__name__).info(
+                        "[EDIT] Embedded-JPEG edit base for %s (%dx%d, 8-bit) "
+                        "-- no LibRaw demosaic available (HE/HE* or unsupported)",
+                        os.path.basename(file_path),
+                        embedded.shape[1],
+                        embedded.shape[0],
+                    )
+                    return embedded
                 logging.getLogger(__name__).warning(
-                    "[EDIT] No LibRaw demosaic edit base for %s (HE/HE* or unsupported)",
+                    "[EDIT] No demosaic base and no usable embedded JPEG for %s",
                     os.path.basename(file_path),
                 )
                 return None
@@ -2343,6 +2360,65 @@ class UnifiedImageProcessor:
             thumb = self.process_thumbnail(file_path, allow_heavy_fallback, target_size)
             return exif, thumb
     
+    def _embedded_jpeg_edit_base(
+        self, file_path: str, *, use_full_resolution: bool
+    ) -> Optional[np.ndarray]:
+        """Largest embedded preview as an 8-bit RGB edit base, or None.
+
+        For RAW that LibRaw cannot demosaic (Nikon HE/HE*, primarily). Returns
+        the same contract as the non-RAW branch above -- uint8 RGB, already
+        orientation-corrected -- so the pipeline needs no special case: it
+        divides uint8 by 255 the same way it does for a JPEG being edited.
+
+        Half-res is honoured for the live-preview base the same way the LibRaw
+        path honours ``half_size``, so responsiveness does not depend on which
+        kind of base a file happens to have.
+        """
+        try:
+            import cv2
+
+            # Reuse the paths browse already uses for these files rather than a
+            # new extractor: process_raw_image routes HE/HE* down the embedded
+            # ladder for full-res, and process_thumbnail is what the gallery
+            # gets its (1920px-class) preview from.
+            # Always the full embedded frame, downscaled below for the
+            # half-res base. process_thumbnail looked like the cheaper source
+            # for half-res but returns None when called from inside a failed
+            # decode, so the half-res base silently never materialised.
+            # apply_sidecar_adjustments=False: an edit base must be unedited,
+            # or every adjustment would be applied twice once the pipeline runs.
+            preview = self.process_full_image(
+                file_path,
+                use_full_resolution=True,
+                apply_sidecar_adjustments=False,
+            )
+            if preview is None:
+                preview = self.process_thumbnail(file_path, allow_heavy_fallback=True)
+            if preview is None:
+                return None
+            img = np.asarray(preview)
+            if img.ndim != 3 or img.shape[2] < 3:
+                return None
+            if img.dtype != np.uint8:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            img = np.ascontiguousarray(img[..., :3])
+
+            if not use_full_resolution:
+                h, w = img.shape[:2]
+                if max(h, w) > 2048:
+                    scale = 2048.0 / float(max(h, w))
+                    img = cv2.resize(
+                        img,
+                        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+            return img
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Embedded-JPEG edit base failed for %s: %s", file_path, exc
+            )
+            return None
+
     def _apply_orientation_correction(
         self,
         image_array: np.ndarray,

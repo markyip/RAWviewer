@@ -15,10 +15,12 @@ Three models, all ONNX, all commercially licensed:
     sky      U^2-Net skyseg (MIT)   320x320   one-click sky matte
     click    MobileSAM (Apache 2)  1024x1024  point-prompted segmentation
 
-Delivery mirrors onnx_scunet.py exactly: weights live in ``<repo>/models``
-and are fetched on first use with SHA-256 verification. On Windows the
-pixi installer payload already ships that directory, so the download path
-is macOS/Linux-only in practice -- same as the denoise models.
+Weights live in ``<repo>/models`` and are fetched on first use with
+SHA-256 verification, like the denoise models. Unlike them, they are
+fetched from their upstream publishers rather than mirrored in this
+repo's Git LFS -- see the note above ``_MODELS``. On Windows the pixi
+installer payload already ships that directory, so the download path is
+macOS/Linux-only in practice.
 
 MobileSAM is split encoder/decoder on purpose. The encoder is the
 expensive half (~0.3-1.5s on CPU) but depends only on the image, so
@@ -49,7 +51,26 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-_REPO_MODEL_BASE = "https://github.com/markyip/RAWviewer/raw/development/models"
+# Weights come straight from their upstream publishers rather than being
+# re-hosted in this repo's Git LFS. 445 MB of mirrored model is real LFS
+# quota and bandwidth for files we do not produce and never modify; the
+# SHA-256 below is what makes a third-party host safe to depend on, since a
+# substituted file fails verification and is discarded rather than loaded.
+#
+# The tradeoff is that upstream can move a file. That is a 404 on first use
+# with a clear log line, not a corrupt install -- and every URL here is
+# re-checkable with scripts/fetch_ai_mask_models.py.
+#
+# "archive_member" means the publisher ships the model inside a zip rather
+# than as a loose file; the download path extracts that one member and
+# verifies its hash, not the archive's.
+
+# Both MobileSAM halves live in one archive from the same publisher, so a
+# single download serves both.
+_MOBILESAM_ZIP = (
+    "https://huggingface.co/vietanhdev/segment-anything-onnx-models"
+    "/resolve/main/mobile_sam_20230629.zip"
+)
 
 # SHA-256 of each published .onnx. Empty string = "not yet published";
 # _download_verified() then warns and accepts the download unverified so
@@ -58,7 +79,7 @@ _REPO_MODEL_BASE = "https://github.com/markyip/RAWviewer/raw/development/models"
 _MODELS = {
     "subject": {
         "filename": "birefnet.onnx",
-        "url": f"{_REPO_MODEL_BASE}/birefnet.onnx",
+        "url": "https://huggingface.co/onnx-community/BiRefNet_lite/resolve/main/onnx/model.onnx",
         "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
         "input_size": 1024,
         # ImageNet mean/std, the normalization BiRefNet was trained with.
@@ -68,8 +89,34 @@ _MODELS = {
     },
     "sky": {
         "filename": "skyseg.onnx",
-        "url": f"{_REPO_MODEL_BASE}/skyseg.onnx",
-        "sha256": "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39",
+        # fp16 export of the same U^2-Net: 84 MB against the fp32's 168, for
+        # output that is pixel-identical (measured IoU 1.0000, mean absolute
+        # difference 0.00000) and 6% slower -- 30ms on a 320px input.
+        #
+        # The equivalent trade is NOT available for the subject model above.
+        # Both ways of shrinking it were measured and both cost more time than
+        # they save space, on the same principle: reduced precision only pays
+        # where the runtime has native kernels for it, and Apple Silicon's CPU
+        # has neither fp16 nor int8 kernels that beat its fp32 ones.
+        #
+        #   BiRefNet_lite fp16    214 -> 109 MB, IoU 0.9997, 32% SLOWER
+        #                         (10.1s vs 7.6s per press)
+        #   BiRefNet_lite int8    214 -> 147 MB, mean IoU 0.9917 over four real
+        #                         photographs, 42% SLOWER (10.5s vs 7.4s)
+        #
+        # Quality was never the objection -- neither is visible in a mask. The
+        # objection is that Smart Object is already the slowest thing in the
+        # app, so seconds cost more than megabytes here.
+        #
+        # If this is revisited: a naive int8 quantise only reaches 193 MB,
+        # because 61% of this export's weights sit behind Identity
+        # pass-through nodes (alongside 7296 Constant nodes) that the
+        # quantiser cannot see through. Folding the graph first
+        # (ORT_ENABLE_ALL) and quantising that reaches 147 MB. Worth doing
+        # only on a platform whose runtime is fast at int8 -- x86 with VNNI,
+        # or DirectML -- which would mean a per-platform model choice here.
+        "url": "https://huggingface.co/voyagerfromeast/skyseg/resolve/main/skyseg_fp16.onnx",
+        "sha256": "74d87f4a69378a610a6be662f859c38cfbdfdd75ff74bbfc54842965ed6fc9f7",
         "input_size": 320,
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
@@ -77,7 +124,8 @@ _MODELS = {
     },
     "sam_encoder": {
         "filename": "mobilesam_encoder.onnx",
-        "url": f"{_REPO_MODEL_BASE}/mobilesam_encoder.onnx",
+        "url": _MOBILESAM_ZIP,
+        "archive_member": "mobile_sam.encoder.onnx",
         "sha256": "20deef402855b31222b528f52b04807e41ebe47216ac0e39a0729f43491a0209",
         "input_size": 1024,
         # SAM normalizes with these 0-255-scale constants, not ImageNet's.
@@ -87,7 +135,10 @@ _MODELS = {
     },
     "sam_decoder": {
         "filename": "mobilesam_decoder.onnx",
-        "url": f"{_REPO_MODEL_BASE}/mobilesam_decoder.onnx",
+        "url": _MOBILESAM_ZIP,
+        # MobileSAM replaces only SAM's encoder and reuses its mask decoder
+        # verbatim, which is why the decoder member carries a vit_h name.
+        "archive_member": "sam_vit_h_4b8939.decoder.onnx",
         "sha256": "22cf85e35d14182f4b4712364264c06b22edbef63f065189586f080ef4e2f325",
         "input_size": 0,  # decoder takes an embedding, not an image
         "label": "Click",
@@ -128,12 +179,17 @@ def _sha256_of_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _download_verified(url: str, dest: str, sha256: str) -> bool:
+def _download_verified(url: str, dest: str, sha256: str, archive_member: str = "") -> bool:
     """Download to a temp file, verify, then move into place.
 
     Verifying before the rename means a failed or tampered download never
     leaves a loadable-but-corrupt model behind -- same contract as
     onnx_scunet.ensure_scunet_model_downloaded.
+
+    archive_member: when the publisher ships the model inside a zip, name the
+    member to extract. The hash is checked against that member's bytes, not
+    the archive's, so re-compression upstream does not spuriously fail while
+    a substituted model still does.
     """
     import urllib.request
 
@@ -146,6 +202,22 @@ def _download_verified(url: str, dest: str, sha256: str) -> bool:
                 if not chunk:
                     break
                 fh.write(chunk)
+
+        if archive_member:
+            import zipfile
+
+            try:
+                with zipfile.ZipFile(tmp) as archive:
+                    payload = archive.read(archive_member)
+            except (zipfile.BadZipFile, KeyError):
+                logger.warning(
+                    "[AIMASK] %s does not contain member %s", url, archive_member, exc_info=True
+                )
+                os.remove(tmp)
+                return False
+            with open(tmp, "wb") as fh:
+                fh.write(payload)
+
         if sha256:
             actual = _sha256_of_file(tmp)
             if actual.lower() != sha256.lower():
@@ -176,7 +248,9 @@ def ensure_model_downloaded(kind: str) -> bool:
     if os.path.exists(path):
         return True
     spec = _MODELS[kind]
-    return _download_verified(spec["url"], path, spec["sha256"])
+    return _download_verified(
+        spec["url"], path, spec["sha256"], spec.get("archive_member", "")
+    )
 
 
 def ensure_op_available(op: str) -> bool:
