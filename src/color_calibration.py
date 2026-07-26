@@ -121,13 +121,107 @@ def _sanitize_for_json(obj: Any) -> Any:
     return obj
 
 
+def current_decode_signature(file_path: Optional[str] = None) -> Dict[str, Any]:
+    """What the calibration was solved against, for later staleness checks.
+
+    A chart profile is a correction measured on top of whatever the decoder
+    produced that day. The decoder is not fixed: the guardrails in
+    fast_raw_decode repair LibRaw's black level and, on bodies it misparses,
+    its as-shot white balance -- and a LibRaw upgrade can stop a repair firing
+    because the underlying defect is gone. When that happens the saved profile
+    is still compensating for a decode that no longer exists, and pushes
+    colour the wrong way by roughly the size of the old repair. Recording the
+    decode's identity is what lets us notice.
+
+    ``libraw`` alone would miss the case that matters most, so ``wb_corrected``
+    records whether the embedded-JPEG WB repair was actually active for the
+    calibration file. It is only meaningful once that file has been decoded
+    this session, hence the None ("unknown") state rather than a False that
+    would look like a measurement.
+    """
+    sig: Dict[str, Any] = {"libraw": None, "wb_corrected": None}
+    try:
+        import rawpy
+
+        version = getattr(rawpy, "libraw_version", None)
+        if version is not None:
+            sig["libraw"] = ".".join(str(int(v)) for v in version)
+    except Exception:
+        pass
+    if file_path:
+        try:
+            from fast_raw_decode import get_corrected_camera_wb, wb_sanity_enabled
+
+            if wb_sanity_enabled():
+                sig["wb_corrected"] = get_corrected_camera_wb(file_path) is not None
+        except Exception:
+            pass
+    return sig
+
+
+def profile_decode_mismatch(
+    profile: Optional[Dict[str, Any]], file_path: Optional[str] = None
+) -> Optional[str]:
+    """Why ``profile`` may no longer be valid for this decode, or None.
+
+    Returns a sentence fit to show a user, not a diff. Profiles saved before
+    signatures existed carry none and are treated as unknown rather than
+    stale: a warning on every legacy profile would be noise, and the profile
+    is not known to be wrong.
+    """
+    if not isinstance(profile, dict):
+        return None
+    saved = profile.get("decode_signature")
+    if not isinstance(saved, dict):
+        return None
+    return _compare_signatures(saved, current_decode_signature(file_path))
+
+
+def _compare_signatures(saved: Dict[str, Any], now: Dict[str, Any]) -> Optional[str]:
+    """Sentence describing how two decode signatures differ, or None.
+
+    Split out from the profile lookup so the comparison can be exercised
+    against both states of the WB guardrail without needing a camera that
+    actually misparses, which no fixture can provide.
+
+    Either side being None means "not measured" and never counts as a
+    difference -- an unknown state must not masquerade as a change.
+    """
+    saved_libraw = saved.get("libraw")
+    now_libraw = now.get("libraw")
+    if saved_libraw and now_libraw and saved_libraw != now_libraw:
+        return (
+            f"Calibrated with LibRaw {saved_libraw}; this build uses "
+            f"{now_libraw}. Re-shoot the chart if colour looks off."
+        )
+
+    saved_wb = saved.get("wb_corrected")
+    now_wb = now.get("wb_corrected")
+    if saved_wb is not None and now_wb is not None and bool(saved_wb) != bool(now_wb):
+        if saved_wb:
+            return (
+                "Calibrated while this camera's white balance was being "
+                "auto-corrected; it no longer is. Re-shoot the chart."
+            )
+        return (
+            "This camera's white balance is now being auto-corrected, which "
+            "it was not when the chart was shot. Re-shoot the chart."
+        )
+    return None
+
+
 def save_camera_profile(
     make: str,
     model: str,
     profile_data: Dict[str, Any],
     iso: Optional[int] = None,
+    source_file: Optional[str] = None,
 ) -> bool:
-    """Save calibrated profile data for a specific camera model and optional ISO level."""
+    """Save calibrated profile data for a specific camera model and optional ISO level.
+
+    ``source_file`` is the frame the chart was shot on; it lets the stored
+    decode signature record whether the WB guardrail was active for it.
+    """
     key = normalize_camera_key(make, model, iso=iso)
     path = get_camera_profile_path()
     registry = {}
@@ -142,6 +236,10 @@ def save_camera_profile(
     clean_data["make"] = make
     clean_data["model"] = model
     clean_data["iso"] = iso
+    if "decode_signature" not in clean_data:
+        clean_data["decode_signature"] = _sanitize_for_json(
+            current_decode_signature(source_file)
+        )
     registry[key] = clean_data
 
     try:
@@ -242,6 +340,7 @@ def describe_camera_profile(
     make: str,
     model: str,
     iso: Optional[int] = None,
+    file_path: Optional[str] = None,
 ) -> Optional[str]:
     """Short human label for the profile that would apply, or None.
 
@@ -253,9 +352,13 @@ def describe_camera_profile(
         return None
     name = f"{prof.get('make', make) or ''} {prof.get('model', model) or ''}".strip()
     prof_iso = prof.get("iso")
-    if prof_iso:
-        return f"{name or 'Camera'} (ISO {prof_iso})"
-    return name or "Camera"
+    label = f"{name or 'Camera'} (ISO {prof_iso})" if prof_iso else (name or "Camera")
+    # A stale profile is still applied, so the banner has to say so -- this is
+    # the only place the user can see that a colour shift is in effect at all.
+    reason = profile_decode_mismatch(prof, file_path)
+    if reason:
+        return f"{label} — {reason}"
+    return label
 
 
 def has_factory_color_profile(file_path: str) -> Optional[bool]:

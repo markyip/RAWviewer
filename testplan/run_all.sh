@@ -80,6 +80,7 @@ run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py
 run "HDR per-image recovery weights" testplan/auto/t_hdr_per_image_weights.py
 run "masks panel (headless UI)" testplan/auto/t_masks_panel.py
 run "camera profile apply" testplan/auto/t_camera_profile_apply.py
+run "camera profile decode signature" testplan/auto/t_profile_decode_signature.py
 run "colorchecker auto-detect (cv2.mcc)" testplan/auto/t_colorchecker_autodetect.py
 run "AI masks (raw_ai_masks)" testplan/auto/t_ai_masks.py
 

@@ -26064,7 +26064,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not (make or model):
                 panel.set_camera_profile_active("")
                 return
-            label = describe_camera_profile(make, model, iso=iso_val)
+            label = describe_camera_profile(make, model, iso=iso_val, file_path=path)
             panel.set_camera_profile_active(
                 label or "", make=make, model=model, iso=iso_val
             )
@@ -26129,7 +26129,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 factory = None
 
             dlg = ColorCalibrationDialog(
-                img, make, model, iso=iso_val, parent=self, has_factory_profile=factory
+                img, make, model, iso=iso_val, parent=self,
+                has_factory_profile=factory,
+                source_file=getattr(self, "current_file_path", None),
             )
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.calibrated_profile:
                 profile = dlg.calibrated_profile

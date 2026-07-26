@@ -881,6 +881,38 @@ def load_adjustments_from_xmp(xmp_path: str) -> Dict[str, float]:
     return adj
 
 
+_PROFILE_STALE_WARNED: set = set()
+
+
+def _warn_if_profile_decode_stale(prof, make, model, iso_val, image_path) -> None:
+    """Log once per profile when the decode it was calibrated against changed.
+
+    Once per key, not once per file: this runs for every image from the body,
+    and a per-file warning would bury the one line that matters under a
+    folder's worth of duplicates. The profile is still applied -- it is the
+    user's measurement and may well still be closer than nothing; what is not
+    acceptable is the change happening silently.
+    """
+    try:
+        from color_calibration import normalize_camera_key, profile_decode_mismatch
+
+        reason = profile_decode_mismatch(prof, image_path)
+        if not reason:
+            return
+        key = normalize_camera_key(make, model, iso=iso_val)
+        if key in _PROFILE_STALE_WARNED:
+            return
+        _PROFILE_STALE_WARNED.add(key)
+        logger.warning(
+            "[CALIBRATION] Camera profile for %s may no longer match this "
+            "decode: %s (still applied)",
+            key,
+            reason,
+        )
+    except Exception:
+        pass
+
+
 def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
     adj = dict(DEFAULT_ADJUSTMENTS)
     as_shot = read_as_shot_temperature(image_path)
@@ -904,6 +936,7 @@ def load_adjustments_for_file(image_path: str) -> Dict[str, float]:
             if make or model:
                 prof = get_camera_profile(make, model, iso=iso_val)
                 if prof:
+                    _warn_if_profile_decode_stale(prof, make, model, iso_val, image_path)
                     if "temperature_shift" in prof:
                         adj["Temperature"] = float(adj.get("Temperature", as_shot)) + float(prof["temperature_shift"])
                     if "tint_shift" in prof:
