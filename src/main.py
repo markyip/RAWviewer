@@ -21502,8 +21502,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if dng_prefers_embedded_preview_first(file_path):
                 return False
-            if self._nef_he_compressed(file_path):
-                return False
+            # HE/HE* NEF is editable via its embedded JPEG (8-bit
+            # display-referred base -- see
+            # UnifiedImageProcessor._embedded_jpeg_edit_base). Every
+            # adjustment except the ones that need scene-linear headroom
+            # behaves as it does on the JPEG editing path that already ships,
+            # so gating the whole editor off was more restrictive than the
+            # limitation warranted.
             key = os.path.normcase(os.path.abspath(file_path))
             if key in _LIBRAW_UNSUPPORTED_PATHS:
                 return False
@@ -21624,8 +21629,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._show_auto_dismiss_notice(
                 "Editing not available for this file",
                 detail=(
-                    "Adjust needs a demosaiced RAW base. "
-                    "JPEG/HEIC and unsupported RAW (e.g. Nikon HE/HE*) are browse-only."
+                    "This file has neither a demosaicable RAW base nor a "
+                    "usable embedded preview to edit."
                 ),
                 duration_ms=2000,
             )
