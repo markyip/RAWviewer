@@ -23818,7 +23818,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             )
                     except Exception:
                         luminance = None
-                if luminance is not None:
+                # Never edge-snap an erase stroke. Edge snap is a guided
+                # filter that pulls mask edges onto image edges -- a tidy-up
+                # for paint. Run over a region the user just cleared, it
+                # smears surrounding mask straight back into the hole:
+                # measured at +35% of the erased area returning the instant
+                # the brush was released, so the eraser visibly ADDED
+                # coverage, which is the opposite of the tool's job.
+                if luminance is not None and mode != "erase":
                     t_snap = time.perf_counter()
                     edge_snap_region(mask, luminance, bbox)
                     perf_mark(

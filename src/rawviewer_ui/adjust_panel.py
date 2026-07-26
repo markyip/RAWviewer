@@ -1502,21 +1502,38 @@ class ImageAdjustPanelWidget(QWidget):
         self._burn_btn = QPushButton("Burn (B)")
         self._erase_btn = QPushButton("Eraser (X)")
         self._heal_btn = QPushButton("Heal (H)")
+        # All four brushes sit in one Mode row. Heal used to live on its own
+        # labelled row, which read as a separate kind of thing; it is the same
+        # kind of thing -- a brush you arm, that shares Brush Size and Flow
+        # and the same mask overlay. What differs (it ignores Effect Strength
+        # and Edge Assist) is a property of the tool, not a reason to file it
+        # somewhere else.
         for btn, tip in (
             (
                 self._dodge_btn,
                 "Dodge (D) — brush to brighten; soft falloff, edge-snaps on release.\n"
+                "Tap the key, then sweep — no need to hold a mouse button.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
                 self._burn_btn,
                 "Burn (B) — brush to darken; soft falloff, edge-snaps on release.\n"
+                "Tap the key, then sweep — no need to hold a mouse button.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
             ),
             (
                 self._erase_btn,
-                "Eraser (X) — remove dodge/burn or heal paint under the brush.\n"
+                "Eraser (X) — remove dodge/burn and heal paint under the brush,\n"
+                "along with the effect inside it. Not limited by Edge Assist,\n"
+                "so it can reach paint that spilled across an edge.\n"
                 "Two-finger scroll changes Brush Size; Ctrl+scroll zooms.",
+            ),
+            (
+                self._heal_btn,
+                "Heal (H) — brush to remove smudges / dust (OpenCV inpaint at full strength).\n"
+                "Only Brush Size and Brush Flow apply; Effect Strength and Edge\n"
+                "Assist are for Dodge/Burn. Paint the defect; release to fill\n"
+                "from neighbors. Two-finger scroll changes Brush Size.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
@@ -1528,49 +1545,44 @@ class ImageAdjustPanelWidget(QWidget):
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
         self._erase_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._erase_btn, on))
+        self._heal_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._heal_btn, on))
         db_container_layout.addLayout(db_row)
 
-        heal_row = QHBoxLayout()
-        heal_row.setSpacing(6)
-        heal_mode_lbl = QLabel("Heal")
-        heal_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-        heal_mode_lbl.setMinimumWidth(78)
-        heal_row.addWidget(heal_mode_lbl)
-        self._heal_btn.setObjectName("adjust_db_btn")
-        self._heal_btn.setCheckable(True)
-        self._heal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._heal_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._heal_btn.setToolTip(
-            "Heal (H) — brush to remove smudges / dust (OpenCV inpaint at full strength).\n"
-            "Only Brush Size and Brush Flow apply; Effect Strength is for Dodge/Burn only.\n"
-            "Paint the defect; release to fill from neighbors.\n"
-            "Two-finger scroll changes Brush Size; Ctrl+scroll zooms."
-        )
-        self._heal_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._heal_btn, on))
-        heal_row.addWidget(self._heal_btn, 1)
-        self._heal_clear_btn = QPushButton("Clear Heal")
-        self._heal_clear_btn.setObjectName("adjust_db_clear_btn")
-        self._heal_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._heal_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._heal_clear_btn.setToolTip("Erase the spot-heal mask for this image")
-        self._heal_clear_btn.setEnabled(False)
-        self._heal_clear_btn.clicked.connect(self.spot_heal_clear_requested.emit)
-        heal_row.addWidget(self._heal_clear_btn, 1)
-        db_container_layout.addLayout(heal_row)
+        # Both clears on one labelled row. They were split across two rows,
+        # one of them a bare "Clear" whose scope you had to already know --
+        # side by side under "Clear", each button only has to name its target.
+        clear_row = QHBoxLayout()
+        clear_row.setSpacing(6)
+        clear_lbl = QLabel("Clear")
+        clear_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        clear_lbl.setMinimumWidth(78)
+        clear_row.addWidget(clear_lbl)
 
-        db_actions_row = QHBoxLayout()
-        db_actions_row.setSpacing(6)
-        db_actions_spacer = QLabel("")
-        db_actions_spacer.setMinimumWidth(78)
-        db_actions_row.addWidget(db_actions_spacer)
-        self._db_clear_btn = QPushButton("Clear")
+        self._db_clear_btn = QPushButton("Dodge / Burn")
         self._db_clear_btn.setObjectName("adjust_db_clear_btn")
         self._db_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._db_clear_btn.setToolTip("Erase the dodge/burn brush mask for this image")
+        self._db_clear_btn.setToolTip("Erase the whole dodge/burn brush mask for this image")
         self._db_clear_btn.setEnabled(False)
         self._db_clear_btn.clicked.connect(self.dodge_burn_clear_requested.emit)
-        db_actions_row.addWidget(self._db_clear_btn, 1)
+        clear_row.addWidget(self._db_clear_btn, 1)
+
+        self._heal_clear_btn = QPushButton("Heal")
+        self._heal_clear_btn.setObjectName("adjust_db_clear_btn")
+        self._heal_clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._heal_clear_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._heal_clear_btn.setToolTip("Erase the whole spot-heal mask for this image")
+        self._heal_clear_btn.setEnabled(False)
+        self._heal_clear_btn.clicked.connect(self.spot_heal_clear_requested.emit)
+        clear_row.addWidget(self._heal_clear_btn, 1)
+        db_container_layout.addLayout(clear_row)
+
+        db_actions_row = QHBoxLayout()
+        db_actions_row.setSpacing(6)
+        db_actions_lbl = QLabel("Options")
+        db_actions_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_actions_lbl.setMinimumWidth(78)
+        db_actions_row.addWidget(db_actions_lbl)
 
         self._db_show_mask_btn = QPushButton("Mask (M)")
         self._db_show_mask_btn.setObjectName("adjust_db_show_mask_btn")

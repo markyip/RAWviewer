@@ -1,6 +1,6 @@
-"""Tap-to-paint latch + eraser reach.
+"""Tap-to-paint latch + eraser correctness.
 
-Two behaviours the brush was expected to have and did not:
+Three behaviours the brush was expected to have and did not:
 
 1. A brush hotkey tap should arm the tool *and* start painting on pointer
    movement. Previously the tap only selected the tool and a mouse button
@@ -8,6 +8,12 @@ Two behaviours the brush was expected to have and did not:
 2. The eraser should remove mask wherever it is, including across the
    luminance boundary edge assist protects. Edge assist gating the eraser
    made painted mask on the far side of a hard edge unreachable.
+3. The eraser should never ADD coverage. It did: the end-of-stroke edge
+   snap ran on erase strokes too, smearing surrounding mask back into the
+   hole the moment the brush was released (+35% of the erased area).
+
+(2) and (3) compounded -- the eraser could not reach across an edge, and
+gave back a third of what it did manage to remove.
 """
 from __future__ import annotations
 
@@ -202,6 +208,64 @@ def test_eraser_removes_the_effect_not_just_coverage():
     print("  OK   erasing removes the dodge effect, not just the coverage")
 
 
+def test_release_must_not_put_erased_mask_back():
+    """The end-of-stroke edge snap must not run on an erase stroke.
+
+    Edge snap is a guided filter that pulls mask edges onto image edges --
+    a tidy-up for paint. Run over a just-cleared region it smears the
+    surrounding mask back into the hole, so releasing the eraser ADDED
+    coverage. Measured at +35% of the erased area returning on release.
+    """
+    from raw_dodge_burn import DodgeBurnMask, edge_snap_region, erase_brush, stamp_brush
+
+    h = w = 240
+    luma = np.full((h, w), 0.45, np.float32)
+    mask = DodgeBurnMask.empty(h, w)
+    stamp_brush(mask, 120, 120, 90, 1.0, dodge=True, edge_assist=False)
+
+    bbox = None
+    for _ in range(8):
+        bbox = erase_brush(mask, 120, 120, 40, 1.0, edge_assist=False)
+    erased_total = float(mask.data.sum())
+
+    # What the host does at is_end for a PAINT stroke. It must never be
+    # reached for an erase stroke -- this asserts the damage it would do,
+    # which is what the mode guard in _on_dodge_burn_stroke prevents.
+    snapped = DodgeBurnMask(mask.data.copy())
+    edge_snap_region(snapped, luma, bbox)
+    assert float(snapped.data.sum()) > erased_total * 1.05, (
+        "fixture no longer reproduces the regrowth this guard exists to prevent"
+    )
+
+    # The guard itself: main.py must gate the snap on the stroke mode.
+    src = (REPO / "src" / "main.py").read_text(encoding="utf-8")
+    assert 'mode != "erase"' in src and "edge_snap_region(mask, luminance, bbox)" in src, (
+        "edge_snap_region is no longer guarded against erase strokes"
+    )
+    print(f"  OK   erase strokes skip the release edge-snap (would regrow "
+          f"{100 * (float(snapped.data.sum()) / erased_total - 1):.0f}%)")
+
+
+def test_erasing_only_ever_reduces_the_mask():
+    """Whatever the brush does, |mask| must be monotonically non-increasing."""
+    from raw_dodge_burn import DodgeBurnMask, erase_brush, stamp_brush
+
+    h = w = 160
+    mask = DodgeBurnMask.empty(h, w)
+    stamp_brush(mask, 80, 80, 60, 1.0, dodge=True, edge_assist=False)
+    stamp_brush(mask, 40, 40, 30, 0.8, dodge=False, edge_assist=False)
+
+    luma = np.zeros((h, w), np.float32)
+    luma[:, 80:] = 0.9
+    total = float(np.abs(mask.data).sum())
+    for step in range(10):
+        erase_brush(mask, 70 + step, 80, 35, 0.6, luminance=luma, edge_assist=True)
+        now = float(np.abs(mask.data).sum())
+        assert now <= total + 1e-4, f"erase step {step} grew the mask: {total} -> {now}"
+        total = now
+    print("  OK   erasing never increases mask magnitude")
+
+
 def main() -> int:
     test_latch_survives_key_release()
     test_latched_move_paints_without_any_button()
@@ -212,6 +276,8 @@ def main() -> int:
     test_edge_assist_flag_no_longer_changes_erasing()
     test_painting_still_respects_edge_assist()
     test_eraser_removes_the_effect_not_just_coverage()
+    test_release_must_not_put_erased_mask_back()
+    test_erasing_only_ever_reduces_the_mask()
     print("\nPASS t_tap_to_paint")
     return 0
 
