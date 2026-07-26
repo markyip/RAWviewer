@@ -752,6 +752,8 @@ class ImageAdjustPanelWidget(QWidget):
     mask_ai_requested = pyqtSignal(str)
     # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
     mask_gradient_tool_changed = pyqtSignal(str)
+    # Selected mask row changed -- the host moves the gradient handles to it.
+    mask_selection_changed = pyqtSignal()
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -3689,6 +3691,7 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_block = False
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        self.mask_selection_changed.emit()
 
     # -- internals ------------------------------------------------------
 
@@ -3743,6 +3746,7 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        self.mask_selection_changed.emit()
 
     def _on_mask_item_changed(self, item: QListWidgetItem) -> None:
         """Rename in place. Enable/disable went away with the check box."""

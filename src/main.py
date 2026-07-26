@@ -9019,6 +9019,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
+            self.single_image_adjust_panel.mask_selection_changed.connect(
+                self._on_mask_selection_changed
+            )
             self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
                 self._on_mask_gradient_tool_changed
             )
@@ -9121,6 +9124,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
                     self.gpu_view.gradientDragged.connect(self._on_gradient_dragged)
+                    self.gpu_view.gradientParamsEdited.connect(
+                        self._on_gradient_params_edited
+                    )
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
@@ -22616,6 +22622,47 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return buf
         return None
 
+    def _sync_gradient_handles(self) -> None:
+        """Show handles for the selected mask when it is a gradient.
+
+        Selection-driven, like every other editor's: handles for every gradient
+        at once would be unreadable on a stack, and handles for none would make
+        a placed gradient un-adjustable.
+        """
+        gv = getattr(self, "gpu_view", None)
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if gv is None or not hasattr(gv, "set_gradient_overlay"):
+            return
+        layer = None
+        if panel is not None and getattr(self, "_adjust_overlay_visible", False):
+            stack = panel.mask_layer_stack()
+            index = panel.active_mask_index()
+            if stack is not None and index is not None and 0 <= index < len(stack.layers):
+                candidate = stack.layers[index]
+                if getattr(candidate, "is_parametric", False):
+                    layer = candidate
+        if layer is None:
+            gv.set_gradient_overlay("", {})
+        else:
+            gv.set_gradient_overlay(layer.kind, layer.params)
+
+    def _on_gradient_params_edited(self, kind: str, params: dict, is_end: bool) -> None:
+        """A handle drag reshaped the selected gradient."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        stack = panel.mask_layer_stack()
+        index = panel.active_mask_index()
+        if stack is None or index is None or not (0 <= index < len(stack.layers)):
+            return
+        layer = stack.layers[index]
+        if not getattr(layer, "is_parametric", False) or layer.kind != kind:
+            return
+        layer.params = dict(params or {})
+        layer.touch()
+        self._sync_mask_layer_overlay()
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
     def _on_mask_gradient_tool_changed(self, kind: str) -> None:
         """Arm/disarm gradient-drag mode on the canvas."""
         gv = getattr(self, "gpu_view", None)
@@ -22686,6 +22733,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             layer.touch()
 
         self._sync_mask_layer_overlay()
+        self._sync_gradient_handles()
         # Same publish path as every other mask edit: hand the adjustments back
         # so the preview re-renders and the sidecar records the change.
         self._on_adjust_panel_editing_finished(panel.get_adjustments())
@@ -22917,6 +22965,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         bar = getattr(self, "status_bar", None)
         if bar is not None:
             bar.showMessage(message, timeout)
+
+    def _on_mask_selection_changed(self) -> None:
+        """Selecting a different mask row moves the handles with it."""
+        self._sync_gradient_handles()
+        self._sync_mask_layer_overlay()
 
     def _on_mask_layer_mode_changed(self, mode) -> None:
         gv = getattr(self, "gpu_view", None)

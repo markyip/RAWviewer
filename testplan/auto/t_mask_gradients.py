@@ -293,6 +293,152 @@ def test_panel_gradient_tools_are_exclusive():
     print("  OK   gradient tools are exclusive with each other and the brush")
 
 
+# ------------------------------------------------------------------- handles
+
+
+def test_handle_points_sit_on_the_geometry():
+    import rawviewer_ui.gradient_handles as gh
+
+    lin = shapes.params_from_drag(shapes.KIND_LINEAR, 0.2, 0.1, 0.8, 0.9)
+    pts = gh.handle_points("linear", lin, 1000, 500)
+    assert abs(pts[gh.H_LINEAR_START][0] - 0.2 * 999) < 1.0
+    assert abs(pts[gh.H_LINEAR_END][1] - 0.9 * 499) < 1.0
+
+    rad = shapes.params_from_drag(shapes.KIND_RADIAL, 0.2, 0.2, 0.8, 0.8)
+    pts = gh.handle_points("radial", rad, 1000, 500)
+    cx, cy = pts[gh.H_RADIAL_CENTRE]
+    assert abs(cx - 0.5 * 999) < 1.0 and abs(cy - 0.5 * 499) < 1.0
+    # The four extremes straddle the centre on their own axis.
+    assert pts[gh.H_RADIAL_LEFT][0] < cx < pts[gh.H_RADIAL_RIGHT][0]
+    assert pts[gh.H_RADIAL_TOP][1] < cy < pts[gh.H_RADIAL_BOTTOM][1]
+    print("  OK   handles sit on the geometry they describe")
+
+
+def test_hit_test_prefers_dots_over_the_line():
+    """An endpoint sits ON the axis; grabbing it must move that end only."""
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_LINEAR, 0.5, 0.0, 0.5, 1.0)
+    pts = gh.handle_points("linear", p, 400, 400)
+    ex, ey = pts[gh.H_LINEAR_END]
+    assert gh.hit_test("linear", p, ex, ey, 400, 400, tolerance=12.0) == gh.H_LINEAR_END
+
+    # Mid-axis, away from either dot -> the line.
+    assert gh.hit_test("linear", p, 199.5, 200.0, 400, 400, tolerance=12.0) == gh.H_LINEAR_LINE
+    # Far from everything -> nothing.
+    assert gh.hit_test("linear", p, 20.0, 200.0, 400, 400, tolerance=12.0) is None
+    print("  OK   hit test prefers dots, then the line, then nothing")
+
+
+def test_dragging_an_endpoint_moves_only_that_end():
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_LINEAR, 0.5, 0.1, 0.5, 0.6)
+    moved = gh.apply_drag("linear", p, gh.H_LINEAR_END, 0.25 * 399, 0.9 * 399, 400, 400)
+    assert abs(moved["x0"] - p["x0"]) < 1e-6 and abs(moved["y0"] - p["y0"]) < 1e-6
+    assert abs(moved["x1"] - 0.25) < 0.01 and abs(moved["y1"] - 0.9) < 0.01
+    print("  OK   dragging an endpoint leaves the other alone")
+
+
+def test_dragging_the_line_translates_without_reshaping():
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_LINEAR, 0.4, 0.2, 0.6, 0.5)
+    grab = (dict(p), 0.5 * 399, 0.35 * 399)
+    moved = gh.apply_drag(
+        "linear", p, gh.H_LINEAR_LINE, 0.5 * 399, 0.55 * 399, 400, 400, grab=grab
+    )
+    # Direction and spread preserved; only position changed.
+    assert abs((moved["x1"] - moved["x0"]) - (p["x1"] - p["x0"])) < 1e-3
+    assert abs((moved["y1"] - moved["y0"]) - (p["y1"] - p["y0"])) < 1e-3
+    assert moved["y0"] > p["y0"], "dragging down did not move the gradient down"
+    print("  OK   dragging the line translates without reshaping")
+
+
+def test_radial_handles_resize_one_axis_each():
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_RADIAL, 0.3, 0.3, 0.7, 0.7)
+    wider = gh.apply_drag("radial", p, gh.H_RADIAL_RIGHT, 0.9 * 399, 0.5 * 399, 400, 400)
+    assert wider["rx"] > p["rx"], "right handle did not widen"
+    assert abs(wider["ry"] - p["ry"]) < 1e-6, "right handle changed the height too"
+    assert abs(wider["cx"] - p["cx"]) < 1e-6, "resizing moved the centre"
+
+    taller = gh.apply_drag("radial", p, gh.H_RADIAL_BOTTOM, 0.5 * 399, 0.95 * 399, 400, 400)
+    assert taller["ry"] > p["ry"] and abs(taller["rx"] - p["rx"]) < 1e-6
+    print("  OK   radial extremes resize one axis each, centre fixed")
+
+
+def test_radial_centre_handle_moves_without_resizing():
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_RADIAL, 0.3, 0.3, 0.7, 0.7)
+    moved = gh.apply_drag("radial", p, gh.H_RADIAL_CENTRE, 0.2 * 399, 0.8 * 399, 400, 400)
+    assert abs(moved["rx"] - p["rx"]) < 1e-6 and abs(moved["ry"] - p["ry"]) < 1e-6
+    assert abs(moved["cx"] - 0.2) < 0.01 and abs(moved["cy"] - 0.8) < 0.01
+    print("  OK   centre handle moves without resizing")
+
+
+def test_radii_never_collapse_to_zero():
+    """A radius of 0 divides by zero in the alpha generator."""
+    import rawviewer_ui.gradient_handles as gh
+
+    p = shapes.params_from_drag(shapes.KIND_RADIAL, 0.3, 0.3, 0.7, 0.7)
+    collapsed = gh.apply_drag(
+        "radial", p, gh.H_RADIAL_RIGHT, p["cx"] * 399, p["cy"] * 399, 400, 400
+    )
+    assert collapsed["rx"] > 0.0
+    a = shapes.generate_alpha("radial", collapsed, 64, 64)
+    assert np.isfinite(a).all(), "collapsed radius produced non-finite alpha"
+    print("  OK   a collapsed radius stays finite")
+
+
+def test_handle_drag_through_the_view_emits_params():
+    v, _ = _view()
+    edits = []
+    v.gradientParamsEdited.connect(
+        lambda kind, params, end: edits.append((kind, dict(params), end))
+    )
+    params = shapes.params_from_drag(shapes.KIND_RADIAL, 0.3, 0.3, 0.7, 0.7)
+    v.set_gradient_overlay("radial", params)
+
+    # Press on the centre handle (image coords == view coords in this stub).
+    cx, cy = params["cx"] * 999, params["cy"] * 499
+    _press(v, cx, cy)
+    _move(v, cx + 120, cy + 60)
+    _release(v, cx + 120, cy + 60)
+
+    assert len(edits) >= 2, f"expected live edits then an end, got {edits}"
+    assert edits[-1][2] is True, "handle drag never settled"
+    assert edits[-1][0] == "radial"
+    assert edits[-1][1]["cx"] > params["cx"], "centre did not move right"
+    assert edits[-1][1]["cy"] > params["cy"], "centre did not move down"
+    print(f"  OK   handle drag through the view emits {len(edits) - 1} live edit(s) + end")
+
+
+def test_press_away_from_handles_is_not_claimed():
+    """Otherwise handles would swallow every click on the photo."""
+    v, seen = _view()
+    edits = []
+    v.gradientParamsEdited.connect(lambda *a: edits.append(a))
+    v.set_gradient_overlay(
+        "radial", shapes.params_from_drag(shapes.KIND_RADIAL, 0.4, 0.4, 0.6, 0.6)
+    )
+    _press(v, 10, 10)  # nowhere near the ellipse
+    _move(v, 40, 40)
+    assert edits == [], f"a press away from handles was claimed: {edits}"
+    print("  OK   a press away from the handles is left alone")
+
+
+def test_overlay_clears_for_a_brush_layer():
+    v, _ = _view()
+    v.set_gradient_overlay("linear", shapes.params_from_drag(shapes.KIND_LINEAR, 0, 0, 0.5, 0.5))
+    assert v._gradient_handles.isVisible()
+    v.set_gradient_overlay("", {})
+    assert not v._gradient_handles.isVisible(), "handles stayed up for a non-gradient mask"
+    print("  OK   handles clear when the selection is not a gradient")
+
+
 def main() -> int:
     test_linear_grades_along_the_drag()
     test_linear_direction_follows_the_drag()
@@ -307,6 +453,16 @@ def main() -> int:
     test_drag_emits_normalised_updates_then_an_end()
     test_disarming_stops_the_drag_being_claimed()
     test_panel_gradient_tools_are_exclusive()
+    test_handle_points_sit_on_the_geometry()
+    test_hit_test_prefers_dots_over_the_line()
+    test_dragging_an_endpoint_moves_only_that_end()
+    test_dragging_the_line_translates_without_reshaping()
+    test_radial_handles_resize_one_axis_each()
+    test_radial_centre_handle_moves_without_resizing()
+    test_radii_never_collapse_to_zero()
+    test_handle_drag_through_the_view_emits_params()
+    test_press_away_from_handles_is_not_claimed()
+    test_overlay_clears_for_a_brush_layer()
     print("\nPASS t_mask_gradients")
     return 0
 

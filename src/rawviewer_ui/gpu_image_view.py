@@ -481,6 +481,10 @@ class GpuImageView(QGraphicsView):
     # extent is known -- the host would otherwise have to reverse-engineer it
     # from whichever buffer tier happens to be current.
     gradientDragged = pyqtSignal(str, float, float, float, float, bool)
+    # An existing gradient reshaped by dragging one of its handles: kind, the
+    # full updated params, is_end. Params rather than a delta so the host never
+    # has to replicate the handle maths.
+    gradientParamsEdited = pyqtSignal(str, dict, bool)
     # Mouse left the photo (or the view) while a brush tool was armed — host
     # should disarm Dodge/Burn/Eraser/Heal so the tool does not stay sticky.
     brushToolLeftImage = pyqtSignal()
@@ -581,6 +585,16 @@ class GpuImageView(QGraphicsView):
         self._brush_cursor_pixmap_r = -1.0
         self._brush_cursor_pixmap_flow = -1.0
         self._scene.addItem(self._brush_cursor_item)
+
+        # Gradient-mask handles (selected parametric layer only).
+        from rawviewer_ui.gradient_handles import GradientHandleItem
+
+        self._gradient_handles = GradientHandleItem()
+        self._scene.addItem(self._gradient_handles)
+        self._gradient_overlay_kind = ""
+        self._gradient_overlay_params: dict = {}
+        self._gradient_active_handle = None
+        self._gradient_grab = None
 
         # Opt-in RGB→OpenGL paint path (RAWVIEWER_GPU_GL_TEX=1): skips QPixmap.
         self._rgb_item = RgbGlImageItem()
@@ -1812,6 +1826,82 @@ class GpuImageView(QGraphicsView):
         )
         return True
 
+    def set_gradient_overlay(self, kind: str, params: dict) -> None:
+        """Show handles for the selected gradient mask (or hide with kind="")."""
+        self._gradient_overlay_kind = kind or ""
+        self._gradient_overlay_params = dict(params or {})
+        item = getattr(self, "_gradient_handles", None)
+        if item is None:
+            return
+        if not kind or not self._has_pixmap:
+            item.clear()
+            return
+        item.set_geometry(kind, self._gradient_overlay_params, self._img_w, self._img_h)
+
+    def _gradient_hit_tolerance(self) -> float:
+        """Grab radius in IMAGE pixels, from a fixed screen radius.
+
+        A tolerance fixed in image pixels is untouchable on a 40MP frame fitted
+        to a window and enormous at 400% zoom.
+        """
+        scale = abs(self.transform().m11()) or 1.0
+        return 12.0 / scale
+
+    def _gradient_handle_press(self, view_pos) -> bool:
+        """Claim the press if it landed on a handle of the shown gradient."""
+        if not self._gradient_overlay_kind or not self._has_pixmap:
+            return False
+        from rawviewer_ui.gradient_handles import hit_test
+
+        pt = self._clamped_scene_point(view_pos)
+        handle = hit_test(
+            self._gradient_overlay_kind,
+            self._gradient_overlay_params,
+            pt.x(),
+            pt.y(),
+            self._img_w,
+            self._img_h,
+            tolerance=self._gradient_hit_tolerance(),
+        )
+        if handle is None:
+            return False
+        self._gradient_active_handle = handle
+        # Snapshot for the whole-gradient move, which is a translation from
+        # where the gesture started rather than a jump to the cursor.
+        self._gradient_grab = (dict(self._gradient_overlay_params), pt.x(), pt.y())
+        return True
+
+    def _gradient_handle_move(self, view_pos, *, is_end: bool) -> bool:
+        handle = getattr(self, "_gradient_active_handle", None)
+        if handle is None:
+            return False
+        from rawviewer_ui.gradient_handles import apply_drag
+
+        pt = self._clamped_scene_point(view_pos)
+        params = apply_drag(
+            self._gradient_overlay_kind,
+            self._gradient_overlay_params,
+            handle,
+            pt.x(),
+            pt.y(),
+            self._img_w,
+            self._img_h,
+            grab=self._gradient_grab,
+        )
+        self._gradient_overlay_params = params
+        item = getattr(self, "_gradient_handles", None)
+        if item is not None:
+            item.set_geometry(
+                self._gradient_overlay_kind, params, self._img_w, self._img_h
+            )
+        if is_end:
+            self._gradient_active_handle = None
+            self._gradient_grab = None
+        self.gradientParamsEdited.emit(
+            self._gradient_overlay_kind, dict(params), bool(is_end)
+        )
+        return True
+
     def begin_latched_paint(self) -> None:
         """Tap-to-paint: a brush hotkey tap armed the tool and latched it on.
 
@@ -2151,6 +2241,13 @@ class GpuImageView(QGraphicsView):
         # Gradient drag is checked first: it owns the whole press-drag-release
         # while armed, and must not also be interpreted as a brush stamp or a
         # pan.
+        if event.button() == Qt.MouseButton.LeftButton:
+            # Handles first: with a gradient tool still armed, a press on an
+            # existing handle must adjust that gradient rather than start a new
+            # one on top of it.
+            if self._gradient_handle_press(event.position().toPoint()):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and self.gradient_drag_kind():
             if self._gradient_press(event.position().toPoint()):
                 event.accept()
@@ -2204,6 +2301,10 @@ class GpuImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if getattr(self, "_gradient_active_handle", None) is not None:
+            if self._gradient_handle_move(event.position().toPoint(), is_end=False):
+                event.accept()
+                return
         if getattr(self, "_gradient_origin", None) is not None:
             if self._gradient_move(event.position().toPoint()):
                 event.accept()
@@ -2293,6 +2394,12 @@ class GpuImageView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and getattr(
+            self, "_gradient_active_handle", None
+        ) is not None:
+            if self._gradient_handle_move(event.position().toPoint(), is_end=True):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and getattr(
             self, "_gradient_origin", None
         ) is not None:
