@@ -213,8 +213,8 @@ def test_new_mask_button_is_hidden_in_the_empty_state():
     assert not p._mask_add_btn.isVisible(), "New Mask shown before any mask exists"
     p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="Mask 1")]))
     assert p._mask_add_btn.isVisible(), "New Mask hidden when a second one is possible"
-    assert p._mask_add_btn.text() == "New Mask", p._mask_add_btn.text()
-    print("  OK   New Mask appears only once it means 'another one'")
+    assert p._mask_add_btn.text() == "New empty mask", p._mask_add_btn.text()
+    print("  OK   New empty mask appears only once it means 'another one'")
 
 
 # --------------------------------------------------------------- mask overlay
@@ -573,6 +573,61 @@ def test_mask_rows_show_the_mask_shape():
     print("  OK   every row shows the mask's own shape")
 
 
+def test_masks_tab_is_grouped_by_what_a_control_acts_on():
+    """Four sections in working order, not one flat grid of buttons.
+
+    A control's meaning should come from where it sits: the stack, a new
+    mask, the selected mask, the brush, the effect. Asserted because the
+    grouping is the whole point of the layout and a later tidy-up that
+    flattens it back would look like simplification.
+    """
+    p = _panel()
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
+
+    for attr in ("_mask_stack_head", "_mask_this_head", "_mask_brush_wrap",
+                 "_mask_params_wrap"):
+        assert getattr(p, attr, None) is not None, f"{attr} missing"
+
+    # "Add a mask" holds all six ways to make one, and only those.
+    labels = {b.text() for b in (
+        p._mask_paint_btn, p._mask_linear_btn, p._mask_radial_btn,
+        p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
+    )}
+    assert labels == {"Paint", "Linear", "Radial", "Smart Object", "Sky",
+                      "AI Selection"}, labels
+    print("  OK   the tab is grouped by what each control acts on")
+
+
+def test_brush_section_appears_only_with_a_brush_in_hand():
+    p = _panel()
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
+    assert not p._mask_brush_wrap.isVisible(), "Brush shown with no tool armed"
+
+    p._mask_paint_btn.setChecked(True)
+    assert p._mask_brush_wrap.isVisible(), "Brush hidden while painting"
+    p._mask_erase_btn.setChecked(True)
+    assert p._mask_brush_wrap.isVisible(), "Brush hidden while erasing"
+    p._mask_erase_btn.setChecked(False)
+    assert not p._mask_brush_wrap.isVisible(), "Brush stayed after disarming"
+    print("  OK   Brush is tool state: it comes and goes with the tool")
+
+
+def test_delete_does_not_look_like_its_neighbours():
+    """Weight follows consequence -- Erase and Invert undo, Delete does not."""
+    p = _panel()
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
+    assert p._mask_del_btn.text() == "✕", (
+        f"Delete is back to a full-width label: {p._mask_del_btn.text()!r}"
+    )
+    assert p._mask_del_btn.width() <= 40, "Delete is as wide as a normal button"
+    sheet = p._mask_del_btn.styleSheet()
+    assert "e5484d" in sheet.lower(), "Delete has no destructive colour on hover"
+    # ...and only on hover: resting state must not shout.
+    resting = sheet.split(":hover")[0]
+    assert "e5484d" not in resting.lower(), "Delete is red before you reach for it"
+    print("  OK   Delete is quiet until reached for, then the one red")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -585,6 +640,9 @@ def main() -> int:
     test_empty_ai_mask_is_rejected()
     test_paint_creates_its_own_mask_like_every_other_tool()
     test_new_mask_button_is_hidden_in_the_empty_state()
+    test_masks_tab_is_grouped_by_what_a_control_acts_on()
+    test_brush_section_appears_only_with_a_brush_in_hand()
+    test_delete_does_not_look_like_its_neighbours()
     test_overlay_covers_every_kind_of_mask()
     test_gradients_render_from_params_not_the_placeholder()
     test_selected_mask_is_ember_others_recede()

@@ -3543,6 +3543,48 @@ class ImageAdjustPanelWidget(QWidget):
         ("Clarity2012", "Clarity", -100, 100, 1.0),
     )
 
+    @staticmethod
+    def _mask_section_head(title: str, note: str = "") -> QWidget:
+        """Small tracked heading, optionally with a right-aligned note.
+
+        Groups the Masks tab by what a control acts on -- the stack, a new
+        mask, the selected mask, the brush, the effect -- so a control's
+        meaning comes from where it sits rather than from reading every label.
+        """
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        label = QLabel(title.upper())
+        label.setStyleSheet(
+            f"color: {theme.INK}; font-size: 9px; font-weight: 700; "
+            "letter-spacing: 1.4px;"
+        )
+        row.addWidget(label)
+        row.addStretch(1)
+        if note:
+            hint = QLabel(note)
+            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 9px;")
+            row.addWidget(hint)
+        return wrap
+
+    @staticmethod
+    def _mask_family_label(text: str) -> QLabel:
+        """"you draw it" / "it finds it" -- the split is who chooses."""
+        label = QLabel(text)
+        label.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.6px;"
+        )
+        return label
+
+    @staticmethod
+    def _mask_rule() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background-color: {theme.LINE_SOFT}; border: none;")
+        return line
+
     def _build_masks_section(self, sect: "CollapsibleSection") -> None:
         self._mask_stack = None  # live raw_mask_layers.MaskLayerStack (host-owned)
         self._mask_block = False
@@ -3586,30 +3628,60 @@ class ImageAdjustPanelWidget(QWidget):
         )
         self._mask_list.currentRowChanged.connect(self._on_mask_row_changed)
         self._mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self._mask_stack_head = self._mask_section_head("Masks", "top paints last")
+        col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
 
-        ops_row = QHBoxLayout()
-        ops_row.setSpacing(6)
-        self._mask_add_btn = QPushButton("New Mask")
-        # Duplicate removed: duplicating a mask copies coverage AND its
-        # adjustments, which is almost never what is wanted -- the two useful
-        # cases (same region, different adjustment / same adjustment, different
-        # region) both need editing afterwards anyway.
-        self._mask_del_btn = QPushButton("Delete Mask")
-        for btn in (self._mask_add_btn, self._mask_del_btn):
-            btn.setObjectName("adjust_db_clear_btn")
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            ops_row.addWidget(btn, 1)
+        # Adding an empty mask is a STACK operation, so it lives with the
+        # stack rather than among the tools that make a mask of some kind.
+        self._mask_add_btn = QPushButton("New empty mask")
+        self._mask_add_btn.setObjectName("adjust_db_clear_btn")
+        self._mask_add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._mask_add_btn.setToolTip(
             "Start another empty mask. Paint already makes the first one for you."
         )
         self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
-        self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
-        col.addLayout(ops_row)
+        col.addWidget(self._mask_add_btn)
 
-        tools_row = QHBoxLayout()
-        tools_row.setSpacing(6)
+        # Delete is created here but belongs to "This mask" below -- it acts on
+        # the selected mask, not on the set of them.
+        # Duplicate removed: duplicating a mask copies coverage AND its
+        # adjustments, which is almost never what is wanted -- the two useful
+        # cases (same region, different adjustment / same adjustment, different
+        # region) both need editing afterwards anyway.
+        self._mask_del_btn = QPushButton("✕")
+        self._mask_del_btn.setObjectName("adjust_mask_delete_btn")
+        self._mask_del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_del_btn.setFixedWidth(34)
+        self._mask_del_btn.setToolTip("Delete this mask")
+        # Weight follows consequence: Erase and Invert are reversible and read
+        # as ordinary buttons; deleting throws work away, so it stays neutral
+        # until you reach for it and only then turns the palette's one red.
+        self._mask_del_btn.setStyleSheet(
+            f"""
+            QPushButton#adjust_mask_delete_btn {{
+                background: transparent;
+                border: 1px solid {theme.LINE};
+                border-radius: 5px;
+                color: {theme.INK_FAINT};
+                font-size: 13px;
+            }}
+            QPushButton#adjust_mask_delete_btn:hover {{
+                color: {theme.HIST_R};
+                border-color: {theme.HIST_R};
+            }}
+            QPushButton#adjust_mask_delete_btn:disabled {{
+                color: {theme.INK_FAINT};
+                border-color: {theme.LINE_SOFT};
+            }}
+            """
+        )
+        self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
+
+        tools_row = QHBoxLayout()   # "This mask": Erase, Invert, and delete
+        tools_row.setSpacing(5)
         self._mask_paint_btn = QPushButton("Paint")
         self._mask_erase_btn = QPushButton("Erase")
         self._mask_invert_btn = QPushButton("Invert")
@@ -3638,7 +3710,6 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            tools_row.addWidget(btn, 1)
         self._mask_paint_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_paint_btn, on)
         )
@@ -3646,7 +3717,9 @@ class ImageAdjustPanelWidget(QWidget):
             lambda on: self._on_mask_tool_toggled(self._mask_erase_btn, on)
         )
         self._mask_invert_btn.toggled.connect(self._on_mask_invert_toggled)
-        col.addLayout(tools_row)
+        # Assembled after the AI/gradient rows below so the sections read in
+        # working order: what you have, how to make one, what to do to it.
+
 
         # AI selection row (raw_ai_masks). Subject/Sky are one-shot: they
         # generate a whole layer and hand it back. Click is a *mode* --
@@ -3689,7 +3762,7 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            ai_row.addWidget(btn, 1)
+            ai_row.addWidget(btn, 1)  # "it finds it" family
         self._mask_ai_click_btn.setCheckable(True)
         self._mask_ai_subject_btn.clicked.connect(
             lambda: self.mask_ai_requested.emit("subject")
@@ -3698,7 +3771,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_ai_click_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
         )
-        col.addLayout(ai_row)
+
 
         # Gradient tools. Armed, not one-shot: the shape comes from a drag on
         # the photo (Lightroom/darktable both work this way -- a gradient
@@ -3725,14 +3798,40 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
-            grad_row.addWidget(btn, 1)
+            grad_row.addWidget(btn, 1)  # joins Paint in "you draw it"
         self._mask_linear_btn.toggled.connect(
             lambda on: self._on_gradient_tool_toggled(self._mask_linear_btn, "linear", on)
         )
         self._mask_radial_btn.toggled.connect(
             lambda on: self._on_gradient_tool_toggled(self._mask_radial_btn, "radial", on)
         )
-        col.addLayout(grad_row)
+        # ---- Add a mask: the six ways, split by who chooses ----------------
+        col.addWidget(self._mask_rule())
+        col.addWidget(self._mask_section_head("Add a mask"))
+
+        col.addWidget(self._mask_family_label("you draw it"))
+        draw_row = QHBoxLayout()
+        draw_row.setSpacing(5)
+        draw_row.addWidget(self._mask_paint_btn, 1)
+        grad_items = []
+        while grad_row.count():
+            grad_items.append(grad_row.takeAt(0).widget())
+        for w in grad_items:
+            if w is not None:
+                draw_row.addWidget(w, 1)
+        col.addLayout(draw_row)
+
+        col.addWidget(self._mask_family_label("it finds it"))
+        col.addLayout(ai_row)
+
+        # ---- This mask: what you can do to the selected one -----------------
+        col.addWidget(self._mask_rule())
+        self._mask_this_head = self._mask_section_head("This mask")
+        col.addWidget(self._mask_this_head)
+        tools_row.addWidget(self._mask_erase_btn, 1)
+        tools_row.addWidget(self._mask_invert_btn, 1)
+        tools_row.addWidget(self._mask_del_btn)
+        col.addLayout(tools_row)
 
         # Brush controls, mirrored from the Local section. Local lives on the
         # GLOBAL tab, so while masking they were on the other page: you had to
@@ -3743,6 +3842,8 @@ class ImageAdjustPanelWidget(QWidget):
         brush_col = QVBoxLayout(brush_wrap)
         brush_col.setContentsMargins(0, 0, 0, 0)
         brush_col.setSpacing(4)
+        brush_col.addWidget(self._mask_rule())
+        brush_col.addWidget(self._mask_section_head("Brush", "while painting"))
         for label, source_attr in (
             ("Brush Size", "_db_size_slider"),
             ("Brush Flow", "_db_strength_slider"),
@@ -3775,6 +3876,10 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_brush_sliders[label] = mirror
         col.addWidget(brush_wrap)
         self._mask_brush_wrap = brush_wrap
+        # Tool state, not part of the mask: it appears when a brush is in your
+        # hand and goes away again, so it never sits among the mask's own
+        # controls claiming to be one of them.
+        brush_wrap.setVisible(False)
 
         # Per-mask parameters, hidden wholesale until a mask exists. Showing a
         # dozen greyed-out sliders reads as broken rather than as "nothing
@@ -3784,6 +3889,8 @@ class ImageAdjustPanelWidget(QWidget):
         params_col = QVBoxLayout(self._mask_params_wrap)
         params_col.setContentsMargins(0, 0, 0, 0)
         params_col.setSpacing(6)
+        params_col.addWidget(self._mask_rule())
+        params_col.addWidget(self._mask_section_head("Adjust", "inside the mask"))
 
         for key, label, lo, hi, div in self._MASK_SLIDER_SPECS:
             row = QHBoxLayout()
@@ -4011,6 +4118,13 @@ class ImageAdjustPanelWidget(QWidget):
         except Exception:
             return None
 
+    def _sync_mask_brush_visible(self) -> None:
+        """Show the Brush sliders only while a mask brush is armed."""
+        wrap = getattr(self, "_mask_brush_wrap", None)
+        if wrap is None:
+            return
+        wrap.setVisible(self.mask_layer_mode() in ("paint", "erase"))
+
     def _sync_mask_tab_badge(self) -> None:
         """Show how many masks this photo has on the Masks tab itself.
 
@@ -4045,6 +4159,12 @@ class ImageAdjustPanelWidget(QWidget):
         if lst is not None:
             # An empty list box is just a hole in the panel.
             lst.setVisible(has_layer)
+        for attr in ("_mask_stack_head", "_mask_this_head"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.setVisible(has_layer)
+        if not has_layer:
+            self._sync_mask_brush_visible()
         add_btn = getattr(self, "_mask_add_btn", None)
         if add_btn is not None:
             # Only meaningful once one mask exists: with none, every tool below
@@ -4137,6 +4257,7 @@ class ImageAdjustPanelWidget(QWidget):
             # with a press on the photo.
             if self.gradient_tool() is not None:
                 self.disarm_gradient_tools()
+        self._sync_mask_brush_visible()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
 
     def _on_gradient_tool_toggled(self, btn, kind: str, checked: bool) -> None:
