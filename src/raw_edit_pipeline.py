@@ -448,15 +448,14 @@ class PreviewStageCache:
         self.stage_out: dict[str, np.ndarray] = {}
 
 
-_TRANSFORM_KEYS = (
-    "CropAngle",
-    "PerspectiveVertical",
-    "PerspectiveHorizontal",
-    "CropLeft",
-    "CropRight",
-    "CropTop",
-    "CropBottom",
-)
+# Imported, not re-listed. This used to be a hand-maintained copy of
+# raw_transform.TRANSFORM_KEYS and it drifted: AnamorphicRatio was added to the
+# geometry stage but never here, so changing the desqueeze ratio did not
+# invalidate the cached pre-tone stage. The live preview kept showing the
+# previous ratio -- the control looked dead while working correctly on export.
+# Importing means any future transform key is covered the moment
+# raw_transform declares it.
+from raw_transform import TRANSFORM_KEYS as _TRANSFORM_KEYS  # noqa: E402
 
 _PRE_TONE_KEYS = (
     "Temperature",

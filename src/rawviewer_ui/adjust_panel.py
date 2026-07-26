@@ -71,7 +71,7 @@ _CHANNEL_CURVE_KEYS_BY_NAME = {
 _SHOW_TONE_CURVE_UI = True
 
 _TRANSFORM_SLIDER_KEYS = frozenset(
-    {"CropAngle", "PerspectiveVertical", "PerspectiveHorizontal"}
+    {"CropAngle", "PerspectiveVertical", "PerspectiveHorizontal", "Distortion"}
 )
 
 # Session-wide copy/paste clipboard for edit settings (survives navigation and
@@ -1161,6 +1161,7 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_masks = CollapsibleSection("Masks", settings_key="masks")
         if not _SHOW_DODGE_BURN_UI:
             self.sect_masks.hide()
+        self.sect_anamorphic = CollapsibleSection("Anamorphic", settings_key="anamorphic")
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
         # Add Collapsible Sections to their tab pages
@@ -1175,6 +1176,7 @@ class ImageAdjustPanelWidget(QWidget):
         global_layout.addWidget(self.sect_local)
         global_layout.addWidget(self.sect_lut)
         global_layout.addWidget(self.sect_transform)
+        global_layout.addWidget(self.sect_anamorphic)
 
         # Masks page. Dodge & burn stays on Global for now: it is a signed
         # exposure map, not a layer in the mask stack, and moving it would
@@ -1344,6 +1346,7 @@ class ImageAdjustPanelWidget(QWidget):
                 target_sect = self.sect_noise
             elif spec.key in {
                 "CropAngle", "PerspectiveVertical", "PerspectiveHorizontal",
+                "Distortion",
             }:
                 target_sect = self.sect_transform
             elif spec.key in {
@@ -1738,6 +1741,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         self._build_masks_section(self.sect_masks)
 
+        self._build_anamorphic_section(self.sect_anamorphic)
         self._build_looks_section(self.sect_lut)
 
         self._calibrate_btn = QPushButton("🎯 Calibrate Camera from Color Checker...")
@@ -2038,31 +2042,6 @@ class ImageAdjustPanelWidget(QWidget):
         self._crop_action_wrap.setVisible(False)
         layout.addWidget(self._crop_action_wrap)
 
-        # Anamorphic Desqueeze dropdown
-        from raw_adjustments import ANAMORPHIC_DESQUEEZE_PRESETS
-
-        anamorphic_row = QHBoxLayout()
-        anamorphic_row.setSpacing(6)
-        ana_lbl = QLabel("Anamorphic")
-        ana_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-        ana_lbl.setMinimumWidth(78)
-        anamorphic_row.addWidget(ana_lbl)
-
-        self._anamorphic_combo = QComboBox()
-        self._anamorphic_combo.setObjectName("adjust_nr_combo")
-        self._anamorphic_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._anamorphic_combo.setToolTip(
-            "Anamorphic lens desqueeze (1.33x, 1.5x, 1.6x, 2.0x) — stretches image width to restore natural proportions."
-        )
-        for label, val in ANAMORPHIC_DESQUEEZE_PRESETS:
-            self._anamorphic_combo.addItem(label, val)
-        self._anamorphic_combo.currentIndexChanged.connect(self._on_anamorphic_changed)
-        anamorphic_row.addWidget(self._anamorphic_combo, 1)
-
-        ana_wrap = QWidget()
-        ana_wrap.setLayout(anamorphic_row)
-        layout.addWidget(ana_wrap)
-
         sect.add_widget(wrap)
         self._crop_active = False
         self._crop_insets = (0.0, 0.0, 0.0, 0.0)
@@ -2197,6 +2176,77 @@ class ImageAdjustPanelWidget(QWidget):
         current["Temperature"] = float(temperature)
         current["Tint"] = float(tint)
         self.set_adjustments(current)
+        self._emit_preview_and_save()
+
+    def _build_anamorphic_section(self, sect: CollapsibleSection) -> None:
+        """Desqueeze ratio as one row of exclusive buttons.
+
+        Its own section rather than a row buried under Transform's crop
+        controls: desqueeze is a property of the lens the frame was shot with,
+        not a framing decision, and it was the only dropdown in a panel where
+        every other discrete choice is a button row.
+
+        Buttons over a combo box because there are five fixed ratios and the
+        current one should be readable without opening anything -- the same
+        reason the WB presets and crop aspect pills are pills.
+        """
+        from raw_adjustments import ANAMORPHIC_DESQUEEZE_PRESETS
+
+        wrap = QWidget()
+        col = QVBoxLayout(wrap)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self._anamorphic_btns: list[QPushButton] = []
+        for label, value in ANAMORPHIC_DESQUEEZE_PRESETS:
+            # "Off (1.0x)" -> "1.0x": the row reads as a scale, and Off is
+            # simply the ratio that changes nothing.
+            text = "1.0x" if abs(value - 1.0) < 1e-6 else label
+            btn = QPushButton(text)
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(
+                f"Desqueeze {text} — stretch width to restore natural proportions"
+                if abs(value - 1.0) > 1e-6
+                else "No desqueeze (native capture proportions)"
+            )
+            btn.setProperty("anamorphic_ratio", float(value))
+            btn.clicked.connect(
+                lambda _checked=False, v=float(value): self._on_anamorphic_selected(v)
+            )
+            row.addWidget(btn, 1)
+            self._anamorphic_btns.append(btn)
+        col.addLayout(row)
+
+        hint = QLabel("Only for footage shot through an anamorphic adapter.")
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        hint.setWordWrap(True)
+        col.addWidget(hint)
+
+        sect.add_widget(wrap)
+        self._sync_anamorphic_buttons(1.0)
+
+    def _sync_anamorphic_buttons(self, ratio: float) -> None:
+        """Check the button matching ``ratio`` (nearest within tolerance)."""
+        buttons = getattr(self, "_anamorphic_btns", None)
+        if not buttons:
+            return
+        for btn in buttons:
+            value = float(btn.property("anamorphic_ratio") or 1.0)
+            btn.setChecked(abs(value - float(ratio)) < 1e-3)
+
+    def _on_anamorphic_selected(self, ratio: float) -> None:
+        # Exclusive by construction: re-clicking the active ratio must not
+        # untoggle it into a state where nothing is selected, so the sync
+        # re-asserts checked state rather than trusting the click.
+        self._sync_anamorphic_buttons(ratio)
+        if self._block_emit:
+            return
+        self._anamorphic_ratio = float(ratio)
         self._emit_preview_and_save()
 
     def _build_looks_section(self, sect: CollapsibleSection) -> None:
@@ -2759,18 +2809,9 @@ class ImageAdjustPanelWidget(QWidget):
                 self._db_mask_strength_slider.blockSignals(False)
                 if hasattr(self, "_db_mask_strength_value"):
                     self._db_mask_strength_value.setText(f"{stops:.2f}")
-            if hasattr(self, "_anamorphic_combo"):
-                ratio = float(merged.get("AnamorphicRatio", 1.0) or 1.0)
-                idx = 0
-                for i in range(self._anamorphic_combo.count()):
-                    if abs(float(self._anamorphic_combo.itemData(i) or 1.0) - ratio) < 1e-3:
-                        idx = i
-                        break
-                self._anamorphic_combo.blockSignals(True)
-                try:
-                    self._anamorphic_combo.setCurrentIndex(idx)
-                finally:
-                    self._anamorphic_combo.blockSignals(False)
+            ratio = float(merged.get("AnamorphicRatio", 1.0) or 1.0)
+            self._anamorphic_ratio = ratio
+            self._sync_anamorphic_buttons(ratio)
             self._sync_wb_preset_combo(float(merged.get("Temperature", self._as_shot_temperature)))
             # Refresh "As Shot" label with the file's Kelvin when known.
             combo = getattr(self, "_wb_preset_combo", None)
@@ -3007,11 +3048,7 @@ class ImageAdjustPanelWidget(QWidget):
         out["LensCorrectionEnabled"] = (
             1.0 if lens_btn is not None and lens_btn.isChecked() else 0.0
         )
-        if hasattr(self, "_anamorphic_combo"):
-            data = self._anamorphic_combo.currentData()
-            out["AnamorphicRatio"] = float(data) if data is not None else 1.0
-        else:
-            out["AnamorphicRatio"] = 1.0
+        out["AnamorphicRatio"] = float(getattr(self, "_anamorphic_ratio", 1.0) or 1.0)
         if self._tone_curve_row is not None:
             self._channel_curve_cache[self._current_curve_channel] = (
                 self._tone_curve_row.serialized_points()
@@ -3862,11 +3899,6 @@ class ImageAdjustPanelWidget(QWidget):
         if index > 0 and hasattr(self, "_chroma_nr_amount_slider"):
             if self._chroma_nr_amount_slider.value() < 1:
                 self._chroma_nr_amount_slider.setValue(int(CHROMA_NR_ON_VALUE))
-        self._emit_preview_and_save()
-
-    def _on_anamorphic_changed(self, index: int) -> None:
-        if self._block_emit:
-            return
         self._emit_preview_and_save()
 
     def _sync_chroma_nr_amount_row_visible(self) -> None:

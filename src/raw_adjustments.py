@@ -82,6 +82,13 @@ DEFAULT_ADJUSTMENTS: Dict[str, float] = {
     "CropRight": 0.0,
     "CropTop": 0.0,
     "CropBottom": 0.0,
+    # Manual radial lens distortion, -100..+100 (see raw_transform.py).
+    # Positive corrects PINCUSHION (telephoto bowing lines inward), negative
+    # corrects BARREL (wide-angle bulge). Independent of the automatic
+    # profile-based LensCorrectionEnabled above, which is baked in at decode
+    # time and only fires when a lens profile actually matches -- this is the
+    # by-hand fallback for every lens that has no profile.
+    "Distortion": 0.0,
     # Anamorphic lens desqueeze factor (1.0 = Off, 1.33 = 1.33x, 1.5 = 1.5x, 1.6 = 1.6x, 2.0 = 2.0x).
     "AnamorphicRatio": 1.0,
     # Dodge & burn stops-per-mask-unit (see raw_dodge_burn.py). The mask
@@ -286,6 +293,7 @@ SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("CropAngle", "Straighten", -450, 450, 0.0, scale=0.1, fmt=lambda x: f"{x:+.1f}°"),
     _slider_linear("PerspectiveVertical", "Vertical", -100, 100, 0.0),
     _slider_linear("PerspectiveHorizontal", "Horizontal", -100, 100, 0.0),
+    _slider_linear("Distortion", "Distortion", -100, 100, 0.0),
     # Per-edge crop-inset sliders were removed by request: cropping stays out
     # of the UI until a proper interactive overlay (visible crop rectangle
     # with drag handles) exists. raw_transform.apply_geometry still honors
@@ -1976,6 +1984,7 @@ EXCLUDED_BURST_GROUP_KEYS = frozenset({
     "CropTop",
     "CropBottom",
     "AnamorphicRatio",
+    "Distortion",
     "LensCorrectionEnabled",
     "DodgeBurnStrength",
 })
