@@ -15,10 +15,16 @@ Sources (all commercially licensed):
     mobilesam_encoder.onnx   MobileSAM image encoder, Apache 2.0
     mobilesam_decoder.onnx   MobileSAM prompt decoder, Apache 2.0
 
-These URLs point at community ONNX exports, which move around more than
-the source repos do. If one 404s, search Hugging Face for the model name
-plus "onnx" and drop the direct file URL in below -- raw_ai_masks reads
-the input size off the graph, so a differently-sized export still works
+URLs and hashes are read from raw_ai_masks._MODELS rather than duplicated
+here. They were duplicated once, and this copy silently rotted: it still
+named two MobileSAM files that upstream only ever published inside a zip,
+so running this script 404'd on half its work while the app's own table
+was correct.
+
+These point at community ONNX exports, which move around more than the
+source repos do. If one 404s, search Hugging Face for the model name plus
+"onnx" and update the URL in src/raw_ai_masks.py -- raw_ai_masks reads the
+input size off the graph, so a differently-sized export still works
 without a code change.
 """
 import argparse
@@ -30,23 +36,12 @@ import urllib.request
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(REPO_ROOT, "models")
 
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+from raw_ai_masks import _MODELS  # noqa: E402
+
 SOURCES = {
-    "subject": (
-        "birefnet.onnx",
-        "https://huggingface.co/onnx-community/BiRefNet_lite/resolve/main/onnx/model.onnx",
-    ),
-    "sky": (
-        "skyseg.onnx",
-        "https://huggingface.co/JianyuanWang/skyseg/resolve/main/skyseg.onnx",
-    ),
-    "sam_encoder": (
-        "mobilesam_encoder.onnx",
-        "https://huggingface.co/vietanhdev/segment-anything-onnx-models/resolve/main/mobile_sam.encoder.onnx",
-    ),
-    "sam_decoder": (
-        "mobilesam_decoder.onnx",
-        "https://huggingface.co/vietanhdev/segment-anything-onnx-models/resolve/main/mobile_sam.decoder.onnx",
-    ),
+    kind: (spec["filename"], spec["url"], spec.get("archive_member", ""), spec["sha256"])
+    for kind, spec in _MODELS.items()
 }
 
 
@@ -58,7 +53,7 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
-def download(url, dest):
+def download(url, dest, archive_member=""):
     tmp = dest + ".part"
     print(f"  fetching {url}")
     with urllib.request.urlopen(url, timeout=120) as response, open(tmp, "wb") as fh:
@@ -76,6 +71,14 @@ def download(url, dest):
                 sys.stdout.flush()
     if total:
         sys.stdout.write("\n")
+    if archive_member:
+        import zipfile
+
+        with zipfile.ZipFile(tmp) as archive:
+            payload = archive.read(archive_member)
+        with open(tmp, "wb") as fh:
+            fh.write(payload)
+        print(f"  extracted {archive_member} ({len(payload) / 1e6:.1f} MB)")
     os.replace(tmp, dest)
 
 
@@ -107,14 +110,14 @@ def main():
     hashes = {}
     failed = []
     for kind in kinds:
-        filename, url = SOURCES[kind]
+        filename, url, archive_member, expected = SOURCES[kind]
         dest = os.path.join(MODELS_DIR, filename)
         print(f"\n{kind} -> models/{filename}")
         if os.path.exists(dest) and not args.force:
             print("  already present (use --force to re-download)")
         else:
             try:
-                download(url, dest)
+                download(url, dest, archive_member)
             except Exception as exc:  # noqa: BLE001
                 print(f"  [ERROR] download failed: {exc}")
                 failed.append(kind)
@@ -124,9 +127,15 @@ def main():
         hashes[kind] = digest
         size_mb = os.path.getsize(dest) / 1e6
         print(f"  {size_mb:.1f} MB  sha256={digest}")
+        if expected and digest.lower() != expected.lower():
+            print(f"  [ERROR] hash differs from the one recorded in raw_ai_masks._MODELS")
+            print(f"          recorded: {expected}")
+            failed.append(kind)
+        elif expected:
+            print("  matches the recorded hash")
 
     if hashes:
-        print("\nPaste into src/raw_ai_masks.py _MODELS:")
+        print("\nCurrent hashes (paste into src/raw_ai_masks.py _MODELS if updating a URL):")
         for kind, digest in hashes.items():
             print(f'    "{kind}": ... "sha256": "{digest}",')
 
