@@ -22501,6 +22501,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
+            elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
+                # Disarmed by any route -- Esc, the toolbar, a file switch,
+                # the leave-image auto-disarm. A latched paint gate left open
+                # here would keep stamping under a tool the user has put away.
+                gv.end_key_paint()
         self._sync_dodge_burn_mask_overlay()
 
     def _any_brush_tool_armed(self) -> bool:
@@ -22796,6 +22801,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
+            elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
+                # Disarmed by any route -- Esc, the toolbar, a file switch,
+                # the leave-image auto-disarm. A latched paint gate left open
+                # here would keep stamping under a tool the user has put away.
+                gv.end_key_paint()
         # Show painted coverage while a mask brush is armed: reuse the
         # dodge/burn overlay path with a shim (alpha 0..1 renders in the
         # overlay's dodge tint).
@@ -22953,7 +22963,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is None or not hasattr(panel, "set_dodge_burn_mode"):
             return False
         if not HOLD_TO_PAINT:
+            # The tap both arms the tool and latches painting on: sweeping the
+            # pointer stamps with no mouse button down. Requiring a click
+            # after the keystroke made the user arm the same tool twice for
+            # one decision.
             panel.set_dodge_burn_mode(mode)
+            gv = getattr(self, "gpu_view", None)
+            if gv is not None:
+                if panel.dodge_burn_mode() is not None:
+                    if hasattr(gv, "begin_latched_paint"):
+                        gv.begin_latched_paint()
+                elif hasattr(gv, "end_key_paint"):
+                    # Same key again toggled the tool back off.
+                    gv.end_key_paint()
             return True
         # Multi-key: last key wins. A different brush key pressed mid-hold ends
         # the current stroke before the new tool takes over; releasing back to

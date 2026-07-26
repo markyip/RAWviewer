@@ -388,8 +388,21 @@ def erase_brush(
 
     ``strength`` is 0..~1 per stamp (caller scales by flow × pressure): at 1.0
     the center is fully cleared in one stamp; lower values erase gradually.
-    Same edge-assist gating as ``stamp_brush`` when enabled.
+
+    Erasing deliberately ignores edge assist, unlike ``stamp_brush``. Edge
+    assist exists to stop a *paint* stroke bleeding across a subject boundary,
+    which is help when adding coverage. Applied to the eraser it meant mask
+    sitting on the far side of a luminance edge could not be removed at all --
+    erasing from the dark side of a hard edge left the bright side untouched
+    through twelve full-strength passes. An eraser is what you reach for when
+    the paint went somewhere wrong, so it has to reach wherever the paint got
+    to, including across the very edge assist was protecting.
+
+    The guide/gating arguments stay in the signature so callers need not
+    special-case this brush against ``stamp_brush``, but none of them affect
+    the result any more.
     """
+    del luminance, chroma, edge_assist, luma_tol  # see above: never gate the eraser
     h, w = mask.data.shape
     r = max(1.0, float(radius))
     x0 = max(0, int(cx - r - 1))
@@ -400,15 +413,6 @@ def erase_brush(
         return (x0, y0, x1, y1)
 
     falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r)
-
-    if (
-        edge_assist
-        and luminance is not None
-        and luminance.shape[:2] == (h, w)
-    ):
-        falloff = falloff * _edge_assist_gate(
-            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
-        )
 
     # Multiplicative erase toward zero: factor 1 at edge, (1-strength) at center.
     amount = np.clip(falloff * float(strength), 0.0, 1.0)

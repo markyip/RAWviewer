@@ -1752,12 +1752,28 @@ class GpuImageView(QGraphicsView):
             # design (accepted trade-off) -- stamp at full strength.
             self.dodgeBurnStroke.emit(pt, 1.0, False)
 
+    def begin_latched_paint(self) -> None:
+        """Tap-to-paint: a brush hotkey tap armed the tool and latched it on.
+
+        Same gate as ``begin_key_paint`` -- pointer movement stamps with no
+        mouse button held -- except it stays open after the key comes back
+        up. The tool is live until something disarms it (tapping the same key
+        again, Esc, choosing another tool, switching image), so there is
+        nothing to hold down: tap, sweep, tap off.
+        """
+        self._db_paint_latched = True
+        self.begin_key_paint()
+
+    def is_paint_latched(self) -> bool:
+        return bool(getattr(self, "_db_paint_latched", False))
+
     def end_key_paint(self) -> None:
         """Hotkey released (or focus lost): close any active hold-stroke.
 
         Idempotent -- safe to call when no hold is in progress, which is what
         the focus-loss safety net relies on.
         """
+        self._db_paint_latched = False
         self._db_key_held = False
         self._brush_resizing = False
         self._resize_axis = None

@@ -990,14 +990,19 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addLayout(header)
 
         hint = QLabel(
-            "E / Esc — close · D/B/X/H brush tools · two-finger scroll = Brush Size"
+            "E / Esc — close · D/B/X/H brush tools (tap, then sweep) · "
+            "two-finger scroll = Brush Size"
         )
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
         hint.setToolTip(
             "While Adjust is open:\n"
             "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• D / B / X / H arm Dodge / Burn / Eraser / Heal (press again to disarm; also disarms when the cursor leaves the image)\n"
+            "• D / B / X / H arm Dodge / Burn / Eraser / Heal and start painting: "
+            "sweep the pointer over the photo, no mouse button needed. "
+            "Press the same key again (or pick another tool) to put it away\n"
+            "• Eraser removes painted mask and the dodge/burn inside it, "
+            "and unlike the paint brushes it is not held back by Edge Assist\n"
             "• With a brush tool armed, two-finger scroll changes Brush Size "
             "(Ctrl+scroll still zooms)\n"
             "• Brush Flow changes how opaque the brush preview looks"
