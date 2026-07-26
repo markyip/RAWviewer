@@ -94,9 +94,20 @@ def main() -> int:
 
     # --- delete/duplicate request the HOST with the active index ---
     panel._mask_del_btn.click()
-    panel._mask_dup_btn.click()
     check("Delete emits with active index", fired["delete"] == [1])
+
+    # The Masks-tab redesign removed the Duplicate button, but the handler,
+    # the signal and main.py's connection all survive -- so the operation is
+    # intact and simply has no way to be invoked. Drive the handler directly:
+    # that keeps the host contract covered, and this file stops at an
+    # AttributeError (skipping every check below) if it clicks a button that
+    # no longer exists.
+    panel._on_mask_duplicate_clicked()
     check("Duplicate emits with active index", fired["dup"] == [1])
+    check(
+        "Duplicate has no UI affordance (redesign left the handler orphaned)",
+        not hasattr(panel, "_mask_dup_btn"),
+    )
 
     # --- tool arming + dodge/burn mutual exclusion ---
     panel._mask_paint_btn.setChecked(True)
@@ -130,10 +141,27 @@ def main() -> int:
 
     from PyQt6.QtCore import Qt
 
+    # The redesign dropped the per-row check box: it doubled as an enable
+    # toggle, which made a single click ambiguous ("did I select this row or
+    # turn it off?"). Rows are now select-and-rename only.
     item0 = panel._mask_list.item(0)
-    item0.setCheckState(Qt.CheckState.Unchecked)
-    check("unchecking the list row disables the layer", layer_a.enabled is False)
+    check(
+        "list rows are not user-checkable (no ambiguous select/disable click)",
+        not (item0.flags() & Qt.ItemFlag.ItemIsUserCheckable),
+    )
+    item0.setText("Renamed Sky")
+    check("editing a row renames its layer", layer_a.name == "Renamed Sky")
+
+    # layer.enabled is still honoured by the compositor and still persisted to
+    # XMP, so the model contract is tested directly -- there is currently no
+    # UI that can set it. See the note in the summary about the orphaned
+    # enable toggle.
+    layer_a.enabled = False
+    layer_a.touch()
     check("disabled layer reads as empty (skipped by the pipeline)", layer_a.is_empty)
+    layer_a.enabled = True
+    layer_a.touch()
+    check("re-enabled layer is non-empty again", not layer_a.is_empty)
 
     # --- AI mask buttons (raw_ai_masks) ---
     ai_requests = []

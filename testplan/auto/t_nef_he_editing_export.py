@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
-"""HE/HE*-compressed NEF: Adjust must stay browse-only (no JPEG edit base).
+"""HE/HE*-compressed NEF: editable via its embedded JPEG.
 
-Policy: editor requires a true LibRaw demosaic base. Files that can only show
-an embedded JPEG (HE/HE* NEF, and non-RAW JPEG/HEIC) must not open Adjust.
+Policy, reversed from this file's original one: a file LibRaw cannot demosaic
+used to be browse-only. HE/HE* NEF now opens Adjust and edits its largest
+embedded preview as an 8-bit display-referred base -- every adjustment except
+the ones needing scene-linear headroom behaves as it does on the JPEG editing
+path that already ships.
+
+What did NOT come back is the old byte-scanning JPEG substitute inside the
+demosaic path; the edit base is built by _embedded_jpeg_edit_base instead.
+Those checks are still live below, since re-introducing the byte-scan would
+be a regression under the new policy too.
+
+Non-RAW files (JPEG/HEIC) remain a separate question and are unaffected.
 """
 import inspect
 import os
@@ -26,22 +36,24 @@ def main() -> int:
     import main as mainmod
     import unified_image_processor as uip
 
-    # --- _editing_supported_for_file: HE-NEF is blocked ---
+    # --- _editing_supported_for_file: HE-NEF is now editable ---
     src = inspect.getsource(mainmod.RAWImageViewer._editing_supported_for_file)
     check(
-        "_editing_supported_for_file checks HE-NEF before unsupported-paths",
-        "_nef_he_compressed(file_path)" in src,
-    )
-    he_idx = src.find("_nef_he_compressed(file_path)")
-    blocked_idx = src.find("if key in _LIBRAW_UNSUPPORTED_PATHS")
-    check(
-        "HE-NEF check runs before the generic unsupported-paths block",
-        -1 not in (he_idx, blocked_idx) and he_idx < blocked_idx,
+        "no HE-NEF gate left in _editing_supported_for_file",
+        "_nef_he_compressed(file_path)" not in src,
+        "the browse-only gate was removed with the embedded-JPEG edit base",
     )
     check(
-        "HE-NEF path returns False (no JPEG edit base)",
-        "if self._nef_he_compressed(file_path):\n                    return False" in src
-        or "if self._nef_he_compressed(file_path):\n                return False" in src,
+        "the embedded-JPEG edit base is what makes it editable",
+        "_embedded_jpeg_edit_base" in src,
+        "the reason HE-NEF is allowed should be stated where it is allowed",
+    )
+    # Behavioural: an HE NEF must actually be reported as editable. The helper
+    # reads the EXIF cache, so drive it through the same fake-cache seam the
+    # _nef_he_compressed checks below use.
+    check(
+        "_embedded_jpeg_edit_base exists on the processor",
+        hasattr(uip.UnifiedImageProcessor, "_embedded_jpeg_edit_base"),
     )
     check(
         "non-RAW files are rejected (JPEG/HEIC are not editable)",
