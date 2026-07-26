@@ -23820,6 +23820,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
 
             if is_end:
+                # Snap the WHOLE stroke, not just the final stamp. Passing the
+                # last stamp's bbox filtered a square patch of a longer stroke
+                # and left the rest untouched, so the boundary between snapped
+                # and unsnapped mask cut a straight line through solid paint --
+                # the reported "square" around wherever the brush stopped. The
+                # accumulated dirty rect ends in unpainted mask, where a
+                # transition has nothing to show.
+                stroke_region = getattr(self, "_dodge_burn_stroke_dirty", None) or bbox
                 self._dodge_burn_stroke_active = False
                 self._dodge_burn_stroke_baseline = None
                 self._dodge_burn_stroke_work = None
@@ -23850,7 +23858,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 # coverage, which is the opposite of the tool's job.
                 if luminance is not None and mode != "erase":
                     t_snap = time.perf_counter()
-                    edge_snap_region(mask, luminance, bbox)
+                    edge_snap_region(mask, luminance, stroke_region)
                     perf_mark(
                         "db_edge_snap",
                         (time.perf_counter() - t_snap) * 1000.0,

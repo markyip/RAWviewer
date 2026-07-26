@@ -246,7 +246,7 @@ def test_release_must_not_put_erased_mask_back():
 
     # The guard itself: main.py must gate the snap on the stroke mode.
     src = (REPO / "src" / "main.py").read_text(encoding="utf-8")
-    assert 'mode != "erase"' in src and "edge_snap_region(mask, luminance, bbox)" in src, (
+    assert 'mode != "erase"' in src and "edge_snap_region(mask, luminance, " in src, (
         "edge_snap_region is no longer guarded against erase strokes"
     )
     print(f"  OK   erase strokes skip the release edge-snap (would regrow "
@@ -410,6 +410,190 @@ def test_mask_toggle_stays_enabled_after_disarm():
     print("  OK   mask toggle survives disarming")
 
 
+# ------------------------------------------------- release must not print a box
+
+
+def _smooth_luma(h, w, seed=0):
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    return cv2.GaussianBlur(rng.random((h, w), dtype=np.float32), (0, 0), 12.0) * 0.2 + 0.4
+
+
+def test_release_snap_leaves_no_rectangular_edge():
+    """The end-of-stroke snap must not print its own bbox into the mask.
+
+    It used to paste the guided-filter result over the padded bbox. The filter
+    legitimately lowers values inside (measured 0.563 -> 0.488) while the pixel
+    just outside kept the unfiltered value, so the rectangle's straight edge
+    landed in the mask as a step ~19x the local gradient -- a visible square
+    around wherever the brush stopped.
+    """
+    from raw_dodge_burn import DodgeBurnMask, edge_snap_region, stamp_brush
+
+    h = w = 400
+    luma = _smooth_luma(h, w)
+    for strength, label in ((0.10, "soft"), (0.35, "medium")):
+        mask = DodgeBurnMask.empty(h, w)
+        bbox = None
+        for x in range(80, 320, 8):
+            bbox = stamp_brush(
+                mask, x, 200, 45, strength, dodge=True, luminance=luma, edge_assist=False
+            )
+        before = mask.data.copy()
+        edge_snap_region(mask, luma, bbox)
+
+        x0, _y0, _x1, _y1 = bbox
+        left = max(0, x0 - 16)  # the padded rect's left edge
+        row = 200
+        outside = float(mask.data[row, left - 3 : left].mean())
+        inside = float(mask.data[row, left : left + 3].mean())
+        step = abs(inside - outside)
+        local = float(np.abs(np.diff(before[row, left + 10 : left + 60])).mean())
+        assert step < 5.0 * max(local, 1e-6), (
+            f"{label}: rectangular edge at x={left}: step {step:.5f} vs local "
+            f"gradient {local:.5f} ({step / max(local, 1e-9):.1f}x)"
+        )
+    print("  OK   release snap leaves no rectangular edge")
+
+
+def test_release_snap_still_snaps_to_real_edges():
+    """Feathering must not defeat the point of the snap."""
+    from raw_dodge_burn import DodgeBurnMask, edge_snap_region, stamp_brush
+
+    h = w = 300
+    luma = np.zeros((h, w), np.float32)
+    luma[:, 150:] = 0.9
+    mask = DodgeBurnMask.empty(h, w)
+    bbox = stamp_brush(mask, 150, 150, 70, 0.8, dodge=True, luminance=luma, edge_assist=False)
+    before = mask.data.copy()
+    edge_snap_region(mask, luma, bbox)
+
+    core = slice(120, 180)
+
+    def jump(a):
+        return abs(float(a[core, 148:150].mean()) - float(a[core, 150:152].mean()))
+
+    assert jump(mask.data) > jump(before) * 2.0, (
+        f"snap no longer aligns the mask to the luminance edge: "
+        f"{jump(before):.4f} -> {jump(mask.data):.4f}"
+    )
+    print(f"  OK   snap still pulls onto real edges ({jump(before):.4f} -> {jump(mask.data):.4f})")
+
+
+def test_feather_window_shape_and_bounds():
+    from raw_dodge_burn import _feather_window
+
+    win = _feather_window(80, 80, 16, feather_top=True, feather_bottom=True,
+                          feather_left=True, feather_right=True)
+    assert win.shape == (80, 80)
+    assert 0.0 < win.min() < 0.2, f"border weight should be near 0, got {win.min()}"
+    assert abs(win.max() - 1.0) < 1e-6, "interior weight should reach 1"
+    assert abs(win[40, 40] - 1.0) < 1e-6, "centre must be fully snapped"
+
+    # A side on the image border is not feathered -- nothing outside to blend.
+    edge = _feather_window(80, 80, 16, feather_top=False, feather_bottom=True,
+                           feather_left=False, feather_right=True)
+    assert abs(edge[0, 0] - 1.0) < 1e-6, "un-feathered corner should stay at 1"
+
+    # Narrower than 2*margin: still monotone up to the middle, never re-crossing.
+    tiny = _feather_window(9, 9, 16, feather_top=True, feather_bottom=True,
+                           feather_left=True, feather_right=True)
+    mid = tiny[4, :5]
+    assert np.all(np.diff(mid) >= -1e-6), f"ramp not monotone on a narrow region: {mid}"
+    print("  OK   feather window is bounded, monotone, and border-aware")
+
+
+# --------------------------------------- eraser clears both brush systems
+
+
+def test_eraser_hotkey_arms_like_the_others():
+    """X must arm through the same path as D/B/H, not a special case."""
+    for mode in ("dodge", "burn", "erase", "heal"):
+        h, _ = _host()
+        assert h._handle_brush_key_down(mode) is True, f"{mode} hotkey not handled"
+        assert h.single_image_adjust_panel.mode == mode, f"{mode} did not arm"
+        assert h.gpu_view.began == 1, f"{mode} did not open the paint gate"
+        assert h._handle_brush_key_up(mode) is True
+        assert h.single_image_adjust_panel.mode is None, f"{mode} did not disarm"
+    print("  OK   D / B / X / H all arm and disarm identically")
+
+
+def test_eraser_clears_heal_coverage_too():
+    """One eraser for both systems: dodge/burn mask AND heal coverage."""
+    from raw_dodge_burn import DodgeBurnMask, erase_brush, stamp_brush
+    from raw_spot_heal import HealMask, erase_heal_brush, stamp_heal_brush
+
+    h = w = 160
+    db = DodgeBurnMask.empty(h, w)
+    stamp_brush(db, 80, 80, 40, 1.0, dodge=True, edge_assist=False)
+    heal = HealMask.empty(h, w)
+    stamp_heal_brush(heal, 80, 80, 40, 1.0)
+
+    db_before = float(np.abs(db.data).sum())
+    heal_before = float(np.abs(heal.data).sum())
+    assert db_before > 0 and heal_before > 0, "fixture painted nothing"
+
+    # What the host does for one erase stamp -- both systems, same brush.
+    for _ in range(10):
+        erase_brush(db, 80, 80, 40, 1.0, edge_assist=False)
+        erase_heal_brush(heal, 80, 80, 40, 1.0)
+
+    db_after = float(np.abs(db.data).sum())
+    heal_after = float(np.abs(heal.data).sum())
+    assert db_after < db_before * 0.05, f"dodge/burn not cleared: {db_before} -> {db_after}"
+    assert heal_after < heal_before * 0.05, f"heal not cleared: {heal_before} -> {heal_after}"
+    print("  OK   eraser clears dodge/burn and heal coverage alike")
+
+
+def test_host_erase_branch_touches_both_masks():
+    """Guard the host wiring, not just the primitives."""
+    src = (REPO / "src" / "main.py").read_text(encoding="utf-8")
+    # Scope to the stroke handler; "mode == 'erase'" appears in other handlers.
+    start = src.index("def _on_dodge_burn_stroke")
+    end = src.index("\n    def ", start + 1)
+    body = src[start:end]
+    i = body.index('if mode == "erase":')
+    branch = body[i : i + 2000]
+    assert "erase_brush(" in branch, "erase branch no longer erases the dodge/burn mask"
+    assert "erase_heal_brush(" in branch, "erase branch no longer erases heal coverage"
+    print("  OK   host erase branch drives both masks")
+
+
+def test_whole_stroke_is_snapped_not_the_last_stamp():
+    """Snapping only the final stamp cut a straight edge through solid paint."""
+    src = (REPO / "src" / "main.py").read_text(encoding="utf-8")
+    assert "edge_snap_region(mask, luminance, stroke_region)" in src, (
+        "release snap no longer uses the accumulated stroke region"
+    )
+    assert "_dodge_burn_stroke_dirty" in src
+    print("  OK   release snaps the accumulated stroke region")
+
+
+def test_whole_stroke_snap_has_no_straight_cut():
+    """End to end: a long stroke snapped over its full region stays smooth."""
+    from raw_dodge_burn import DodgeBurnMask, edge_snap_region, stamp_brush
+
+    h = w = 400
+    luma = _smooth_luma(h, w)
+    mask = DodgeBurnMask.empty(h, w)
+    acc = None
+    for x in range(120, 300, 8):
+        b = stamp_brush(mask, x, 200, 45, 0.12, dodge=True, luminance=luma, edge_assist=False)
+        acc = b if acc is None else (
+            min(acc[0], b[0]), min(acc[1], b[1]), max(acc[2], b[2]), max(acc[3], b[3])
+        )
+    edge_snap_region(mask, luma, acc)
+
+    # Inside the painted band, no column-to-column jump should tower over the
+    # rest: a pasted rectangle showed up as a >15x outlier.
+    band = mask.data[170:230, :]
+    steps = np.abs(np.diff(band, axis=1))
+    ratio = steps.max() / max(steps.mean(), 1e-9)
+    assert ratio < 10.0, f"straight cut in the stroke: worst step {ratio:.1f}x the mean"
+    print(f"  OK   whole-stroke snap stays smooth (worst step {ratio:.1f}x mean)")
+
+
 def main() -> int:
     test_latch_survives_key_release()
     test_latched_move_paints_without_any_button()
@@ -428,6 +612,14 @@ def main() -> int:
     test_focus_loss_abort_also_disarms()
     test_mask_overlay_togglable_with_nothing_armed()
     test_mask_toggle_stays_enabled_after_disarm()
+    test_release_snap_leaves_no_rectangular_edge()
+    test_release_snap_still_snaps_to_real_edges()
+    test_feather_window_shape_and_bounds()
+    test_eraser_hotkey_arms_like_the_others()
+    test_eraser_clears_heal_coverage_too()
+    test_host_erase_branch_touches_both_masks()
+    test_whole_stroke_is_snapped_not_the_last_stamp()
+    test_whole_stroke_snap_has_no_straight_cut()
     print("\nPASS t_tap_to_paint")
     return 0
 

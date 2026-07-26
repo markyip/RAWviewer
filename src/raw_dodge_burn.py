@@ -440,8 +440,17 @@ def edge_snap_region(
     luminance edges within the filter radius, which is what makes a rough
     stroke "stick" to a subject's outline instead of bleeding across it.
     ``pad`` extends the filtered region beyond the touched bbox so the
-    guided filter has context outside the stroke (avoids a visible seam at
-    the exact stroke boundary).
+    guided filter has context outside the stroke.
+
+    The result is feathered in over the ``pad`` margin rather than pasted.
+    Pasting it printed the bbox itself into the mask: the filter legitimately
+    changes values inside the rectangle (measured 0.563 -> 0.488 on a plain
+    stroke) while the pixel just outside keeps the unfiltered value, so the
+    rectangle's straight edge landed in the mask as a step ~19x the local
+    gradient -- a visible square around wherever the brush happened to stop.
+    Feathering means the snap fades out before it reaches the boundary, so
+    there is no edge to see. Sides sitting on the image border are not
+    feathered; there is nothing outside them to mismatch.
     """
     from raw_chroma_denoise import apply_guided_filter
 
@@ -467,8 +476,54 @@ def edge_snap_region(
         if sn_peak > 1e-6 and sn_peak < src_peak * 0.85:
             snapped *= src_peak / sn_peak
             np.clip(snapped, -MASK_CLIP, MASK_CLIP, out=snapped)
-    mask.data[y0:y1, x0:x1] = snapped
+
+    weight = _feather_window(
+        y1 - y0,
+        x1 - x0,
+        pad,
+        feather_top=y0 > 0,
+        feather_bottom=y1 < h,
+        feather_left=x0 > 0,
+        feather_right=x1 < w,
+    )
+    mask.data[y0:y1, x0:x1] = src * (1.0 - weight) + snapped * weight
     mask.touch()
+
+
+def _feather_window(
+    height: int,
+    width: int,
+    margin: int,
+    *,
+    feather_top: bool,
+    feather_bottom: bool,
+    feather_left: bool,
+    feather_right: bool,
+) -> np.ndarray:
+    """(H, W) weights: 1 in the interior, easing to 0 over ``margin`` px.
+
+    Separable raised-cosine ramps, only on the requested sides. Clamped to
+    half the extent so a region narrower than 2*margin still gets a smooth
+    window rather than ramps that overlap and re-cross.
+    """
+
+    def axis(n: int, lead: bool, trail: bool) -> np.ndarray:
+        w = np.ones(n, dtype=np.float32)
+        m = int(min(margin, n // 2))
+        if m <= 0:
+            return w
+        # +1 offsets keep the first ramp sample above 0: a hard zero column at
+        # the boundary would make the snap stop one pixel early for no gain.
+        ramp = 0.5 - 0.5 * np.cos(np.pi * (np.arange(m, dtype=np.float32) + 1.0) / (m + 1.0))
+        if lead:
+            w[:m] = ramp
+        if trail:
+            w[n - m :] = ramp[::-1]
+        return w
+
+    wy = axis(height, feather_top, feather_bottom)
+    wx = axis(width, feather_left, feather_right)
+    return np.outer(wy, wx).astype(np.float32)
 
 
 def resize_mask_to(mask: DodgeBurnMask, height: int, width: int) -> np.ndarray:
