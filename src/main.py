@@ -2136,31 +2136,43 @@ class _GenerativeEditSignals(QObject):
 
 
 class _GenerativeEditWorker(QRunnable):
-    """Provider call + derived-file write, off the UI thread.
+    """Provider call + staging write, off the UI thread.
 
     Both halves belong here: the write is what makes the multi-second
     wait worth anything, and doing it on the worker means the UI thread
     only ever sees a finished path or an error string.
     """
 
-    def __init__(self, provider, request, source_path: str, cancel, signals):
+    def __init__(
+        self, provider, request, source_path: str, cancel, signals, session, instruction
+    ):
         super().__init__()
         self.provider = provider
         self.request = request
         self.source_path = source_path
         self.cancel = cancel
         self.signals = signals
+        self.session = session
+        self.instruction = instruction
 
     def run(self) -> None:
-        import generative_derived_file as gdf
         from raw_generative_edit import CancelledError, GenerativeEditError
 
         try:
             result = self.provider.edit(
                 self.request, cancel=self.cancel, progress=self.signals.progress.emit
             )
-            self.signals.progress.emit("Writing file...")
-            derived = gdf.create_derived_file(self.source_path, result)
+            # Staged, not written to the user's folder: a result they reject
+            # should cost them nothing to clean up. It becomes a real file
+            # only on Export. See generative_session.
+            self.signals.progress.emit("Staging result...")
+            step = self.session.stage(
+                self.source_path,
+                result.image,
+                self.instruction,
+                provenance=getattr(result, "provenance", None),
+            )
+            derived = step.path
         except CancelledError:
             self.signals.finished.emit(self.source_path, "", "")
             return
@@ -9092,6 +9104,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.generative_source_requested.connect(
                 self._on_generative_source_requested
+            )
+            self.single_image_adjust_panel.generative_export_requested.connect(
+                self._on_generative_export_requested
+            )
+            self.single_image_adjust_panel.generative_undo_requested.connect(
+                self._on_generative_undo_requested
+            )
+            self.single_image_adjust_panel.generative_discard_requested.connect(
+                self._on_generative_discard_requested
+            )
+            self.single_image_adjust_panel.generative_page_active_changed.connect(
+                self._on_generative_page_active_changed
             )
             self.single_image_adjust_panel.mask_layer_mode_changed.connect(
                 self._on_mask_layer_mode_changed
@@ -22717,9 +22741,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 panel.set_generative_status("Cancelled.")
                 return
 
-        # The model gets the CURRENT render, so the parametric edits are
-        # baked in and are not replayed on top of the result later.
-        rgb = self._ai_mask_source_rgb()
+        # Iterating builds on the newest staged result, not the original, so
+        # instructions accumulate the way a person expects. With nothing
+        # staged the source is the CURRENT render, edits baked in.
+        rgb = self._generative_source_rgb()
         if rgb is None:
             panel.set_generative_status("Open an image in the editor first.")
             return
@@ -22744,9 +22769,57 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._generative_signals = signals  # keep alive
         _get_bg_thread_pool().start(
             _GenerativeEditWorker(
-                provider, request, source, self._generative_cancel, signals
+                provider,
+                request,
+                source,
+                self._generative_cancel,
+                signals,
+                self._generative_session(),
+                instruction,
             )
         )
+
+    def _generative_session(self):
+        """Lazily-made staging area for this app run (generative_session)."""
+        session = getattr(self, "_gen_session", None)
+        if session is None:
+            from generative_session import GenerativeSession
+
+            session = GenerativeSession()
+            self._gen_session = session
+        return session
+
+    def _generative_source_rgb(self):
+        """The pixels the next generation should start from.
+
+        The newest staged result if there is one -- so "generate again"
+        continues the chain rather than restarting from the original -- and
+        otherwise the current render with edits baked in.
+        """
+        session = self._generative_session()
+        source = str(getattr(self, "current_file_path", "") or "")
+        step = session.latest(source) if source else None
+        if step is not None:
+            rgb = self._read_staged_rgb(step.path)
+            if rgb is not None:
+                return rgb
+        return self._ai_mask_source_rgb()
+
+    @staticmethod
+    def _read_staged_rgb(path: str):
+        """Load a staged TIFF back as float RGB 0..1, or None."""
+        try:
+            import cv2
+
+            bgr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            if bgr is None:
+                return None
+            if bgr.ndim == 2:
+                bgr = np.stack([bgr] * 3, axis=-1)
+            rgb = bgr[:, :, :3][:, :, ::-1]
+            return np.ascontiguousarray(rgb.astype(np.float32) / 255.0)
+        except Exception:
+            return None
 
     def _on_generative_source_requested(self) -> None:
         """Hand the Generate tab the exact pixels a request would send.
@@ -22761,9 +22834,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             from PyQt6.QtGui import QImage
 
-            rgb = self._ai_mask_source_rgb()
+            rgb = self._generative_source_rgb()
             if rgb is None:
                 panel.set_generative_source(None, "")
+                panel.set_generative_chain([], "")
                 return
             h, w = rgb.shape[:2]
             buf = np.ascontiguousarray(
@@ -22775,10 +22849,92 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             source = str(getattr(self, "current_file_path", "") or "")
             name = os.path.basename(source) if source else ""
-            caption = f"{name} — {w} × {h}, your current edits baked in"
+            chain = self._generative_session().chain(source) if source else []
+            if chain:
+                caption = (
+                    f"{chain[-1].label} of {name} — {w} × {h}, staged (not saved)"
+                )
+            else:
+                caption = f"{name} — {w} × {h}, your current edits baked in"
             panel.set_generative_source(image, caption.strip(" —"))
+            panel.set_generative_chain(
+                [(s.label, s.instruction) for s in chain], name
+            )
         except Exception:
             panel.set_generative_source(None, "")
+            panel.set_generative_chain([], "")
+
+    def _on_generative_page_active_changed(self, active: bool) -> None:
+        """Keep generative results and the original's edit strictly apart.
+
+        Global and Masks operate on the original file only. A staged result
+        is never fed back into the parametric pipeline -- if the user wants
+        to grade one, they export it and open the exported file, which is a
+        normal image with its own sidecar. So leaving Generate is simply a
+        return to the original render.
+        """
+        self._generative_page_active = bool(active)
+        if active:
+            self._on_generative_source_requested()
+            return
+        session = getattr(self, "_gen_session", None)
+        source = str(getattr(self, "current_file_path", "") or "")
+        if session is not None and source and session.latest(source) is not None:
+            self._show_status(
+                "Back to the original — generated versions are kept on Generate", 4000
+            )
+
+    def _on_generative_export_requested(self) -> None:
+        """Promote the newest staged version to a real file the user names.
+
+        Deliberately a save dialog rather than a silent write next to the
+        original: staging exists so that nothing lands in the folder without
+        being asked for, and picking the destination is the asking.
+        """
+        from PyQt6.QtWidgets import QFileDialog
+
+        panel = getattr(self, "single_image_adjust_panel", None)
+        source = str(getattr(self, "current_file_path", "") or "")
+        session = self._generative_session()
+        if panel is None or not source or session.latest(source) is None:
+            return
+
+        dest, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export generated image",
+            session.suggested_export_path(source),
+            "TIFF image (*.tif *.tiff)",
+        )
+        if not dest:
+            return
+        try:
+            written = session.export(source, dest)
+        except Exception as exc:  # noqa: BLE001
+            panel.set_generative_status(f"Export failed: {exc}")
+            return
+        name = os.path.basename(written)
+        panel.set_generative_status(f"Exported {name}")
+        self._show_status(f"Exported {name}", 5000)
+        # Now that it is a real file, it belongs in the folder listing.
+        self._reveal_generated_file(written)
+
+    def _on_generative_undo_requested(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        source = str(getattr(self, "current_file_path", "") or "")
+        if panel is None or not source:
+            return
+        self._generative_session().undo_last(source)
+        self._on_generative_source_requested()
+        panel.set_generative_status("Removed the newest version.")
+
+    def _on_generative_discard_requested(self) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        source = str(getattr(self, "current_file_path", "") or "")
+        if panel is None or not source:
+            return
+        self._generative_session().discard(source)
+        self._on_generative_source_requested()
+        panel.set_generative_status("Discarded — back to the original.")
 
     def _ask_generative_consent(self, endpoint: str) -> bool:
         from PyQt6.QtWidgets import QMessageBox
@@ -22825,11 +22981,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 panel.set_generative_status("Cancelled.")
             return
 
-        name = os.path.basename(derived_path)
+        # Staged, not saved: no folder listing refresh, no reveal. The result
+        # exists only on the Generate page until the user exports it.
+        session = self._generative_session()
+        step = session.latest(source_path)
+        label = step.label if step is not None else "Result"
         if panel is not None:
-            panel.set_generative_status(f"Created {name}")
-        self._show_status(f"Created {name}", 5000)
-        self._reveal_generated_file(derived_path)
+            panel.set_generative_status(
+                f"{label} ready — Export to save it, or generate again to keep going."
+            )
+        self._show_status(f"{label} staged (not saved)", 5000)
+        self._on_generative_source_requested()
 
     def _reveal_generated_file(self, derived_path: str) -> None:
         """Bring the new file into the current folder listing and select it.
@@ -35356,6 +35518,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         logger = logging.getLogger(__name__)
         t0 = _time.perf_counter()
         logger.info("[CLOSE] Application close event triggered, starting cleanup...")
+
+        # Staged generative results live in a temp dir that is about to be
+        # deleted. Losing unexported work silently would be the one part of
+        # this feature a user could not undo, so it is worth a question --
+        # asked before the window hides, and defaulting to staying open.
+        session = getattr(self, "_gen_session", None)
+        if session is not None and session.has_unexported_work():
+            from PyQt6.QtWidgets import QMessageBox
+
+            answer = QMessageBox.warning(
+                self,
+                "Unexported generated images",
+                "Generated versions you have not exported will be deleted "
+                "when RAWviewer quits.\n\nQuit anyway?",
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Discard,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                event.ignore()
+                return
+        if session is not None:
+            try:
+                session.cleanup()
+            except Exception:
+                logger.warning("[CLOSE] generative staging cleanup failed", exc_info=True)
 
         # Restore display brightness before teardown if Adjust raised it.
         try:

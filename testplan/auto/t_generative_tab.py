@@ -112,9 +112,67 @@ def test_section_header_hidden_on_its_own_page():
     print("  OK   no duplicated section header on the Generate page")
 
 
+def test_versions_block_hidden_until_something_is_staged():
+    p = _panel()
+    p._panel_tabs.set_current(GENERATE)
+    assert not p._gen_chain_wrap.isVisible(), "empty Versions block advertised"
+
+    p.set_generative_chain([("Version 1", "remove the bin")], "020A1358.CR3")
+    assert p._gen_chain_wrap.isVisible()
+    assert "remove the bin" in p._gen_chain_list.text()
+
+    p.set_generative_chain([], "")
+    assert not p._gen_chain_wrap.isVisible(), "Versions block left up after discard"
+    print("  OK   Versions block appears only when versions exist")
+
+
+def test_chain_marks_the_newest_version():
+    """The newest is both the next source and what Export writes."""
+    p = _panel()
+    p.set_generative_chain(
+        [("Version 1", "remove the bin"), ("Version 2", "warm it up")], "x.CR3"
+    )
+    lines = [l for l in p._gen_chain_list.text().splitlines() if l.strip()]
+    assert len(lines) == 2, lines
+    assert not lines[0].startswith("→"), lines[0]
+    assert lines[1].startswith("→"), lines[1]
+    print("  OK   newest version is marked in the chain")
+
+
+def test_leaving_generate_signals_the_host():
+    """Global/Masks always edit the original, so the host is told on exit."""
+    p = _panel()
+    seen = []
+    p.generative_page_active_changed.connect(seen.append)
+    p._panel_tabs.set_current(GENERATE)
+    assert seen and seen[-1] is True, seen
+    p._panel_tabs.set_current(GLOBAL)
+    assert seen[-1] is False, seen
+    p._panel_tabs.set_current(MASKS)
+    assert seen[-1] is False, seen
+    print("  OK   entering/leaving Generate is signalled to the host")
+
+
+def test_staged_lifecycle_buttons_emit():
+    p = _panel()
+    fired = []
+    p.generative_export_requested.connect(lambda: fired.append("export"))
+    p.generative_undo_requested.connect(lambda: fired.append("undo"))
+    p.generative_discard_requested.connect(lambda: fired.append("discard"))
+    p._gen_export_btn.click()
+    p._gen_undo_btn.click()
+    p._gen_discard_btn.click()
+    assert fired == ["export", "undo", "discard"], fired
+    print("  OK   Export / Undo / Discard emit to the host")
+
+
 def main():
     fails = 0
     for fn in (
+        test_versions_block_hidden_until_something_is_staged,
+        test_chain_marks_the_newest_version,
+        test_leaving_generate_signals_the_host,
+        test_staged_lifecycle_buttons_emit,
         test_generate_is_a_third_page,
         test_arriving_asks_the_host_for_the_source,
         test_source_thumbnail_renders_and_clears,

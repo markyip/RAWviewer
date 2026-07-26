@@ -858,6 +858,14 @@ class ImageAdjustPanelWidget(QWidget):
     # Panel wants the current render to show as the source thumbnail; the
     # host replies by calling set_generative_source().
     generative_source_requested = pyqtSignal()
+    # Staged-result lifecycle. Nothing reaches the user's folder until
+    # export; see generative_session.
+    generative_export_requested = pyqtSignal()
+    generative_undo_requested = pyqtSignal()
+    generative_discard_requested = pyqtSignal()
+    # True on arriving at Generate, False on leaving it. Global/Masks always
+    # edit the original, so the host restores the original render on False.
+    generative_page_active_changed = pyqtSignal(bool)
     # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
     mask_gradient_tool_changed = pyqtSignal(str)
     # Selected mask row changed -- the host moves the gradient handles to it.
@@ -3145,6 +3153,11 @@ class ImageAdjustPanelWidget(QWidget):
             # is re-read on arrival rather than cached from the last visit.
             self._refresh_generate_source()
             self._refresh_generate_availability()
+        # Generative work and the parametric edit of the original are kept
+        # apart: Global and Masks always act on the original file, never on a
+        # staged result. Leaving Generate says so, so a user who exits mid-
+        # chain is not left wondering which image the sliders are moving.
+        self.generative_page_active_changed.emit(bool(generate))
 
         # Each page has its own natural scroll extent; carrying the other
         # page's offset over lands mid-content for no reason.
@@ -3686,8 +3699,90 @@ class ImageAdjustPanelWidget(QWidget):
         self._gen_status.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
         col.addWidget(self._gen_status)
 
+        # -- Staged versions -------------------------------------------
+        # Only present once something has been generated: an empty "Versions"
+        # heading on arrival would advertise a list that cannot exist yet.
+        self._gen_chain_wrap = QWidget()
+        chain_col = QVBoxLayout(self._gen_chain_wrap)
+        chain_col.setContentsMargins(0, 0, 0, 0)
+        chain_col.setSpacing(6)
+        chain_col.addWidget(self._mask_rule())
+        chain_col.addWidget(
+            self._mask_section_head("Versions", "not saved yet")
+        )
+
+        self._gen_chain_list = QLabel("")
+        self._gen_chain_list.setWordWrap(True)
+        self._gen_chain_list.setStyleSheet(
+            f"color: {theme.INK_MUTED}; font-size: 10px;"
+        )
+        chain_col.addWidget(self._gen_chain_list)
+
+        warn = QLabel(
+            "These live in a temporary folder and are deleted when you quit. "
+            "Export anything you want to keep."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 9px;")
+        chain_col.addWidget(warn)
+
+        chain_row = QHBoxLayout()
+        chain_row.setSpacing(6)
+        self._gen_export_btn = QPushButton("Export…")
+        self._gen_undo_btn = QPushButton("Undo last")
+        self._gen_discard_btn = QPushButton("Discard all")
+        for btn in (
+            self._gen_export_btn,
+            self._gen_undo_btn,
+            self._gen_discard_btn,
+        ):
+            btn.setObjectName("adjust_db_clear_btn")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            chain_row.addWidget(btn, 1)
+        self._gen_export_btn.setToolTip(
+            "Write the newest version to a file you choose"
+        )
+        self._gen_undo_btn.setToolTip("Throw away the newest version only")
+        self._gen_discard_btn.setToolTip(
+            "Throw away every version and go back to the original"
+        )
+        self._gen_export_btn.clicked.connect(self.generative_export_requested.emit)
+        self._gen_undo_btn.clicked.connect(self.generative_undo_requested.emit)
+        self._gen_discard_btn.clicked.connect(self.generative_discard_requested.emit)
+        chain_col.addLayout(chain_row)
+
+        col.addWidget(self._gen_chain_wrap)
+        self._gen_chain_wrap.setVisible(False)
+
         sect.content_layout.addWidget(container)
         self._refresh_generate_availability()
+
+    def set_generative_chain(self, steps, source_name: str = "") -> None:
+        """Show the staged chain, or hide the whole block when it is empty.
+
+        ``steps`` is a list of (label, instruction) oldest first.
+        """
+        wrap = getattr(self, "_gen_chain_wrap", None)
+        if wrap is None:
+            return
+        if not steps:
+            wrap.setVisible(False)
+            self._gen_chain_list.setText("")
+            return
+        lines = []
+        for i, (label, instruction) in enumerate(steps):
+            text = instruction or "(no instruction)"
+            mark = "→ " if i == len(steps) - 1 else "   "
+            lines.append(f"{mark}{label} — {text}")
+        # The newest is what Generate would build on and what Export writes;
+        # saying so beats making the arrow carry that meaning alone.
+        self._gen_chain_list.setText("\n".join(lines))
+        self._gen_chain_list.setToolTip(
+            "The newest version is the source for the next generation "
+            "and the one Export writes."
+        )
+        wrap.setVisible(True)
 
     def _refresh_generate_availability(self) -> None:
         """Reflect whether an endpoint is configured, without nagging."""
