@@ -59,7 +59,7 @@ _MODELS = {
     "subject": {
         "filename": "birefnet.onnx",
         "url": f"{_REPO_MODEL_BASE}/birefnet.onnx",
-        "sha256": "",
+        "sha256": "5600024376f572a557870a5eb0afb1e5961636bef4e1e22132025467d0f03333",
         "input_size": 1024,
         # ImageNet mean/std, the normalization BiRefNet was trained with.
         "mean": (0.485, 0.456, 0.406),
@@ -69,7 +69,7 @@ _MODELS = {
     "sky": {
         "filename": "skyseg.onnx",
         "url": f"{_REPO_MODEL_BASE}/skyseg.onnx",
-        "sha256": "",
+        "sha256": "ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39",
         "input_size": 320,
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
@@ -78,7 +78,7 @@ _MODELS = {
     "sam_encoder": {
         "filename": "mobilesam_encoder.onnx",
         "url": f"{_REPO_MODEL_BASE}/mobilesam_encoder.onnx",
-        "sha256": "",
+        "sha256": "20deef402855b31222b528f52b04807e41ebe47216ac0e39a0729f43491a0209",
         "input_size": 1024,
         # SAM normalizes with these 0-255-scale constants, not ImageNet's.
         "mean": (123.675 / 255.0, 116.28 / 255.0, 103.53 / 255.0),
@@ -88,7 +88,7 @@ _MODELS = {
     "sam_decoder": {
         "filename": "mobilesam_decoder.onnx",
         "url": f"{_REPO_MODEL_BASE}/mobilesam_decoder.onnx",
-        "sha256": "",
+        "sha256": "22cf85e35d14182f4b4712364264c06b22edbef63f065189586f080ef4e2f325",
         "input_size": 0,  # decoder takes an embedding, not an image
         "label": "Click",
     },
@@ -248,21 +248,37 @@ def release_sessions() -> None:
         _SESSIONS.clear()
 
 
-def _graph_input_size(session, fallback: int) -> int:
-    """Prefer the ONNX graph's own declared spatial size over our config.
+def _graph_input_layout(session, fallback: int) -> tuple:
+    """(layout, size) for a model's image input, read off the ONNX graph.
 
-    Exports vary (1024 vs 1280 BiRefNet, 320 vs 512 U^2-Net), so reading
-    the shape off the graph means swapping in a different export doesn't
-    require a code change. Dynamic axes come back as strings/None and fall
-    through to the configured default.
+    Exports differ in both respects, so this is detected rather than
+    configured -- swapping in a different export should not need a code
+    change:
+
+    * ``"nchw"`` -- ``[1, 3, H, W]``. We resize and normalize (BiRefNet,
+      U^2-Net skyseg). A static H is preferred over our configured default.
+    * ``"hwc"``  -- ``[h, w, 3]``, dynamic, no batch axis. The graph does
+      its own resize/normalize/pad, so it wants a plain 0-255 image
+      (the AnyLabeling-style MobileSAM encoder export).
+
+    Reading shape[2] unconditionally would read the HWC channel count (3)
+    as the spatial size.
     """
     try:
         shape = session.get_inputs()[0].shape
-        if len(shape) == 4 and isinstance(shape[2], int) and shape[2] > 0:
-            return int(shape[2])
+        if len(shape) == 4:
+            if isinstance(shape[2], int) and shape[2] > 0:
+                return "nchw", int(shape[2])
+            return "nchw", fallback
+        if len(shape) == 3:
+            return "hwc", fallback
     except Exception:
         pass
-    return fallback
+    return "nchw", fallback
+
+
+def _graph_input_size(session, fallback: int) -> int:
+    return _graph_input_layout(session, fallback)[1]
 
 
 # ----------------------------------------------------------------------
@@ -420,17 +436,33 @@ class SamPredictor:
         session = _get_session("sam_encoder")
         if session is None:
             return False
-        size = _graph_input_size(session, int(_MODELS["sam_encoder"]["input_size"]))
         spec = _MODELS["sam_encoder"]
+        layout, size = _graph_input_layout(session, int(spec["input_size"]))
         try:
-            padded, scale, unpadded = _sam_resize_longest(rgb, size)
-            normalized = (padded - np.asarray(spec["mean"], dtype=np.float32)) / np.asarray(
-                spec["std"], dtype=np.float32
-            )
-            tensor = np.ascontiguousarray(
-                normalized.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
-            )
-            outputs = session.run(None, {session.get_inputs()[0].name: tensor})
+            if layout == "hwc":
+                # The graph resizes/normalizes/pads internally and wants a
+                # plain 0-255 image. We still downscale to the longest side
+                # ourselves: it is the same result far cheaper than pushing
+                # a 40MP frame through the graph, and it makes ``scale``
+                # (needed to map clicks) explicit rather than implied.
+                import cv2
+
+                src = _to_float_rgb(rgb) * 255.0
+                h, w = src.shape[:2]
+                scale = float(size) / float(max(h, w))
+                nh, nw = int(round(h * scale)), int(round(w * scale))
+                resized = cv2.resize(src, (nw, nh), interpolation=cv2.INTER_AREA)
+                unpadded = (nh, nw)
+                feed = np.ascontiguousarray(resized.astype(np.float32))
+            else:
+                padded, scale, unpadded = _sam_resize_longest(rgb, size)
+                normalized = (
+                    padded - np.asarray(spec["mean"], dtype=np.float32)
+                ) / np.asarray(spec["std"], dtype=np.float32)
+                feed = np.ascontiguousarray(
+                    normalized.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
+                )
+            outputs = session.run(None, {session.get_inputs()[0].name: feed})
         except Exception:
             logger.warning("[AIMASK] SAM encoder failed", exc_info=True)
             return False
