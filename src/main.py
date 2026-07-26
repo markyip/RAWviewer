@@ -9019,6 +9019,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
+            self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
+                self._on_mask_gradient_tool_changed
+            )
             self.single_image_adjust_panel.mask_ai_requested.connect(
                 self._on_mask_ai_requested
             )
@@ -9117,6 +9120,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if editing_features_enabled():
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
+                    self.gpu_view.gradientDragged.connect(self._on_gradient_dragged)
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
@@ -22611,6 +22615,89 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if buf is not None and hasattr(buf, "shape") and getattr(buf, "ndim", 0) == 3:
             return buf
         return None
+
+    def _on_mask_gradient_tool_changed(self, kind: str) -> None:
+        """Arm/disarm gradient-drag mode on the canvas."""
+        gv = getattr(self, "gpu_view", None)
+        if gv is None:
+            return
+        if hasattr(gv, "set_gradient_drag_kind"):
+            gv.set_gradient_drag_kind(kind or None)
+        if kind:
+            self._gradient_drag_layer_index = None
+            self._show_status(
+                "Drag across the photo to place the gradient."
+                if kind == "linear"
+                else "Drag a box on the photo to place the gradient.",
+                0,
+            )
+        else:
+            self._gradient_drag_layer_index = None
+
+    def _on_gradient_dragged(
+        self, kind: str, x0: float, y0: float, x1: float, y1: float, is_end: bool
+    ) -> None:
+        """Create the gradient layer on the first drag sample, then update it.
+
+        One layer per drag, not one per sample: the first move creates it and
+        every later move rewrites its params, so dragging previews the real
+        mask live and the whole gesture is a single undoable edit rather than
+        a hundred stacked layers.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        if panel is None or mask_shape is None:
+            return
+
+        from raw_mask_shapes import params_from_drag
+
+        params = params_from_drag(kind, x0, y0, x1, y1)
+        index = getattr(self, "_gradient_drag_layer_index", None)
+
+        if index is None:
+            import numpy as np
+
+            from raw_mask_layers import MaskLayer, MaskLayerStack
+
+            stack = panel.mask_layer_stack()
+            if stack is None:
+                stack = MaskLayerStack([])
+                panel.set_mask_layer_stack(stack)
+            layer = MaskLayer(
+                np.zeros((128, 128), dtype=np.float32),
+                kind=kind,
+                params=params,
+                name="Linear Gradient" if kind == "linear" else "Radial Gradient",
+            )
+            stack.layers.append(layer)
+            index = len(stack.layers) - 1
+            self._gradient_drag_layer_index = index
+            # set_mask_layer_stack rebuilds the row list and re-syncs the
+            # sliders -- the same route the AI mask path uses to publish a new
+            # layer, rather than a second way of doing it.
+            panel.set_mask_layer_stack(stack)
+            panel.select_mask_index(index)
+        else:
+            stack = panel.mask_layer_stack()
+            if stack is None or not (0 <= index < len(stack.layers)):
+                return
+            layer = stack.layers[index]
+            layer.params = params
+            layer.touch()
+
+        self._sync_mask_layer_overlay()
+        # Same publish path as every other mask edit: hand the adjustments back
+        # so the preview re-renders and the sidecar records the change.
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+
+        if is_end:
+            self._gradient_drag_layer_index = None
+            # The tool stays armed so a second gradient needs no second click
+            # on the button, matching how the brush tools behave.
+            self._show_status(
+                "Gradient placed. Adjust its sliders, or drag again for another.",
+                3000,
+            )
 
     def _on_mask_ai_requested(self, kind: str) -> None:
         """One-shot AI mask (Subject / Sky) -> a new mask layer."""

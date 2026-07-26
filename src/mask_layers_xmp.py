@@ -27,7 +27,17 @@ from typing import Optional
 
 import numpy as np
 
-from raw_mask_layers import MaskLayer, MaskLayerStack, SUPPORTED_ADJUSTMENT_KEYS, _hsl_keys
+from raw_mask_layers import (
+    SUPPORTED_ADJUSTMENT_KEYS,
+    MaskLayer,
+    MaskLayerStack,
+    _hsl_keys,
+)
+from raw_mask_shapes import PARAMETRIC_KINDS
+
+# Reference resolution for a deserialized parametric layer's placeholder
+# alpha; see the comment at its construction below.
+_SHAPE_REF_DIM = 128
 
 
 def _encode_alpha(alpha: np.ndarray) -> str:
@@ -67,6 +77,29 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     for layer in stack.layers:
         if layer.is_empty and not layer.adjustments:
             continue
+        # A parametric mask stores its geometry, not its pixels: a few dozen
+        # bytes instead of a frame-sized PNG, exact at any resolution, and
+        # still re-draggable after a reload. Encoding its generated alpha
+        # would throw all three away.
+        if getattr(layer, "is_parametric", False):
+            entries.append(
+                {
+                    "kind": layer.kind,
+                    "params": {
+                        k: round(float(v), 5) for k, v in (layer.params or {}).items()
+                    },
+                    "adjustments": {
+                        k: round(float(v), 4)
+                        for k, v in layer.adjustments.items()
+                        if k in _all_keys() and abs(float(v)) > 1e-4
+                    },
+                    "name": layer.name,
+                    "enabled": bool(layer.enabled),
+                    "invert": bool(layer.invert),
+                    "blend": layer.blend,
+                }
+            )
+            continue
         alpha_serial = _encode_alpha(layer.alpha)
         if not alpha_serial:
             continue
@@ -103,22 +136,44 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        alpha = _decode_alpha(str(entry.get("alpha", "")))
-        if alpha is None:
-            continue
         adjustments = entry.get("adjustments") or {}
         if not isinstance(adjustments, dict):
             adjustments = {}
-        layers.append(
-            MaskLayer(
-                alpha,
-                adjustments={k: float(v) for k, v in adjustments.items()},
-                name=str(entry.get("name", "") or ""),
-                enabled=bool(entry.get("enabled", True)),
-                invert=bool(entry.get("invert", False)),
-                blend=str(entry.get("blend", "add") or "add"),
+        common = {
+            "adjustments": {k: float(v) for k, v in adjustments.items()},
+            "name": str(entry.get("name", "") or ""),
+            "enabled": bool(entry.get("enabled", True)),
+            "invert": bool(entry.get("invert", False)),
+            "blend": str(entry.get("blend", "add") or "add"),
+        }
+
+        kind = str(entry.get("kind", "") or "brush")
+        if kind in PARAMETRIC_KINDS:
+            params = entry.get("params") or {}
+            if not isinstance(params, dict):
+                continue
+            # A parametric layer's alpha buffer is never read -- alpha_at
+            # generates from params at the caller's resolution. But its SHAPE is
+            # the coordinate space bbox() reports in, which the compositor then
+            # scales to the frame, so it cannot be 1x1: a radial's analytic
+            # bbox would quantise to the whole frame and give up the
+            # bbox-limited compute that keeps a mask tick inside the preview
+            # budget. _SHAPE_REF_DIM is small enough to be free (64 KB) and
+            # fine enough that the scaled bbox lands within a couple of pixels.
+            layers.append(
+                MaskLayer(
+                    np.zeros((_SHAPE_REF_DIM, _SHAPE_REF_DIM), dtype=np.float32),
+                    kind=kind,
+                    params={k: float(v) for k, v in params.items()},
+                    **common,
+                )
             )
-        )
+            continue
+
+        alpha = _decode_alpha(str(entry.get("alpha", "")))
+        if alpha is None:
+            continue
+        layers.append(MaskLayer(alpha, **common))
     if not layers:
         return None
     return MaskLayerStack(layers=layers)

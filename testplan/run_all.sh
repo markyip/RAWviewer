@@ -72,6 +72,7 @@ run "transform distortion + anamorphic" testplan/auto/t_transform_distortion.py
 run "tap-to-paint + eraser reach" testplan/auto/t_tap_to_paint.py
 run "mask layers (Phase 0 perf spike)" testplan/auto/t_mask_layers.py
 run "masks tab cleanup + invert scope" testplan/auto/t_masks_ui_cleanup.py
+run "mask gradients (linear/radial)" testplan/auto/t_mask_gradients.py
 run "HE/HE* NEF editing" testplan/auto/t_he_nef_editing.py
 run "mask layers drag-time throttling" testplan/auto/t_mask_layers_drag_throttle.py
 run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py

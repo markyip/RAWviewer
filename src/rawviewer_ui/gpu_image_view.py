@@ -476,6 +476,11 @@ class GpuImageView(QGraphicsView):
     # host's cue to edge-snap the touched region and trigger the exact
     # (worker-thread) re-render.
     dodgeBurnStroke = pyqtSignal(QPointF, float, bool)
+    # Gradient mask drag: kind, x0, y0, x1, y1 (all normalised 0..1 to the
+    # image), is_end. Normalised in the view because this is where the image
+    # extent is known -- the host would otherwise have to reverse-engineer it
+    # from whichever buffer tier happens to be current.
+    gradientDragged = pyqtSignal(str, float, float, float, float, bool)
     # Mouse left the photo (or the view) while a brush tool was armed — host
     # should disarm Dodge/Burn/Eraser/Heal so the tool does not stay sticky.
     brushToolLeftImage = pyqtSignal()
@@ -1752,6 +1757,61 @@ class GpuImageView(QGraphicsView):
             # design (accepted trade-off) -- stamp at full strength.
             self.dodgeBurnStroke.emit(pt, 1.0, False)
 
+    def set_gradient_drag_kind(self, kind: str | None) -> None:
+        """Arm gradient-drag mode for "linear"/"radial", or None to disarm.
+
+        Deliberately separate from the brush gate: a gradient is defined by one
+        press-drag-release, not by accumulated stamps, so sharing the brush's
+        stroke plumbing would mean teaching every stamp path to ignore it.
+        """
+        self._gradient_kind = kind or None
+        self._gradient_origin = None
+        if kind:
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def gradient_drag_kind(self) -> str | None:
+        return getattr(self, "_gradient_kind", None)
+
+    def _normalised_image_point(self, view_pos) -> tuple:
+        pt = self._clamped_scene_point(view_pos)
+        w = max(1, int(getattr(self, "_img_w", 0) or 1) - 1)
+        h = max(1, int(getattr(self, "_img_h", 0) or 1) - 1)
+        return (
+            max(0.0, min(1.0, pt.x() / float(w))),
+            max(0.0, min(1.0, pt.y() / float(h))),
+        )
+
+    def _gradient_press(self, view_pos) -> bool:
+        if not self.gradient_drag_kind() or not self._has_pixmap:
+            return False
+        if not self._view_pos_on_image(view_pos):
+            return False
+        self._gradient_origin = self._normalised_image_point(view_pos)
+        return True
+
+    def _gradient_move(self, view_pos) -> bool:
+        origin = getattr(self, "_gradient_origin", None)
+        if origin is None or not self.gradient_drag_kind():
+            return False
+        x1, y1 = self._normalised_image_point(view_pos)
+        self.gradientDragged.emit(
+            self.gradient_drag_kind(), origin[0], origin[1], x1, y1, False
+        )
+        return True
+
+    def _gradient_release(self, view_pos) -> bool:
+        origin = getattr(self, "_gradient_origin", None)
+        if origin is None or not self.gradient_drag_kind():
+            return False
+        x1, y1 = self._normalised_image_point(view_pos)
+        self._gradient_origin = None
+        self.gradientDragged.emit(
+            self.gradient_drag_kind(), origin[0], origin[1], x1, y1, True
+        )
+        return True
+
     def begin_latched_paint(self) -> None:
         """Tap-to-paint: a brush hotkey tap armed the tool and latched it on.
 
@@ -2088,6 +2148,13 @@ class GpuImageView(QGraphicsView):
 
     # ------------------------------------------------------------------ events
     def mousePressEvent(self, event) -> None:
+        # Gradient drag is checked first: it owns the whole press-drag-release
+        # while armed, and must not also be interpreted as a brush stamp or a
+        # pan.
+        if event.button() == Qt.MouseButton.LeftButton and self.gradient_drag_kind():
+            if self._gradient_press(event.position().toPoint()):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and self._dodge_burn_mode:
             if self._has_pixmap:
                 view_pos = event.position().toPoint()
@@ -2137,6 +2204,10 @@ class GpuImageView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        if getattr(self, "_gradient_origin", None) is not None:
+            if self._gradient_move(event.position().toPoint()):
+                event.accept()
+                return
         if self._dodge_burn_mode and self._has_pixmap:
             view_pos = event.position().toPoint()
             button_painting = (event.buttons() & Qt.MouseButton.LeftButton) and getattr(
@@ -2222,6 +2293,12 @@ class GpuImageView(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and getattr(
+            self, "_gradient_origin", None
+        ) is not None:
+            if self._gradient_release(event.position().toPoint()):
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton and getattr(
             self, "_dodge_burn_painting", False
         ):

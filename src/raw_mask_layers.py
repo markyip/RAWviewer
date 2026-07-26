@@ -194,22 +194,61 @@ class MaskLayer:
     enabled: bool = True
     invert: bool = False
     blend: str = "add"  # "add" | "subtract" -- reserved for Phase 2 stack composability
+    # Parametric shapes (see raw_mask_shapes). "brush" keeps ``alpha`` as the
+    # source of truth; a gradient keeps ``params`` as the source of truth and
+    # regenerates alpha at whatever resolution is asked for, which is what
+    # makes it re-draggable after reload and resolution-independent between
+    # the preview and export bases.
+    kind: str = "brush"
+    params: dict = field(default_factory=dict)
     version: int = field(default=0, compare=False, repr=False)
     _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _bbox_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
+    _shape_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def empty(cls, height: int, width: int, **kwargs) -> "MaskLayer":
         return cls(np.zeros((height, width), dtype=np.float32), **kwargs)
 
     def touch(self) -> None:
-        """Call after any in-place mutation of ``alpha`` to invalidate caches."""
+        """Call after any in-place mutation of ``alpha`` or ``params``."""
         self.version += 1
         self._empty_cache = None
         self._bbox_cache = None
+        self._shape_alpha_cache = None
+
+    @property
+    def is_parametric(self) -> bool:
+        from raw_mask_shapes import PARAMETRIC_KINDS
+
+        return self.kind in PARAMETRIC_KINDS
+
+    def alpha_at(self, height: int, width: int) -> np.ndarray:
+        """This layer's alpha at a given resolution.
+
+        A brush layer resizes its buffer; a parametric layer regenerates from
+        params, which is exact at any size rather than an interpolation of a
+        buffer authored at some other one. Cached per (version, shape) because
+        the compositor asks for the same size every tick.
+        """
+        if not self.is_parametric:
+            return resize_alpha_to(self.alpha, height, width)
+        cached = self._shape_alpha_cache
+        if cached is not None and cached[0] == (self.version, height, width):
+            return cached[1]
+        from raw_mask_shapes import generate_alpha
+
+        generated = generate_alpha(self.kind, self.params, height, width)
+        self._shape_alpha_cache = ((self.version, height, width), generated)
+        return generated
 
     def effective_alpha(self) -> np.ndarray:
         return (1.0 - self.alpha) if self.invert else self.alpha
+
+    def effective_alpha_at(self, height: int, width: int) -> np.ndarray:
+        """``alpha_at`` with ``invert`` applied -- what the compositor blends."""
+        a = self.alpha_at(height, width)
+        return (1.0 - a) if self.invert else a
 
     @property
     def is_empty(self) -> bool:
@@ -218,7 +257,12 @@ class MaskLayer:
         cached = self._empty_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        result = not bool(np.any(self.alpha > 1e-4))
+        if self.is_parametric:
+            # Its coverage comes from params, not the (unused) alpha buffer --
+            # testing alpha would call every gradient empty and skip it.
+            result = False
+        else:
+            result = not bool(np.any(self.alpha > 1e-4))
         self._empty_cache = (self.version, result)
         return result
 
@@ -249,7 +293,14 @@ class MaskLayer:
         cached = self._bbox_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        result = _nonzero_bbox(self.alpha)
+        if self.is_parametric:
+            from raw_mask_shapes import alpha_bbox
+
+            h, w = self.alpha.shape[:2]
+            y0, y1, x0, x1 = alpha_bbox(self.kind, self.params, h, w)
+            result = (y0, y1, x0, x1)
+        else:
+            result = _nonzero_bbox(self.alpha)
         self._bbox_cache = (self.version, result)
         return result
 
@@ -260,9 +311,15 @@ class MaskLayer:
             f"{k}={self.adjustments.get(k, 0.0):.4f}" for k in _all_fingerprint_keys()
         )
         enabled_sig = int(self.enabled)
+        shape_sig = ""
+        if self.is_parametric:
+            shape_sig = ":" + self.kind + ":" + ",".join(
+                f"{k}={float(self.params.get(k, 0.0)):.5f}"
+                for k in sorted(self.params)
+            )
         return (
             f"mem:{int(h)}x{int(w)}:v{int(self.version)}:inv{int(self.invert)}"
-            f":en{enabled_sig}:bl{self.blend}:{adj_sig}"
+            f":en{enabled_sig}:bl{self.blend}{shape_sig}:{adj_sig}"
         )
 
 
@@ -349,7 +406,11 @@ def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
     ry0, ry1, rx0, rx1 = y0 - ey0, y1 - ey0, x0 - ex0, x1 - ex0
     adjusted_region = adjusted_padded[ry0:ry1, rx0:rx1]
 
-    alpha_full = resize_alpha_to(layer.effective_alpha(), h, w)
+    # effective_alpha_at, not resize(effective_alpha()): a parametric layer
+    # generates exactly at the target resolution, so the same gradient lands
+    # identically on the half-res preview and the full-res export instead of
+    # being interpolated up from whatever size it was authored at.
+    alpha_full = layer.effective_alpha_at(h, w)
     alpha_region = alpha_full[y0:y1, x0:x1]
     tight_region = img[y0:y1, x0:x1]
     blended = tight_region * (1.0 - alpha_region[..., np.newaxis]) + adjusted_region * alpha_region[..., np.newaxis]

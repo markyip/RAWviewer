@@ -750,6 +750,8 @@ class ImageAdjustPanelWidget(QWidget):
     # resolution and the RGB the model runs on), plus inference is slow
     # enough to need a worker thread and a busy state.
     mask_ai_requested = pyqtSignal(str)
+    # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
+    mask_gradient_tool_changed = pyqtSignal(str)
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -3518,6 +3520,40 @@ class ImageAdjustPanelWidget(QWidget):
         )
         col.addLayout(ai_row)
 
+        # Gradient tools. Armed, not one-shot: the shape comes from a drag on
+        # the photo (Lightroom/darktable both work this way -- a gradient
+        # placed without seeing the image is a guess), so the button arms the
+        # drag and the canvas defines the geometry.
+        grad_row = QHBoxLayout()
+        grad_row.setSpacing(6)
+        self._mask_linear_btn = QPushButton("Linear")
+        self._mask_radial_btn = QPushButton("Radial")
+        for btn, tip in (
+            (
+                self._mask_linear_btn,
+                "Linear gradient — drag across the photo to set the direction "
+                "and how far the fade runs.\nDrag down from the top for a sky.",
+            ),
+            (
+                self._mask_radial_btn,
+                "Radial gradient — drag a box; the ellipse is inscribed in it.\n"
+                "Full strength at the centre, fading to the edge.",
+            ),
+        ):
+            btn.setObjectName("adjust_db_btn")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            btn.setToolTip(tip)
+            grad_row.addWidget(btn, 1)
+        self._mask_linear_btn.toggled.connect(
+            lambda on: self._on_gradient_tool_toggled(self._mask_linear_btn, "linear", on)
+        )
+        self._mask_radial_btn.toggled.connect(
+            lambda on: self._on_gradient_tool_toggled(self._mask_radial_btn, "radial", on)
+        )
+        col.addLayout(grad_row)
+
         # Per-mask parameters, hidden wholesale until a mask exists. Showing a
         # dozen greyed-out sliders reads as broken rather than as "nothing
         # selected yet", and it buried Add Mask under controls that could not
@@ -3744,7 +3780,54 @@ class ImageAdjustPanelWidget(QWidget):
             # pipeline -- only one may be armed.
             if self.dodge_burn_mode() is not None:
                 self.set_dodge_burn_mode(None)
+            # Same reason in the other direction: a gradient drag also starts
+            # with a press on the photo.
+            if self.gradient_tool() is not None:
+                self.disarm_gradient_tools()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
+
+    def _on_gradient_tool_toggled(self, btn, kind: str, checked: bool) -> None:
+        """Exclusive with the other gradient tool and with the brush tools."""
+        if self._mask_block:
+            return
+        self._mask_block = True
+        try:
+            if checked:
+                other = (
+                    self._mask_radial_btn if kind == "linear" else self._mask_linear_btn
+                )
+                other.setChecked(False)
+                # One brush pipeline, one armed tool: a gradient drag and a
+                # paint stroke both start with a press on the photo.
+                for b in (
+                    self._mask_paint_btn,
+                    self._mask_erase_btn,
+                    self._mask_ai_click_btn,
+                ):
+                    b.setChecked(False)
+        finally:
+            self._mask_block = False
+        self.mask_gradient_tool_changed.emit(kind if checked else "")
+
+    def gradient_tool(self) -> str | None:
+        for btn, kind in (
+            (getattr(self, "_mask_linear_btn", None), "linear"),
+            (getattr(self, "_mask_radial_btn", None), "radial"),
+        ):
+            if btn is not None and btn.isChecked():
+                return kind
+        return None
+
+    def disarm_gradient_tools(self) -> None:
+        self._mask_block = True
+        try:
+            for name in ("_mask_linear_btn", "_mask_radial_btn"):
+                btn = getattr(self, name, None)
+                if btn is not None:
+                    btn.setChecked(False)
+        finally:
+            self._mask_block = False
+        self.mask_gradient_tool_changed.emit("")
 
     def _on_mask_invert_toggled(self, checked: bool) -> None:
         if self._mask_block:
