@@ -344,14 +344,26 @@ def test_overlay_is_not_gated_on_an_armed_brush():
 
 def test_masks_tab_shows_how_many_masks():
     p = _panel()
-    assert p._panel_tabs._buttons[1].text() == "MASKS", "empty state should carry no count"
+    tabs = p._panel_tabs
+    assert tabs.badge_text(1) == "", "empty state should carry no count"
+    # The label itself must stay intact -- the chip is a separate widget, and
+    # an earlier version reserved its space with trailing spaces, which Qt
+    # trims, so the chip printed over the last letters ("MAS 3").
+    assert tabs._buttons[1].text() == "MASKS", tabs._buttons[1].text()
+
     p.set_mask_layer_stack(MaskLayerStack([
         _painted_layer(name="a"), _painted_layer(name="b"),
     ]))
-    assert p._panel_tabs._buttons[1].text().endswith("2"), (
-        f"Masks tab does not show the count: {p._panel_tabs._buttons[1].text()!r}"
+    assert tabs.badge_text(1) == "2", f"count chip reads {tabs.badge_text(1)!r}"
+    assert tabs._buttons[1].text() == "MASKS", (
+        f"the chip corrupted the tab label: {tabs._buttons[1].text()!r}"
     )
-    print("  OK   the Masks tab shows how many masks the photo has")
+    # And the button must be wide enough to hold both.
+    metrics = tabs._buttons[1].fontMetrics()
+    assert tabs._buttons[1].minimumWidth() > metrics.horizontalAdvance("MASKS"), (
+        "no room reserved for the count chip"
+    )
+    print("  OK   the Masks tab shows how many masks, without eating its label")
 
 
 def main() -> int:

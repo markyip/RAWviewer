@@ -328,7 +328,7 @@ class _LooksRowWidget(QWidget):
 
 
 class PanelTabBar(QWidget):
-    """Flat underline tab bar for the Adjust panel's top-level pages.
+    """Top-level page selector for the Adjust panel.
 
     Not a QTabWidget: that owns its own page stack and draws OS-native tab
     chrome that fights the panel's flat styling. This is a row of checkable
@@ -336,7 +336,22 @@ class PanelTabBar(QWidget):
     widgets in the existing scroll area, so scroll position, section
     collapse state and every existing widget reference survive unchanged.
 
-    Selected tab is INK with a 2px EMBER underline; the rest are INK_MUTED.
+    Styling: the row sits on a 1px LINE rule, and the active tab's 2px EMBER
+    segment lands ON that rule rather than floating below it, so the rule
+    reads as one continuous line with a lit section -- a switch on an
+    instrument, not a browser tab. That flushness is the whole detail: it
+    only works while the button's bottom edge and the rule share a baseline,
+    which is why the wrapper carries no bottom padding.
+
+    Type is small, heavily tracked and uppercase, matching the section
+    headers below it, so the panel reads as one typographic system rather
+    than a navigation bar bolted onto a list of controls.
+
+    Colour follows theme.py's rule that EMBER means "currently active", so
+    it appears exactly once here -- on the lit segment. Everything else is
+    carried by weight and value: INK for the active label, INK_FAINT for the
+    rest, which is a wide enough gap to read at a glance without a second
+    accent competing with the photo.
     """
 
     changed = pyqtSignal(int)
@@ -348,7 +363,8 @@ class PanelTabBar(QWidget):
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(18)
+        row.setSpacing(24)
+        self._badges: list[QLabel] = []
 
         self._labels = [label.upper() for label in labels]
         for index, label in enumerate(labels):
@@ -364,10 +380,10 @@ class PanelTabBar(QWidget):
                     border: none;
                     border-bottom: 2px solid transparent;
                     color: {theme.INK_FAINT};
-                    font-size: 11px;
+                    font-size: 10px;
                     font-weight: 700;
-                    letter-spacing: 1px;
-                    padding: 8px 2px 7px 2px;
+                    letter-spacing: 1.6px;
+                    padding: 9px 1px 8px 1px;
                     text-align: left;
                 }}
                 QPushButton#adjust_tab_btn:hover {{
@@ -380,6 +396,17 @@ class PanelTabBar(QWidget):
                 """
             )
             btn.clicked.connect(lambda _checked=False, i=index: self.set_current(i))
+
+            # The count rides inside the button so the whole thing stays one
+            # target, and is a separate label so it can be typed as data --
+            # tabular, unspaced, quieter -- instead of inheriting the tab's
+            # tracked display setting and reading as part of the word.
+            badge = QLabel("", btn)
+            badge.setObjectName("adjust_tab_badge")
+            badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            badge.hide()
+            self._badges.append(badge)
+
             row.addWidget(btn)
             self._buttons.append(btn)
 
@@ -388,11 +415,74 @@ class PanelTabBar(QWidget):
             self._buttons[0].setChecked(True)
 
     def set_badge(self, index: int, text: str) -> None:
-        """Append a count to a tab's label, or clear it with ""."""
+        """Set a tab's count chip, or clear it with ""."""
         if not (0 <= index < len(self._buttons)):
             return
-        base = self._labels[index]
-        self._buttons[index].setText(f"{base}  {text}" if text else base)
+        badge = self._badges[index]
+        if not text:
+            badge.hide()
+            self._buttons[index].setText(self._labels[index])
+            self._layout_badge(index)
+            return
+        badge.setText(text)
+        badge.show()
+        self._buttons[index].setText(self._labels[index])
+        self._layout_badge(index)
+
+    def badge_text(self, index: int) -> str:
+        """The count currently shown on a tab ("" when none)."""
+        if not (0 <= index < len(self._badges)):
+            return ""
+        badge = self._badges[index]
+        return badge.text() if badge.isVisible() else ""
+
+    def _badge_style(self, index: int) -> None:
+        active = index == self._current
+        # Not EMBER even when active: theme.py reserves that for the one lit
+        # element, and a count is data, not the thing you are editing.
+        colour = theme.INK_MUTED if active else theme.INK_FAINT
+        self._badges[index].setStyleSheet(
+            f"""
+            QLabel#adjust_tab_badge {{
+                color: {colour};
+                background: {theme.LINE_SOFT};
+                border-radius: 3px;
+                font-size: 9px;
+                font-weight: 700;
+                letter-spacing: 0px;
+                padding: 1px 4px 1px 4px;
+            }}
+            """
+        )
+
+    _BADGE_GAP = 7
+
+    def _layout_badge(self, index: int) -> None:
+        badge = self._badges[index]
+        btn = self._buttons[index]
+        if not badge.isVisible():
+            btn.setMinimumWidth(0)
+            return
+        self._badge_style(index)
+        badge.adjustSize()
+        # Reserve the chip's width by measuring, not by padding the label with
+        # spaces: Qt trims trailing whitespace when it computes a button's
+        # size hint, so the chip landed on top of the last letters ("MAS 3").
+        metrics = btn.fontMetrics()
+        text_w = metrics.horizontalAdvance(self._labels[index])
+        btn.setMinimumWidth(text_w + self._BADGE_GAP + badge.width() + 4)
+        # Optically centred against the cap height of a 10px uppercase label,
+        # which sits above the button's vertical centre once the 2px rule and
+        # its padding are taken off the bottom.
+        badge.move(
+            btn.width() - badge.width() - 1,
+            max(0, (btn.height() - badge.height()) // 2 - 1),
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        for i in range(len(self._buttons)):
+            self._layout_badge(i)
 
     def current(self) -> int:
         return self._current
@@ -409,6 +499,8 @@ class PanelTabBar(QWidget):
         if index == self._current:
             return
         self._current = index
+        for i in range(len(self._buttons)):
+            self._layout_badge(i)
         self.changed.emit(index)
 
 
@@ -1048,11 +1140,15 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(reset_btn)
         layout.addLayout(header)
 
-        hint = QLabel(
-            "E / Esc — close · D/B/X/H hold to paint · "
-            "two-finger scroll = Brush Size"
+        hint = QLabel("E closes · hold D B X H to paint · scroll = size")
+        # 9px and faint on purpose: it is discoverability for shortcuts, not
+        # content. At 10px across two wrapped lines it was the largest text
+        # block in the header and outweighed the controls underneath. The full
+        # detail lives in this label's tooltip, which is where someone who
+        # actually wants it will look.
+        hint.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.2px;"
         )
-        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
         hint.setWordWrap(True)
         hint.setToolTip(
             "While Adjust is open:\n"
@@ -1116,7 +1212,9 @@ class ImageAdjustPanelWidget(QWidget):
             """
         )
         tabs_wrap_layout = QVBoxLayout(tabs_wrap)
-        tabs_wrap_layout.setContentsMargins(0, 2, 0, 0)
+        # No bottom padding: the active tab's ember segment has to land on the
+        # wrapper's rule, not above it, or the line reads as two things.
+        tabs_wrap_layout.setContentsMargins(0, 4, 0, 0)
         tabs_wrap_layout.setSpacing(0)
         tabs_wrap_layout.addWidget(self._panel_tabs)
         layout.addWidget(tabs_wrap)
@@ -3460,8 +3558,20 @@ class ImageAdjustPanelWidget(QWidget):
                 color: {theme.INK};
                 font-size: 11px;
             }}
+            QListWidget::item {{
+                padding: 3px 4px 3px 7px;
+                border-left: 2px solid transparent;
+            }}
+            QListWidget::item:hover {{
+                background-color: {theme.RAISED};
+            }}
             QListWidget::item:selected {{
-                background-color: {theme.EMBER_DIM};
+                /* A lit leading edge, not a filled block: EMBER marks the
+                   active thing the same way it does on the tab rule, so the
+                   panel reads as one system and the two never compete for
+                   the same glance. */
+                background-color: {theme.RAISED};
+                border-left: 2px solid {theme.EMBER};
                 color: {theme.INK};
             }}
             """
