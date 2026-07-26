@@ -2307,6 +2307,11 @@ _AI_MASK_MIN_COVERAGE = 0.002
 # under a button called "Smart Object" is a puzzle the user has to solve.
 _AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
 
+# Mean absolute alpha difference below which two masks are "the same mask".
+# Generous enough to survive the sidecar's 8-bit round trip (1/255 = 0.004),
+# tight enough that a few brush strokes read as a genuine edit.
+_AI_MASK_SAME_TOLERANCE = 0.01
+
 HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "1").strip().lower() in (
     "1",
     "true",
@@ -22862,12 +22867,53 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
+        # Pressing Smart Object twice does not find "the next" object: the
+        # model is a saliency segmenter with no notion of instances and no
+        # memory, so it returns a byte-identical matte every time. Without
+        # this the second press silently stacked a duplicate layer whose
+        # adjustments then compound on the same pixels.
+        existing = self._find_equivalent_mask_layer(result)
+        if existing is not None:
+            panel.select_mask_index(existing)
+            self._sync_mask_layer_overlay()
+            self._show_status(
+                f"That {kind} is already masked — selected it. "
+                "Use AI Selection to pick a specific object.",
+                4000,
+            )
+            return
+
         self._add_mask_layer_from_alpha(result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()))
         self._show_status(
             f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
             "Use Paint / Erase to refine it.",
             3500,
         )
+
+    def _find_equivalent_mask_layer(self, alpha) -> Optional[int]:
+        """Index of an existing layer already covering the same pixels, or None.
+
+        Compared on mean absolute difference rather than exact equality: a
+        layer the user has since brushed is no longer the model's output and
+        SHOULD be treated as a different mask, but one that merely round-
+        tripped through the sidecar's 8-bit alpha is the same mask and must
+        not be duplicated.
+        """
+        import numpy as np
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        for index, layer in enumerate(getattr(stack, "layers", []) or []):
+            if getattr(layer, "is_parametric", False) or not layer.enabled:
+                continue
+            try:
+                other = layer.alpha
+                if other.shape != alpha.shape:
+                    continue
+                if float(np.abs(other - alpha).mean()) <= _AI_MASK_SAME_TOLERANCE:
+                    return index
+            except Exception:
+                continue
+        return None
 
     def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True):
         """Wrap a model-produced alpha in a MaskLayer and push it on the stack.

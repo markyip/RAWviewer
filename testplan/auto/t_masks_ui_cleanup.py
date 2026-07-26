@@ -390,6 +390,47 @@ def test_masks_tab_shows_how_many_masks():
     print("  OK   the Masks tab shows how many masks, without eating its label")
 
 
+def test_repeating_smart_object_does_not_stack_a_duplicate():
+    """It repeats itself, so a second press must not add a second layer.
+
+    Smart Object is a saliency segmenter: no instances, no memory, so the
+    same photo returns a byte-identical matte every time (verified: three
+    presses, max abs difference 0.0). Pressing it again therefore cannot
+    find "the next" object -- and silently stacking the identical mask would
+    compound its adjustments on the same pixels.
+    """
+    src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
+    )
+    text = open(src, encoding="utf-8").read()
+    assert "_find_equivalent_mask_layer" in text, "no duplicate guard for AI masks"
+    start = text.index("def _on_ai_mask_finished")
+    end = text.index("\n    def ", start + 1)
+    body = text[start:end]
+    assert "_find_equivalent_mask_layer" in body, (
+        "the duplicate guard is not consulted before adding an AI mask"
+    )
+    assert "already masked" in body, "no message explaining why nothing was added"
+    assert "AI Selection" in body, (
+        "the message does not point at the tool that CAN pick another object"
+    )
+    print("  OK   a repeated AI mask selects the existing layer instead of stacking")
+
+
+def test_a_brushed_mask_is_not_treated_as_the_same_mask():
+    """Tolerance must not swallow a real edit."""
+    src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
+    )
+    text = open(src, encoding="utf-8").read()
+    i = text.index("_AI_MASK_SAME_TOLERANCE = ")
+    value = float(text[i:].split("=")[1].split("\n")[0].strip())
+    # Above the 8-bit sidecar round trip (1/255) so a reloaded mask still
+    # matches, well below what any deliberate brush stroke would move it.
+    assert 1.0 / 255.0 < value < 0.05, f"tolerance {value} is not in a sane band"
+    print(f"  OK   same-mask tolerance {value} clears the 8-bit round trip only")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -409,6 +450,8 @@ def main() -> int:
     test_disabled_masks_are_not_shown()
     test_overlay_is_not_gated_on_an_armed_brush()
     test_masks_tab_shows_how_many_masks()
+    test_repeating_smart_object_does_not_stack_a_duplicate()
+    test_a_brushed_mask_is_not_treated_as_the_same_mask()
     print("\nPASS t_masks_ui_cleanup")
     return 0
 
