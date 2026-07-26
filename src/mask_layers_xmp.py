@@ -97,6 +97,7 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
                     "enabled": bool(layer.enabled),
                     "invert": bool(layer.invert),
                     "blend": layer.blend,
+                    "source": layer.source,
                 }
             )
             continue
@@ -116,6 +117,7 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
                 "enabled": bool(layer.enabled),
                 "invert": bool(layer.invert),
                 "blend": layer.blend,
+                "source": layer.source,
             }
         )
     if not entries:
@@ -145,6 +147,7 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
             "enabled": bool(entry.get("enabled", True)),
             "invert": bool(entry.get("invert", False)),
             "blend": str(entry.get("blend", "add") or "add"),
+            "source": str(entry.get("source", "") or ""),
         }
 
         kind = str(entry.get("kind", "") or "brush")

@@ -3864,6 +3864,37 @@ class ImageAdjustPanelWidget(QWidget):
         self._sync_mask_tab_badge()
         self.mask_selection_changed.emit()
 
+    def set_ai_tool_used(self, kind: str, used: bool) -> None:
+        """Disable a one-shot AI tool whose mask this photo already has.
+
+        Smart Object and Sky return the same result every time -- pressing
+        either again cannot find "the next" object, it just repeats itself.
+        Leaving the button live and explaining afterwards makes the user
+        discover that by failing; the button says so up front instead.
+
+        AI Selection is never disabled: every click genuinely adds something.
+        """
+        btn = {
+            "subject": getattr(self, "_mask_ai_subject_btn", None),
+            "sky": getattr(self, "_mask_ai_sky_btn", None),
+        }.get(kind)
+        if btn is None:
+            return
+        if not hasattr(self, "_ai_tool_tips"):
+            self._ai_tool_tips = {}
+        self._ai_tool_tips.setdefault(kind, btn.toolTip())
+        btn.setEnabled(not used)
+        if used:
+            label = "Smart Object" if kind == "subject" else "Sky"
+            btn.setToolTip(
+                f"{label} — already masked in this photo.\n\n"
+                f"It would return exactly the same selection again. Select the "
+                f"existing\n{label} mask to adjust it, delete it to start over, "
+                f"or use AI Selection\nto pick a specific object instead."
+            )
+        else:
+            btn.setToolTip(self._ai_tool_tips.get(kind, btn.toolTip()))
+
     def _sync_mask_tab_badge(self) -> None:
         """Show how many masks this photo has on the Masks tab itself.
 

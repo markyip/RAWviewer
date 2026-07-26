@@ -431,6 +431,57 @@ def test_a_brushed_mask_is_not_treated_as_the_same_mask():
     print(f"  OK   same-mask tolerance {value} clears the 8-bit round trip only")
 
 
+def test_one_shot_ai_tools_disable_once_used():
+    """Better than letting the press fail and explaining afterwards."""
+    p = _panel()
+    assert p._mask_ai_subject_btn.isEnabled()
+    base_tip = p._mask_ai_subject_btn.toolTip()
+
+    p.set_ai_tool_used("subject", True)
+    assert not p._mask_ai_subject_btn.isEnabled(), "Smart Object stayed live"
+    assert p._mask_ai_sky_btn.isEnabled(), "Sky was disabled by a subject mask"
+    tip = p._mask_ai_subject_btn.toolTip()
+    assert "already masked" in tip, f"disabled button does not say why: {tip!r}"
+    assert "AI Selection" in tip, "disabled button offers no alternative"
+
+    # Deleting the mask has to give the tool back, tooltip included.
+    p.set_ai_tool_used("subject", False)
+    assert p._mask_ai_subject_btn.isEnabled()
+    assert p._mask_ai_subject_btn.toolTip() == base_tip, "original tooltip not restored"
+    print("  OK   a used one-shot tool disables, explains, and comes back")
+
+
+def test_ai_selection_is_never_disabled():
+    """Every click adds something, so it is never 'already done'."""
+    p = _panel()
+    for kind in ("subject", "sky"):
+        p.set_ai_tool_used(kind, True)
+    assert p._mask_ai_click_btn.isEnabled(), "AI Selection was disabled"
+    print("  OK   AI Selection stays available")
+
+
+def test_layer_remembers_what_made_it():
+    """Availability keys off source, not the row name, which users rename."""
+    from mask_layers_xmp import deserialize_stack, serialize_stack
+
+    layer = MaskLayer.empty(32, 32, name="Smart Object", source="subject",
+                            adjustments={"Exposure2012": 1.0})
+    layer.alpha[5:20, 5:20] = 1.0
+    layer.touch()
+    assert layer.source == "subject"
+
+    back = deserialize_stack(serialize_stack(MaskLayerStack([layer])))
+    assert back.layers[0].source == "subject", "source lost through the sidecar"
+
+    # Renaming must not lose the association.
+    back.layers[0].name = "my sky thing"
+    assert back.layers[0].source == "subject"
+
+    # A hand-painted layer carries no source and blocks nothing.
+    assert MaskLayer.empty(8, 8).source == ""
+    print("  OK   layers remember their source across rename and reload")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -452,6 +503,9 @@ def main() -> int:
     test_masks_tab_shows_how_many_masks()
     test_repeating_smart_object_does_not_stack_a_duplicate()
     test_a_brushed_mask_is_not_treated_as_the_same_mask()
+    test_one_shot_ai_tools_disable_once_used()
+    test_ai_selection_is_never_disabled()
+    test_layer_remembers_what_made_it()
     print("\nPASS t_masks_ui_cleanup")
     return 0
 

@@ -22883,7 +22883,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
-        self._add_mask_layer_from_alpha(result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()))
+        self._add_mask_layer_from_alpha(
+            result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()), source=kind
+        )
         self._show_status(
             f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
             "Use Paint / Erase to refine it.",
@@ -22915,7 +22917,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 continue
         return None
 
-    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True):
+    def _sync_ai_tool_availability(self) -> None:
+        """Grey out a one-shot AI tool whose mask this photo already has."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not hasattr(panel, "set_ai_tool_used"):
+            return
+        stack = getattr(self, "_mask_layer_stack", None)
+        present = {
+            getattr(layer, "source", "")
+            for layer in (getattr(stack, "layers", []) or [])
+        }
+        for kind in ("subject", "sky"):
+            panel.set_ai_tool_used(kind, kind in present)
+
+    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True,
+                                   source: str = ""):
         """Wrap a model-produced alpha in a MaskLayer and push it on the stack.
 
         The layer is an ordinary MaskLayer from here on -- brushable,
@@ -22934,7 +22950,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             stack = MaskLayerStack()
             self._mask_layer_stack = stack
 
-        layer = MaskLayer(np.ascontiguousarray(alpha, dtype=np.float32), name=name)
+        layer = MaskLayer(
+            np.ascontiguousarray(alpha, dtype=np.float32), name=name, source=source
+        )
         layer.touch()
         stack.layers.append(layer)
         panel.set_mask_layer_stack(stack)
@@ -23019,7 +23037,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_mask_layer_stack(stack)
             self._on_adjust_panel_editing_finished(panel.get_adjustments())
         else:
-            self._sam_layer = self._add_mask_layer_from_alpha(alpha, name="AI Selection")
+            self._sam_layer = self._add_mask_layer_from_alpha(
+                alpha, name="AI Selection", source="sam"
+            )
         return True
 
     def _reset_ai_mask_state(self) -> None:
@@ -23038,6 +23058,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """Selecting a different mask row moves the handles with it."""
         self._sync_gradient_handles()
         self._sync_mask_layer_overlay()
+        # Deleting a row goes through here too, which is what re-enables a
+        # tool once its mask is gone.
+        self._sync_ai_tool_availability()
 
     def _on_mask_layer_mode_changed(self, mode) -> None:
         gv = getattr(self, "gpu_view", None)

@@ -203,6 +203,11 @@ class MaskLayer:
     # the preview and export bases.
     kind: str = "brush"
     params: dict = field(default_factory=dict)
+    # What produced this layer: "" (hand-painted), "subject", "sky", "sam".
+    # Distinct from ``kind``, which is how the alpha is *stored*. Used to stop
+    # a one-shot AI tool being offered again when its mask already exists --
+    # matching on the layer NAME would break the moment a user renames a row.
+    source: str = ""
     version: int = field(default=0, compare=False, repr=False)
     _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _bbox_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
