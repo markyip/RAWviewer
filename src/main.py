@@ -2303,6 +2303,10 @@ _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
 # rather than a sky.
 _AI_MASK_MIN_COVERAGE = 0.002
 
+# Layer names match the buttons that make them -- a row called "AI Subject"
+# under a button called "Smart Object" is a puzzle the user has to solve.
+_AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
+
 HOLD_TO_PAINT = os.environ.get("RAWVIEWER_HOLD_TO_PAINT", "1").strip().lower() in (
     "1",
     "true",
@@ -22858,7 +22862,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
-        self._add_mask_layer_from_alpha(result, name=f"AI {kind.capitalize()}")
+        self._add_mask_layer_from_alpha(result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()))
         self._show_status(
             f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
             "Use Paint / Erase to refine it.",

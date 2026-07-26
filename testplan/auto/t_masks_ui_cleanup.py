@@ -147,11 +147,35 @@ def test_rows_are_selectable_not_checkable():
 def test_select_button_is_named_for_what_it_does():
     p = _panel()
     label = p._mask_ai_click_btn.text()
-    # "Click" named the input; "Select" read as a synonym for Subject. The
-    # label has to say that YOU choose the thing.
-    assert label not in ("Click", "Select"), f"point-prompt button reverted to {label!r}"
-    assert "point" in label.lower(), f"point-prompt button is labelled {label!r}"
-    print(f"  OK   the point-prompt tool is called {label!r}, distinct from Subject")
+    # "Click" named the input rather than the action, so it meant nothing.
+    assert label == "AI Selection", f"point-prompt button is labelled {label!r}"
+    subject = p._mask_ai_subject_btn.text()
+    assert subject == "Smart Object", f"one-press button is labelled {subject!r}"
+
+    # Every mask tool needs a tooltip: the names alone cannot carry the
+    # difference between "the app chooses" and "you choose".
+    for btn in (
+        p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
+        p._mask_paint_btn, p._mask_erase_btn, p._mask_invert_btn,
+        p._mask_linear_btn, p._mask_radial_btn,
+    ):
+        tip = btn.toolTip()
+        assert len(tip) > 40, f"{btn.text()!r} has no real tooltip: {tip!r}"
+        assert tip.startswith(btn.text().split(" (")[0]), (
+            f"{btn.text()!r} tooltip does not lead with the tool name: {tip[:40]!r}"
+        )
+
+    # Smart Object returns ONE mask even when it finds several objects --
+    # measured, not assumed: on the DPReview studio scene it comes back with
+    # 11 separate regions in a single mask. The tooltip has to say so, or the
+    # user reaches for it expecting to isolate one thing.
+    assert "ONE mask" in p._mask_ai_subject_btn.toolTip(), (
+        "Smart Object tooltip does not say it returns a single mask"
+    )
+    assert "AI Selection" in p._mask_ai_subject_btn.toolTip(), (
+        "Smart Object tooltip does not point at the tool that isolates one thing"
+    )
+    print("  OK   tools are named and explained, Smart Object states its limit")
 
 
 def test_empty_ai_mask_is_rejected():

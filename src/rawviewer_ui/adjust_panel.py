@@ -3608,17 +3608,21 @@ class ImageAdjustPanelWidget(QWidget):
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Brush coverage into the selected mask (max-blend; repeated "
-                "strokes saturate toward full coverage).\nUses the Local "
-                "section's Brush Size / Flow / Edge Assist settings.",
+                "Paint — brush coverage into the selected mask.\n\n"
+                "Repeated strokes build toward full coverage. With no mask yet, "
+                "this makes one.\nSize, Flow, Feather and Edge Assist come from "
+                "the Local section.",
             ),
             (
                 self._mask_erase_btn,
-                "Remove coverage from the selected mask under the brush.",
+                "Erase — remove coverage from the selected mask under the brush.\n\n"
+                "Use it to trim what Smart Object, Sky or AI Selection got wrong.",
             ),
             (
                 self._mask_invert_btn,
-                "Apply this mask's adjustments everywhere EXCEPT the painted region.",
+                "Invert — apply this mask's adjustments everywhere EXCEPT its "
+                "covered area.\n\n"
+                "Mask the subject, then invert to adjust the background instead.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
@@ -3642,28 +3646,34 @@ class ImageAdjustPanelWidget(QWidget):
         # cursor handling, then each canvas click adds a SAM point prompt.
         ai_row = QHBoxLayout()
         ai_row.setSpacing(6)
-        self._mask_ai_subject_btn = QPushButton("Subject")
+        self._mask_ai_subject_btn = QPushButton("Smart Object")
         self._mask_ai_sky_btn = QPushButton("Sky")
-        self._mask_ai_click_btn = QPushButton("Point at It")
+        self._mask_ai_click_btn = QPushButton("AI Selection")
         for btn, tip in (
             (
                 self._mask_ai_subject_btn,
-                "Subject — one press, no aiming: the app decides what the main "
-                "subject is\nand masks it. Best when the photo has one obvious "
-                "subject.\nMakes its own mask, which you can then paint or erase.",
+                "Smart Object — one press, no aiming.\n\n"
+                "Finds whatever stands out in the photo and masks it. It "
+                "returns ONE mask:\nif two people stand together they come "
+                "back in the same mask, not two.\nTo mask just one of them, "
+                "use AI Selection instead.\n\n"
+                "Makes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_sky_btn,
-                "Sky — one press: masks the sky.\n"
+                "Sky — one press.\n\n"
+                "Masks the sky. If the photo has none, nothing is added and "
+                "it says so.\n\n"
                 "Makes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_click_btn,
-                "Point at it — you choose what gets masked, not the app.\n"
-                "Click a jacket, one flower, one person in a group; click more "
-                "spots\nto add them to the SAME selection. Use this when Subject "
-                "picks the\nwrong thing, or when you want part of something "
-                "rather than all of it.\n"
+                "AI Selection — you choose what gets masked, not the app.\n\n"
+                "Click a thing in the photo and it masks that thing: a jacket, "
+                "one flower,\none person in a group. Click more spots to add "
+                "them to the SAME mask.\n\n"
+                "Use this when Smart Object picks the wrong thing, or when you "
+                "want part\nof something rather than all of it.\n\n"
                 "The first click pauses briefly while the photo is analysed.",
             ),
         ):
