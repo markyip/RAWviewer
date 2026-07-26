@@ -23010,22 +23010,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if panel is None or gv is None or not hasattr(gv, "update_dodge_burn_mask"):
             return
-        mode_fn = getattr(panel, "mask_layer_mode", None)
-        if mode_fn is None or mode_fn() is None:
-            # Leaving mask-brush mode: fall back to whatever the dodge/burn
-            # overlay state should be showing.
+        stack = getattr(self, "_mask_layer_stack", None)
+        layers = list(getattr(stack, "layers", []) or [])
+        if not layers:
+            # No mask stack: whatever the dodge/burn overlay wants to show.
             self._sync_dodge_burn_mask_overlay()
             return
-        stack = getattr(self, "_mask_layer_stack", None)
-        idx = panel.active_mask_index()
-        if stack is None or idx is None:
+        if not panel.dodge_burn_show_mask():
             return
+        # Deliberately NOT gated on a brush tool being armed. It used to be,
+        # which meant a subject, sky, point-select or gradient mask showed no
+        # overlay at all unless you happened to arm Paint first -- the mask
+        # was there and invisible.
         try:
-            from raw_dodge_burn import DodgeBurnMask
-
-            layer = stack.layers[idx]
-            if panel.dodge_burn_show_mask():
-                gv.update_dodge_burn_mask(DodgeBurnMask(layer.alpha))
+            if hasattr(gv, "update_mask_layer_overlay"):
+                gv.update_mask_layer_overlay(layers, panel.active_mask_index())
         except Exception:
             pass
 

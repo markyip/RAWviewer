@@ -43,6 +43,13 @@ from rawviewer_ui.composition_grid import CompositionGridGraphicsItem
 from rawviewer_ui.widgets import stamp_rawviewer_export_drag
 
 
+# Mask overlay tints, taken from theme.py rather than picked: EMBER is
+# reserved there for "what's currently active", which is exactly what the
+# selected mask is. BURN is a cool low-chroma steel that recedes behind it.
+_MASK_TINT_ACTIVE = (217, 105, 30)   # theme.EMBER
+_MASK_TINT_OTHER = (91, 122, 140)    # theme.BURN
+
+
 class CompareHandleItem(QGraphicsEllipseItem):
     """A custom comparison view split divider handle.
     It renders a prominent white circle with a dark border, and draws two vertical
@@ -809,6 +816,84 @@ class GpuImageView(QGraphicsView):
                 -data[neg_mask] / 1.5 * 180.0 + 40.0, 0, 255
             ).astype(np.uint8)
         return overlay
+
+    def update_mask_layer_overlay(self, layers, active_index) -> None:
+        """Colour overlay for the mask stack, whatever tool made each mask.
+
+        One overlay for every kind of mask -- brush, linear, radial, subject,
+        sky, point-select -- because once a mask exists, how it was made does
+        not change what you do next. Colouring by provenance would compete
+        with the one thing that matters here: which mask am I editing.
+
+        So the encoding is selection, and it borrows the palette rule
+        theme.py already states -- EMBER means "what's currently active":
+
+            selected mask   EMBER   the one your sliders are driving
+            other masks     BURN    context, cool and low-chroma so it recedes
+
+        Alpha tracks coverage with a floor, so a feathered edge at 10% still
+        reads as masked rather than fading into the photo.
+        """
+        if not getattr(self, "_mask_overlay_wanted", False):
+            return
+        import numpy as np
+
+        entries = []
+        for i, layer in enumerate(layers or []):
+            if not getattr(layer, "enabled", True):
+                continue
+            entries.append((i, layer))
+        if not entries:
+            self._mask_item.hide()
+            self._mask_item.setPixmap(QPixmap())
+            self._mask_overlay_shape = None
+            return
+
+        # Mask resolution, not display: the graphics item scales it up, which
+        # is what keeps this off the per-tick cost curve.
+        ref = entries[0][1]
+        h, w = ref.alpha.shape[:2]
+        for _i, layer in entries:
+            lh, lw = layer.alpha.shape[:2]
+            if lh * lw > h * w:
+                h, w = lh, lw
+
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        # Selected last so it wins where masks overlap -- you are looking at
+        # the one you are editing.
+        order = [e for e in entries if e[0] != active_index]
+        order += [e for e in entries if e[0] == active_index]
+        for index, layer in order:
+            try:
+                alpha = layer.effective_alpha_at(h, w)
+            except Exception:
+                continue
+            cov = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
+            on = cov > 0.02
+            if not bool(on.any()):
+                continue
+            tint = _MASK_TINT_ACTIVE if index == active_index else _MASK_TINT_OTHER
+            rgba[on, 0] = tint[0]
+            rgba[on, 1] = tint[1]
+            rgba[on, 2] = tint[2]
+            rgba[on, 3] = np.clip(cov[on] * 165.0 + 45.0, 0, 255).astype(np.uint8)
+
+        rgba = np.ascontiguousarray(rgba)
+        qimg = QImage(
+            rgba.data, rgba.shape[1], rgba.shape[0], rgba.strides[0],
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        self._mask_item.setPixmap(QPixmap.fromImage(qimg))
+        self._mask_overlay_shape = (h, w)
+        self._mask_overlay_is_heal = None  # not the dodge/burn overlay's state
+        self._mask_item.setOffset(0, 0)
+        if self._img_w > 0 and self._img_h > 0 and (w != self._img_w or h != self._img_h):
+            self._mask_item.setTransform(
+                QTransform().scale(self._img_w / w, self._img_h / h)
+            )
+        else:
+            self._mask_item.setTransform(QTransform())
+        self._mask_item.show()
 
     def update_dodge_burn_mask(self, mask, dirty_bbox=None) -> None:
         """Refresh the red/blue mask overlay when Show Mask is on.

@@ -350,6 +350,7 @@ class PanelTabBar(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(18)
 
+        self._labels = [label.upper() for label in labels]
         for index, label in enumerate(labels):
             btn = QPushButton(label.upper())
             btn.setObjectName("adjust_tab_btn")
@@ -362,14 +363,15 @@ class PanelTabBar(QWidget):
                     background: transparent;
                     border: none;
                     border-bottom: 2px solid transparent;
-                    color: {theme.INK_MUTED};
-                    font-size: 10px;
+                    color: {theme.INK_FAINT};
+                    font-size: 11px;
                     font-weight: 700;
-                    padding: 6px 2px;
+                    letter-spacing: 1px;
+                    padding: 8px 2px 7px 2px;
                     text-align: left;
                 }}
                 QPushButton#adjust_tab_btn:hover {{
-                    color: {theme.INK};
+                    color: {theme.INK_MUTED};
                 }}
                 QPushButton#adjust_tab_btn:checked {{
                     color: {theme.INK};
@@ -384,6 +386,13 @@ class PanelTabBar(QWidget):
         row.addStretch(1)
         if self._buttons:
             self._buttons[0].setChecked(True)
+
+    def set_badge(self, index: int, text: str) -> None:
+        """Append a count to a tab's label, or clear it with ""."""
+        if not (0 <= index < len(self._buttons)):
+            return
+        base = self._labels[index]
+        self._buttons[index].setText(f"{base}  {text}" if text else base)
 
     def current(self) -> int:
         return self._current
@@ -3732,7 +3741,22 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_block = False
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        self._sync_mask_tab_badge()
         self.mask_selection_changed.emit()
+
+    def _sync_mask_tab_badge(self) -> None:
+        """Show how many masks this photo has on the Masks tab itself.
+
+        Without it, the only way to learn whether a photo carries masks is to
+        leave the tab you are on and look -- and a mask you have forgotten
+        about is exactly the one that makes an edit confusing.
+        """
+        tabs = getattr(self, "_panel_tabs", None)
+        if tabs is None:
+            return
+        stack = getattr(self, "_mask_stack", None)
+        count = len(getattr(stack, "layers", []) or []) if stack is not None else 0
+        tabs.set_badge(1, str(count) if count else "")
 
     # -- internals ------------------------------------------------------
 

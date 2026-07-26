@@ -193,6 +193,167 @@ def test_new_mask_button_is_hidden_in_the_empty_state():
     print("  OK   New Mask appears only once it means 'another one'")
 
 
+# --------------------------------------------------------------- mask overlay
+
+
+def _view():
+    from rawviewer_ui.gpu_image_view import GpuImageView
+
+    v = GpuImageView()
+    v._mask_overlay_wanted = True
+    v._img_w = v._img_h = W
+    return v
+
+
+def _near(got, want, tol=2):
+    return all(abs(int(a) - int(b)) <= tol for a, b in zip(got, want))
+
+
+def _overlay_rgba(view):
+    pm = view._mask_item.pixmap()
+    assert not pm.isNull(), "no overlay pixmap was produced"
+    img = pm.toImage()
+    img = img.convertToFormat(img.Format.Format_RGBA8888)
+    ptr = img.bits()
+    ptr.setsize(img.sizeInBytes())
+    arr = np.frombuffer(ptr, np.uint8).reshape(
+        img.height(), img.bytesPerLine() // 4, 4
+    )[:, : img.width()]
+    return arr
+
+
+def test_overlay_covers_every_kind_of_mask():
+    """Brush, linear, radial and model-produced alphas alike."""
+    import raw_mask_shapes as shapes
+
+    def brush():
+        layer = MaskLayer.empty(W, W, name="brush")
+        layer.alpha[60:140, 60:140] = 1.0
+        layer.touch()
+        return layer
+
+    def gradient(kind, drag):
+        return MaskLayer(
+            np.zeros((W, W), np.float32),
+            kind=kind,
+            params=shapes.params_from_drag(kind, *drag),
+            name=kind,
+        )
+
+    cases = {
+        "brush": brush(),
+        "linear": gradient("linear", (0.5, 0.05, 0.5, 0.6)),
+        "radial": gradient("radial", (0.25, 0.25, 0.75, 0.75)),
+        # Subject / Sky / Point-select all arrive as a plain alpha buffer.
+        "ai": brush(),
+    }
+    for name, layer in cases.items():
+        v = _view()
+        v.update_mask_layer_overlay([layer], 0)
+        rgba = _overlay_rgba(v)
+        assert int(rgba[..., 3].max()) > 0, f"{name} mask produced no visible overlay"
+    print("  OK   every mask kind produces a visible overlay")
+
+
+def test_gradients_render_from_params_not_the_placeholder():
+    """A gradient's alpha buffer is a placeholder; the overlay must generate."""
+    import raw_mask_shapes as shapes
+
+    layer = MaskLayer(
+        np.zeros((128, 128), np.float32),
+        kind="radial",
+        params=shapes.params_from_drag("radial", 0.3, 0.3, 0.7, 0.7),
+    )
+    assert float(layer.alpha.max()) == 0.0, "fixture is not a placeholder buffer"
+    v = _view()
+    v.update_mask_layer_overlay([layer], 0)
+    rgba = _overlay_rgba(v)
+    assert int(rgba[..., 3].max()) > 0, (
+        "gradient overlay read the empty placeholder instead of generating"
+    )
+    print("  OK   a gradient overlay is generated from its params")
+
+
+def test_selected_mask_is_ember_others_recede():
+    from rawviewer_ui.gpu_image_view import _MASK_TINT_ACTIVE, _MASK_TINT_OTHER
+
+    left = MaskLayer.empty(W, W, name="left")
+    left.alpha[:, : W // 2 - 10] = 1.0
+    left.touch()
+    right = MaskLayer.empty(W, W, name="right")
+    right.alpha[:, W // 2 + 10 :] = 1.0
+    right.touch()
+
+    v = _view()
+    v.update_mask_layer_overlay([left, right], 1)  # right selected
+    rgba = _overlay_rgba(v)
+    got_right = tuple(int(c) for c in rgba[W // 2, W - 5, :3])
+    got_left = tuple(int(c) for c in rgba[W // 2, 5, :3])
+    # +/-2 per channel: QPixmap round-trips through premultiplied alpha, which
+    # costs a least-significant bit. The point is which colour, not the bit.
+    assert _near(got_right, _MASK_TINT_ACTIVE), f"selected mask is {got_right}, not EMBER"
+    assert _near(got_left, _MASK_TINT_OTHER), f"unselected mask is {got_left}, not BURN"
+    print("  OK   selected mask reads EMBER, the rest recede in BURN")
+
+
+def test_selected_mask_wins_where_masks_overlap():
+    a = MaskLayer.empty(W, W, name="a")
+    a.alpha[:, :] = 1.0
+    a.touch()
+    b = MaskLayer.empty(W, W, name="b")
+    b.alpha[50:150, 50:150] = 1.0
+    b.touch()
+    from rawviewer_ui.gpu_image_view import _MASK_TINT_ACTIVE
+
+    v = _view()
+    v.update_mask_layer_overlay([a, b], 1)  # b selected, drawn inside a
+    rgba = _overlay_rgba(v)
+    assert _near(tuple(int(c) for c in rgba[100, 100, :3]), _MASK_TINT_ACTIVE), (
+        "an unselected mask painted over the selected one"
+    )
+    print("  OK   the selected mask wins where masks overlap")
+
+
+def test_disabled_masks_are_not_shown():
+    layer = MaskLayer.empty(W, W, name="off")
+    layer.alpha[:, :] = 1.0
+    layer.enabled = False
+    layer.touch()
+    v = _view()
+    v.update_mask_layer_overlay([layer], 0)
+    pm = v._mask_item.pixmap()
+    assert pm.isNull() or not v._mask_item.isVisible(), "a disabled mask was drawn"
+    print("  OK   a disabled mask is not drawn")
+
+
+def test_overlay_is_not_gated_on_an_armed_brush():
+    """The bug: a subject/sky/gradient mask was invisible unless Paint was armed."""
+    src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
+    )
+    text = open(src, encoding="utf-8").read()
+    start = text.index("def _sync_mask_layer_overlay")
+    end = text.index("\n    def ", start + 1)
+    body = text[start:end]
+    assert "mask_layer_mode" not in body, (
+        "the mask overlay is gated on a brush tool being armed again"
+    )
+    assert "update_mask_layer_overlay" in body
+    print("  OK   the overlay does not require an armed brush")
+
+
+def test_masks_tab_shows_how_many_masks():
+    p = _panel()
+    assert p._panel_tabs._buttons[1].text() == "MASKS", "empty state should carry no count"
+    p.set_mask_layer_stack(MaskLayerStack([
+        _painted_layer(name="a"), _painted_layer(name="b"),
+    ]))
+    assert p._panel_tabs._buttons[1].text().endswith("2"), (
+        f"Masks tab does not show the count: {p._panel_tabs._buttons[1].text()!r}"
+    )
+    print("  OK   the Masks tab shows how many masks the photo has")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -205,6 +366,13 @@ def main() -> int:
     test_empty_ai_mask_is_rejected()
     test_paint_creates_its_own_mask_like_every_other_tool()
     test_new_mask_button_is_hidden_in_the_empty_state()
+    test_overlay_covers_every_kind_of_mask()
+    test_gradients_render_from_params_not_the_placeholder()
+    test_selected_mask_is_ember_others_recede()
+    test_selected_mask_wins_where_masks_overlap()
+    test_disabled_masks_are_not_shown()
+    test_overlay_is_not_gated_on_an_armed_brush()
+    test_masks_tab_shows_how_many_masks()
     print("\nPASS t_masks_ui_cleanup")
     return 0
 
