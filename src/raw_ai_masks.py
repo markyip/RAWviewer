@@ -94,10 +94,27 @@ _MODELS = {
         # difference 0.00000) and 6% slower -- 30ms on a 320px input.
         #
         # The equivalent trade is NOT available for the subject model above.
-        # BiRefNet_lite fp16 halves the download too, but ONNX Runtime's CPU
-        # backend has no native fp16 kernels: it casts around every op, and
-        # the smaller file measured 32% SLOWER (10.1s vs 7.6s per press).
-        # Worth revisiting only where a GPU provider actually runs fp16.
+        # Both ways of shrinking it were measured and both cost more time than
+        # they save space, on the same principle: reduced precision only pays
+        # where the runtime has native kernels for it, and Apple Silicon's CPU
+        # has neither fp16 nor int8 kernels that beat its fp32 ones.
+        #
+        #   BiRefNet_lite fp16    214 -> 109 MB, IoU 0.9997, 32% SLOWER
+        #                         (10.1s vs 7.6s per press)
+        #   BiRefNet_lite int8    214 -> 147 MB, mean IoU 0.9917 over four real
+        #                         photographs, 42% SLOWER (10.5s vs 7.4s)
+        #
+        # Quality was never the objection -- neither is visible in a mask. The
+        # objection is that Smart Object is already the slowest thing in the
+        # app, so seconds cost more than megabytes here.
+        #
+        # If this is revisited: a naive int8 quantise only reaches 193 MB,
+        # because 61% of this export's weights sit behind Identity
+        # pass-through nodes (alongside 7296 Constant nodes) that the
+        # quantiser cannot see through. Folding the graph first
+        # (ORT_ENABLE_ALL) and quantising that reaches 147 MB. Worth doing
+        # only on a platform whose runtime is fast at int8 -- x86 with VNNI,
+        # or DirectML -- which would mean a per-platform model choice here.
         "url": "https://huggingface.co/voyagerfromeast/skyseg/resolve/main/skyseg_fp16.onnx",
         "sha256": "74d87f4a69378a610a6be662f859c38cfbdfdd75ff74bbfc54842965ed6fc9f7",
         "input_size": 320,
