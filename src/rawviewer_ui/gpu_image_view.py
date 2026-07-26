@@ -817,6 +817,13 @@ class GpuImageView(QGraphicsView):
             ).astype(np.uint8)
         return overlay
 
+    def hide_mask_overlay(self) -> None:
+        """Take the overlay down (the Mask toggle going off)."""
+        self._mask_overlay_wanted = False
+        self._mask_item.hide()
+        self._mask_item.setPixmap(QPixmap())
+        self._mask_overlay_shape = None
+
     def update_mask_layer_overlay(self, layers, active_index) -> None:
         """Colour overlay for the mask stack, whatever tool made each mask.
 
@@ -834,8 +841,14 @@ class GpuImageView(QGraphicsView):
         Alpha tracks coverage with a floor, so a feathered edge at 10% still
         reads as masked rather than fading into the photo.
         """
-        if not getattr(self, "_mask_overlay_wanted", False):
-            return
+        # No _mask_overlay_wanted gate here. That flag is owned by the
+        # dodge/burn overlay path and is only ever set when THAT path runs, so
+        # gating on it meant a mask-layer overlay could never draw unless a
+        # dodge/burn mask happened to be showing too -- which is why subject,
+        # sky and gradient masks appeared to have no overlay at all. The host
+        # already decides visibility (panel.dodge_burn_show_mask); the view's
+        # job is to draw what it is handed.
+        self._mask_overlay_wanted = True
         import numpy as np
 
         entries = []

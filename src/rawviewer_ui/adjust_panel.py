@@ -3512,6 +3512,13 @@ class ImageAdjustPanelWidget(QWidget):
     def dodge_burn_show_mask(self) -> bool:
         return bool(self._db_show_mask_btn.isChecked())
 
+    def request_mask_overlay_visible(self) -> None:
+        """Switch the mask overlay on unless the user has turned it off."""
+        btn = getattr(self, "_db_show_mask_btn", None)
+        if btn is None or self._mask_user_hidden or btn.isChecked():
+            return
+        btn.setChecked(True)  # fires _on_mask_btn_toggled -> dodgeBurnMaskToggled
+
     def toggle_dodge_burn_show_mask(self) -> None:
         if not self._db_show_mask_btn.isEnabled():
             return
@@ -3548,7 +3555,8 @@ class ImageAdjustPanelWidget(QWidget):
         col.setSpacing(6)
 
         self._mask_list = QListWidget()
-        self._mask_list.setMaximumHeight(110)
+        self._mask_list.setMaximumHeight(140)
+        self._mask_list.setIconSize(QSize(self._MASK_ICON_BOX, self._MASK_ICON_BOX))
         self._mask_list.setStyleSheet(
             f"""
             QListWidget {{
@@ -3726,6 +3734,48 @@ class ImageAdjustPanelWidget(QWidget):
         )
         col.addLayout(grad_row)
 
+        # Brush controls, mirrored from the Local section. Local lives on the
+        # GLOBAL tab, so while masking they were on the other page: you had to
+        # leave the masks, change Size, and come back. These are the same
+        # values, kept in step both ways -- not a second set of settings.
+        self._mask_brush_sliders: dict = {}
+        brush_wrap = QWidget()
+        brush_col = QVBoxLayout(brush_wrap)
+        brush_col.setContentsMargins(0, 0, 0, 0)
+        brush_col.setSpacing(4)
+        for label, source_attr in (
+            ("Brush Size", "_db_size_slider"),
+            ("Brush Flow", "_db_strength_slider"),
+            ("Brush Feather", "_db_feather_slider"),
+        ):
+            source = getattr(self, source_attr, None)
+            if source is None:
+                continue
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            lbl.setMinimumWidth(78)
+            row.addWidget(lbl)
+            mirror = AdjustSlider(Qt.Orientation.Horizontal)
+            mirror.setRange(source.minimum(), source.maximum())
+            mirror.setValue(source.value())
+            mirror.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            mirror.setToolTip(source.toolTip())
+            # Two-way, guarded against the echo: each side blocks the other's
+            # signals while writing, or a drag ping-pongs between them.
+            mirror.valueChanged.connect(
+                lambda v, src=source: self._mirror_brush_value(src, v)
+            )
+            source.valueChanged.connect(
+                lambda v, dst=mirror: self._mirror_brush_value(dst, v)
+            )
+            row.addWidget(mirror, 1)
+            brush_col.addLayout(row)
+            self._mask_brush_sliders[label] = mirror
+        col.addWidget(brush_wrap)
+        self._mask_brush_wrap = brush_wrap
+
         # Per-mask parameters, hidden wholesale until a mask exists. Showing a
         # dozen greyed-out sliders reads as broken rather than as "nothing
         # selected yet", and it buried Add Mask under controls that could not
@@ -3844,6 +3894,9 @@ class ImageAdjustPanelWidget(QWidget):
             for i, layer in enumerate(layers):
                 name = layer.name or f"Mask {i + 1}"
                 item = QListWidgetItem(name)
+                icon = self._mask_row_icon(layer)
+                if icon is not None:
+                    item.setIcon(icon)
                 # No check box: a click selects the row. The check state was
                 # doubling as an enable toggle and made a single click
                 # ambiguous -- "did I select this or turn it off?".
@@ -3894,6 +3947,69 @@ class ImageAdjustPanelWidget(QWidget):
             )
         else:
             btn.setToolTip(self._ai_tool_tips.get(kind, btn.toolTip()))
+
+    @staticmethod
+    def _mirror_brush_value(target, value: int) -> None:
+        """Copy a brush value to its twin without triggering it back."""
+        if target is None or target.value() == int(value):
+            return
+        target.blockSignals(True)
+        try:
+            target.setValue(int(value))
+        finally:
+            target.blockSignals(False)
+        # The twin's own valueChanged is suppressed above, so emit the panel
+        # signal here -- otherwise dragging the mirror would move the value
+        # but never reach the brush cursor or the stamping code.
+        target.sliderReleased.emit()
+
+    _MASK_ICON_BOX = 34
+
+    def _mask_row_icon(self, layer):
+        """The mask's actual shape, white on black, for its row.
+
+        A row that says "Mask 3" tells you nothing about which region it
+        covers; the shape is recognisable at a glance, the way a layer
+        thumbnail is in any editor. Rendered from the layer's own alpha (or
+        generated, for a gradient) so it is the mask, not an illustration.
+
+        Aspect is preserved inside a square box: a portrait mask drawn as a
+        square would misreport where its coverage sits.
+        """
+        from PyQt6.QtGui import QIcon, QImage, QPixmap
+
+        try:
+            import numpy as np
+
+            box = self._MASK_ICON_BOX
+            h, w = layer.alpha.shape[:2]
+            if h < 1 or w < 1:
+                return None
+            scale = float(box) / float(max(h, w))
+            th, tw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+
+            cache = getattr(self, "_mask_icon_cache", None)
+            if cache is None:
+                cache = self._mask_icon_cache = {}
+            key = (id(layer), int(getattr(layer, "version", 0)), th, tw)
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+
+            alpha = layer.alpha_at(th, tw)
+            grey = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
+            buf = np.ascontiguousarray((grey * 255.0).astype(np.uint8))
+            img = QImage(buf.data, tw, th, buf.strides[0], QImage.Format.Format_Grayscale8)
+            icon = QIcon(QPixmap.fromImage(img.copy()))
+
+            # Bounded: a long session editing many photos would otherwise keep
+            # every mask thumbnail it has ever drawn.
+            if len(cache) > 64:
+                cache.clear()
+            cache[key] = icon
+            return icon
+        except Exception:
+            return None
 
     def _sync_mask_tab_badge(self) -> None:
         """Show how many masks this photo has on the Masks tab itself.

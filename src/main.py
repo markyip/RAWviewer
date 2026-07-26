@@ -22953,6 +22953,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         layer = MaskLayer(
             np.ascontiguousarray(alpha, dtype=np.float32), name=name, source=source
         )
+        # Turn the overlay on for a mask the user did not paint: they cannot
+        # judge what a model selected without seeing it, and hunting for the
+        # Mask button first is a step nobody should have to take.
+        if panel is not None and hasattr(panel, "request_mask_overlay_visible"):
+            panel.request_mask_overlay_visible()
         layer.touch()
         stack.layers.append(layer)
         panel.set_mask_layer_stack(stack)
@@ -23591,6 +23596,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
 
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
+        # Route to whichever overlay this photo actually has. Mask layers were
+        # falling through to the dodge/burn sync, which knows nothing about
+        # them, so the Mask button did nothing while masking.
+        stack = getattr(self, "_mask_layer_stack", None)
+        if getattr(stack, "layers", None):
+            gv = getattr(self, "gpu_view", None)
+            if not show and gv is not None and hasattr(gv, "hide_mask_overlay"):
+                gv.hide_mask_overlay()
+                return
+            self._sync_mask_layer_overlay()
+            return
         self._sync_dodge_burn_mask_overlay()
 
     def _on_adjust_panel_reset(self) -> None:

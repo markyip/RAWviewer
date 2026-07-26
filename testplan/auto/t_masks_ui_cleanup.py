@@ -482,6 +482,97 @@ def test_layer_remembers_what_made_it():
     print("  OK   layers remember their source across rename and reload")
 
 
+def test_overlay_draws_without_any_dodge_burn_mask():
+    """The bug behind "the overlay is still missing".
+
+    update_mask_layer_overlay used to early-return unless
+    _mask_overlay_wanted was set -- a flag owned by the dodge/burn overlay
+    path and only ever set when THAT path ran. So a subject, sky or gradient
+    mask on a photo with no dodge/burn strokes could never draw.
+    """
+    v = _view()
+    v._mask_overlay_wanted = False  # exactly the state that used to block it
+    layer = _painted_layer(name="Smart Object")
+    v.update_mask_layer_overlay([layer], 0)
+    assert not v._mask_item.pixmap().isNull(), "overlay refused to draw"
+    assert v._mask_item.isVisible()
+    print("  OK   the overlay draws with no dodge/burn mask in play")
+
+
+def test_hiding_the_overlay_clears_it():
+    v = _view()
+    v.update_mask_layer_overlay([_painted_layer()], 0)
+    v.hide_mask_overlay()
+    assert v._mask_item.pixmap().isNull(), "overlay survived being hidden"
+    assert v._mask_overlay_wanted is False
+    print("  OK   hiding the overlay clears it")
+
+
+def test_mask_toggle_routes_to_the_layer_overlay():
+    src = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
+    )
+    text = open(src, encoding="utf-8").read()
+    start = text.index("def _on_dodge_burn_mask_toggled")
+    end = text.index("\n    def ", start + 1)
+    body = text[start:end]
+    assert "_sync_mask_layer_overlay" in body, (
+        "the Mask toggle still routes only to the dodge/burn overlay"
+    )
+    assert "hide_mask_overlay" in body, "turning the toggle off does not hide it"
+    print("  OK   the Mask toggle reaches the mask-layer overlay")
+
+
+def test_brush_controls_are_reachable_while_masking():
+    """Local lives on the Global tab; masking needed its own copy."""
+    p = _panel()
+    assert set(p._mask_brush_sliders) == {"Brush Size", "Brush Flow", "Brush Feather"}, (
+        f"missing brush controls on the Masks tab: {sorted(p._mask_brush_sliders)}"
+    )
+
+    mirror = p._mask_brush_sliders["Brush Size"]
+    local = p._db_size_slider
+    mirror.setValue(mirror.value() + 17)
+    assert local.value() == mirror.value(), "Masks-tab slider did not drive the brush"
+    local.setValue(local.value() - 9)
+    assert mirror.value() == local.value(), "Local slider did not update the mirror"
+
+    # And the mirrored value must reach the code that actually stamps.
+    p._mask_brush_sliders["Brush Feather"].setValue(15)
+    assert abs(p.dodge_burn_brush_feather() - 0.15) < 1e-6, (
+        "feather set while masking never reached the brush"
+    )
+    print("  OK   brush controls mirror both ways and reach the brush")
+
+
+def test_mask_rows_show_the_mask_shape():
+    """A row called "Mask 3" says nothing about what it covers."""
+    import raw_mask_shapes as shapes
+
+    p = _panel()
+    brush = _painted_layer(name="Brush 1")
+    gradient = MaskLayer(
+        np.zeros((64, 64), np.float32),
+        kind="radial",
+        params=shapes.params_from_drag("radial", 0.3, 0.3, 0.7, 0.7),
+        name="Radial Gradient",
+    )
+    p.set_mask_layer_stack(MaskLayerStack([brush, gradient]))
+
+    for row in range(p._mask_list.count()):
+        icon = p._mask_list.item(row).icon()
+        assert not icon.isNull(), f"row {row} has no thumbnail"
+        sizes = icon.availableSizes()
+        assert sizes and max(sizes[0].width(), sizes[0].height()) > 8, (
+            f"row {row} thumbnail is too small to read: {sizes}"
+        )
+
+    # A gradient's thumbnail must be generated, not read off its placeholder.
+    icon = p._mask_row_icon(gradient)
+    assert icon is not None and not icon.isNull(), "gradient row has no thumbnail"
+    print("  OK   every row shows the mask's own shape")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -506,6 +597,11 @@ def main() -> int:
     test_one_shot_ai_tools_disable_once_used()
     test_ai_selection_is_never_disabled()
     test_layer_remembers_what_made_it()
+    test_overlay_draws_without_any_dodge_burn_mask()
+    test_hiding_the_overlay_clears_it()
+    test_mask_toggle_routes_to_the_layer_overlay()
+    test_brush_controls_are_reachable_while_masking()
+    test_mask_rows_show_the_mask_shape()
     print("\nPASS t_masks_ui_cleanup")
     return 0
 
