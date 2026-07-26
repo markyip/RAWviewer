@@ -337,6 +337,7 @@ Project directions and remaining work that are **not** tied to a particular rele
 | Item | Status | Notes |
 |------|--------|-------|
 | **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export, with an **AI Detail** slider trading denoise against retained texture. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable (`src/onnx_scunet.py`, `src/onnx_restormer.py`) |
+| **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN x2 as the final export stage, so every earlier stage still runs at native resolution — ~65s for a 32MP frame. Being a GAN it *invents* plausible detail rather than reconstructing it, and reads over-sharpened on already-clean RAW output, so its strength is dialable toward a plain resize (`src/onnx_realesrgan.py`) |
 | **Mask layers + AI masks** | **Landed, stabilising** | Stacked brush mask layers with per-layer adjustments, plus one-click **subject** (BiRefNet), **sky** (U²-Net), and **click-to-segment** (MobileSAM) generation. Weights are fetched on demand, not bundled (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`) |
 | **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Regression-covered against a real RAW (`src/color_calibration.py`) |
 | **Generative Editing** (instruction-based) | **In Progress** (`generative-editing` branch) | Provider layer, derived-file lifecycle, and Adjust-panel wiring. Remote provider uploads the photo to a third party — opt-in and clearly flagged; a local Windows+NVIDIA provider is the follow-up (`src/raw_generative_edit.py`) |
@@ -354,7 +355,7 @@ Project directions and remaining work that are **not** tied to a particular rele
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
 | 2 | **Geometric local masks** (gradient / radial) | **High** | M | Brush mask layers and AI masks now ship; these reuse the same layer stack and only need alpha generators plus UI |
-| 3 | **AI upscaling on export** (Real-ESRGAN 2×) | **Medium–High** | M | The tiled ONNX export path built for denoise carries most of the plumbing; needs a model choice and Plus-edition size budget |
+| 3 | **User-facing upscale strength control** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants to be a slider with a gentler default |
 | 4 | **Local generative provider** (Windows + NVIDIA) | **Medium** | L | Keeps generative edits on-device, removing the third-party upload the remote provider requires |
 | 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
 | 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
