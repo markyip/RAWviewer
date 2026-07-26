@@ -38,7 +38,14 @@ def check(name, ok, detail=""):
 
 
 def main() -> int:
-    if not (os.path.isfile(GOOD_A) and os.path.isfile(GOOD_B) and BAD):
+    # _pick_samples() returns (None, None, []) when no sample dir is
+    # configured, so check truthiness before os.path.isfile -- which raises
+    # TypeError on None rather than returning False.
+    if not (GOOD_A and GOOD_B and BAD):
+        print("SKIP  golden RAW files not available on this machine")
+        print("      set RAWVIEWER_WB_SAMPLE_DIR or RAWVIEWER_TEST_ASSETS")
+        return 0
+    if not (os.path.isfile(GOOD_A) and os.path.isfile(GOOD_B)):
         print("SKIP  golden RAW files not available on this machine")
         return 0
 
