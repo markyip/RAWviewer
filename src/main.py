@@ -22573,6 +22573,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(panel, "arm_mask_paint"):
             panel.arm_mask_paint()
 
+    def ensure_mask_layer_for_painting(self) -> bool:
+        """Make a mask to paint into if there is not one yet.
+
+        Paint used to require pressing Add Mask first, which made brushing the
+        only coverage tool that took two presses -- Subject, Sky, Select and
+        the gradients all create their own layer. Returns True if a layer is
+        available to paint into.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return False
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is not None and stack.layers and panel.active_mask_index() is not None:
+            return True
+        self._on_mask_layer_add()
+        stack = getattr(self, "_mask_layer_stack", None)
+        return bool(stack is not None and stack.layers)
+
     def _on_mask_layer_delete(self, index: int) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         stack = getattr(self, "_mask_layer_stack", None)

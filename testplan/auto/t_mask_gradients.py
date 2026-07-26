@@ -283,7 +283,11 @@ def test_panel_gradient_tools_are_exclusive():
     assert not p._mask_linear_btn.isChecked()
 
     # Arming a brush must put the gradient away -- they share the press.
+    # Paint now needs a mask to arm into (it creates one via the host, which
+    # this panel-only fixture does not have), so provide one directly.
+    p.set_mask_layer_stack(MaskLayerStack([MaskLayer.empty(64, 64, name="Mask 1")]))
     p._mask_paint_btn.setChecked(True)
+    assert p._mask_paint_btn.isChecked(), "Paint failed to arm over an existing mask"
     assert p.gradient_tool() is None, "gradient stayed armed alongside the brush"
 
     p._mask_radial_btn.setChecked(True)

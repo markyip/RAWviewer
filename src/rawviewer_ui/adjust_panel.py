@@ -3463,7 +3463,7 @@ class ImageAdjustPanelWidget(QWidget):
 
         ops_row = QHBoxLayout()
         ops_row.setSpacing(6)
-        self._mask_add_btn = QPushButton("Add Mask")
+        self._mask_add_btn = QPushButton("New Mask")
         # Duplicate removed: duplicating a mask copies coverage AND its
         # adjustments, which is almost never what is wanted -- the two useful
         # cases (same region, different adjustment / same adjustment, different
@@ -3474,7 +3474,9 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             ops_row.addWidget(btn, 1)
-        self._mask_add_btn.setToolTip("Add a new empty mask layer — paint it with the Paint brush")
+        self._mask_add_btn.setToolTip(
+            "Start another empty mask. Paint already makes the first one for you."
+        )
         self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
         self._mask_del_btn.clicked.connect(self._on_mask_delete_clicked)
         col.addLayout(ops_row)
@@ -3523,23 +3525,27 @@ class ImageAdjustPanelWidget(QWidget):
         ai_row.setSpacing(6)
         self._mask_ai_subject_btn = QPushButton("Subject")
         self._mask_ai_sky_btn = QPushButton("Sky")
-        self._mask_ai_click_btn = QPushButton("Select")
+        self._mask_ai_click_btn = QPushButton("Point at It")
         for btn, tip in (
             (
                 self._mask_ai_subject_btn,
-                "Select the main subject automatically (BiRefNet).\n"
-                "Creates a new mask layer you can then brush or erase.",
+                "Subject — one press, no aiming: the app decides what the main "
+                "subject is\nand masks it. Best when the photo has one obvious "
+                "subject.\nMakes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_sky_btn,
-                "Select the sky automatically.\n"
-                "Creates a new mask layer you can then brush or erase.",
+                "Sky — one press: masks the sky.\n"
+                "Makes its own mask, which you can then paint or erase.",
             ),
             (
                 self._mask_ai_click_btn,
-                "Click anything in the photo to select it (MobileSAM).\n"
-                "Click again to add to the selection; the first click may "
-                "pause briefly while the image is analysed.",
+                "Point at it — you choose what gets masked, not the app.\n"
+                "Click a jacket, one flower, one person in a group; click more "
+                "spots\nto add them to the SAME selection. Use this when Subject "
+                "picks the\nwrong thing, or when you want part of something "
+                "rather than all of it.\n"
+                "The first click pauses briefly while the photo is analysed.",
             ),
         ):
             btn.setObjectName("adjust_db_btn")
@@ -3636,8 +3642,8 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_params_wrap)
 
         self._mask_empty_hint = QLabel(
-            "No masks yet. Add Mask paints one by hand, or let Subject / Sky / "
-            "Select find one for you."
+            "No masks yet. Paint one by hand, drag a Linear or Radial gradient, or "
+            "let Subject / Sky / Select find one for you."
         )
         self._mask_empty_hint.setWordWrap(True)
         self._mask_empty_hint.setStyleSheet(
@@ -3748,6 +3754,11 @@ class ImageAdjustPanelWidget(QWidget):
         if lst is not None:
             # An empty list box is just a hole in the panel.
             lst.setVisible(has_layer)
+        add_btn = getattr(self, "_mask_add_btn", None)
+        if add_btn is not None:
+            # Only meaningful once one mask exists: with none, every tool below
+            # already creates its own, so a "New Mask" button just adds a step.
+            add_btn.setVisible(has_layer)
         for btn in (self._mask_del_btn, self._mask_paint_btn,
                     self._mask_erase_btn, self._mask_invert_btn):
             btn.setEnabled(has_layer)
@@ -3807,6 +3818,18 @@ class ImageAdjustPanelWidget(QWidget):
     def _on_mask_tool_toggled(self, btn: QPushButton, checked: bool) -> None:
         if self._mask_block:
             return
+        if checked and btn is self._mask_paint_btn and self.active_mask_index() is None:
+            # Paint makes its own mask, like every other coverage tool. Without
+            # this it was the one tool that silently did nothing until you had
+            # pressed Add Mask first.
+            self.mask_add_requested.emit()
+            if self.active_mask_index() is None:
+                self._mask_block = True
+                try:
+                    btn.setChecked(False)
+                finally:
+                    self._mask_block = False
+                return
         if checked:
             self._mask_block = True
             try:

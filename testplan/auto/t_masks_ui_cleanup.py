@@ -146,10 +146,12 @@ def test_rows_are_selectable_not_checkable():
 
 def test_select_button_is_named_for_what_it_does():
     p = _panel()
-    assert p._mask_ai_click_btn.text() == "Select", (
-        f'AI point-prompt button is labelled "{p._mask_ai_click_btn.text()}"'
-    )
-    print("  OK   the point-prompt tool is called Select, not Click")
+    label = p._mask_ai_click_btn.text()
+    # "Click" named the input; "Select" read as a synonym for Subject. The
+    # label has to say that YOU choose the thing.
+    assert label not in ("Click", "Select"), f"point-prompt button reverted to {label!r}"
+    assert "point" in label.lower(), f"point-prompt button is labelled {label!r}"
+    print(f"  OK   the point-prompt tool is called {label!r}, distinct from Subject")
 
 
 def test_empty_ai_mask_is_rejected():
@@ -163,6 +165,34 @@ def test_empty_ai_mask_is_rejected():
     print("  OK   an empty AI result is refused with a message")
 
 
+def test_paint_creates_its_own_mask_like_every_other_tool():
+    """Paint used to be the one coverage tool that needed Add Mask first."""
+    p = _panel()
+    assert p.active_mask_index() is None
+
+    created = []
+    p.mask_add_requested.connect(lambda: created.append(True))
+    p._mask_paint_btn.setChecked(True)
+    assert created, "arming Paint with no mask did not ask for one"
+
+    # With no host connected nothing is actually created, so Paint must not
+    # leave itself armed over a mask that does not exist.
+    assert not p._mask_paint_btn.isChecked(), (
+        "Paint stayed armed with no mask to paint into"
+    )
+    print("  OK   Paint asks for a mask instead of silently doing nothing")
+
+
+def test_new_mask_button_is_hidden_in_the_empty_state():
+    """With no masks, every tool creates one -- a New Mask button is a step."""
+    p = _panel()
+    assert not p._mask_add_btn.isVisible(), "New Mask shown before any mask exists"
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="Mask 1")]))
+    assert p._mask_add_btn.isVisible(), "New Mask hidden when a second one is possible"
+    assert p._mask_add_btn.text() == "New Mask", p._mask_add_btn.text()
+    print("  OK   New Mask appears only once it means 'another one'")
+
+
 def main() -> int:
     test_invert_applies_outside_the_painted_region()
     test_effective_bbox_is_full_frame_when_inverted()
@@ -173,6 +203,8 @@ def main() -> int:
     test_rows_are_selectable_not_checkable()
     test_select_button_is_named_for_what_it_does()
     test_empty_ai_mask_is_rejected()
+    test_paint_creates_its_own_mask_like_every_other_tool()
+    test_new_mask_button_is_hidden_in_the_empty_state()
     print("\nPASS t_masks_ui_cleanup")
     return 0
 
