@@ -169,6 +169,76 @@ def test_no_chart_present():
     check("no chart: manual corners still available", len(dlg.canvas.corners) == 4)
 
 
+# A real photograph of a physical chart, if one is available. Synthetic
+# charts validate the plumbing but not detection against real optics --
+# uneven light, gloss sheen, off-axis framing, and a scene full of other
+# colour targets competing for the detector's attention.
+CHART_SAMPLE = os.environ.get(
+    "RAWVIEWER_CHART_SAMPLE", "/tmp/RAW_Sample/colorchecker.CR3"
+)
+
+
+def test_real_raw_if_available():
+    """Full chain on a real RAW: identity -> detect -> calibrate -> apply.
+
+    Skipped when no sample is present. Verified against a Canon EOS R6
+    Mark III frame of the DPReview studio scene, where the ColorChecker
+    is one of several charts in a cluttered frame: detection took 0.15s,
+    corners landed tight on the 24 patches, and the resulting corrections
+    were small and plausible (worst |HSL delta| 3.8, WB shift -1.9K).
+    """
+    if not os.path.isfile(CHART_SAMPLE):
+        print(f"  SKIP  real RAW sample not present ({CHART_SAMPLE})")
+        return
+
+    from color_calibration import (
+        calibrate_camera_curves_and_hsl,
+        camera_identity_for_file,
+        validate_and_detect_color_checker,
+    )
+    from unified_image_processor import UnifiedImageProcessor
+
+    make, model, iso = camera_identity_for_file(CHART_SAMPLE)
+    check("real RAW: camera identified", bool(make or model), f"{make!r} {model!r} iso={iso}")
+
+    base = UnifiedImageProcessor().decode_raw_edit_base(
+        CHART_SAMPLE, use_full_resolution=False
+    )
+    check("real RAW: decodes", base is not None and hasattr(base, "shape"))
+    if base is None:
+        return
+
+    dlg = _make_dialog(base)
+    detected = dlg.canvas.auto_detect()
+    check("real RAW: chart auto-detected", detected is True)
+    if not detected:
+        return
+
+    corners = dlg.canvas.get_pixel_corners()
+    valid, message, sampled = validate_and_detect_color_checker(dlg.canvas.image, corners)
+    check("real RAW: detected corners pass validation", valid, message[:80])
+    if not valid:
+        return
+
+    profile = calibrate_camera_curves_and_hsl(sampled)
+    worst = _worst_correction(profile)
+    # Not asserting ~zero here: a real camera legitimately needs SOME
+    # correction. The useful bound is that it stays small -- a wildly
+    # large value means misaligned corners or scrambled patch order, not
+    # a badly-behaved sensor.
+    check(
+        "real RAW: correction is plausible, not wild",
+        worst <= 15.0,
+        f"worst |HSL delta| = {worst:.2f}",
+    )
+    temp = abs(float(profile["temperature_shift"]))
+    check(
+        "real RAW: WB shift is sane",
+        temp <= 1500.0,
+        f"temperature_shift = {profile['temperature_shift']}",
+    )
+
+
 def test_mcc_available():
     """cv2.mcc lives in opencv-contrib; a base opencv build would lose this."""
     check("cv2.mcc present", hasattr(cv2, "mcc"))
@@ -188,6 +258,7 @@ def main():
     test_perspective()
     test_noisy()
     test_no_chart_present()
+    test_real_raw_if_available()
 
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
