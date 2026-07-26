@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Callable, Dict, Sequence
 
-from PyQt6.QtCore import QRectF, Qt, QSettings, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -191,7 +191,28 @@ class AdjustValueLabel(QLabel):
         super().mousePressEvent(event)
 
 
-_SECTION_EXPANDED_SETTINGS_PREFIX = "adjust_panel/section_expanded/"
+# Which sections stand open the first time the editor is opened in a run.
+# Everything else starts collapsed: the panel has a dozen sections, and a
+# fully-expanded column meant scrolling past HSL, Tone Curve and Looks to
+# reach anything, every single launch. Histogram and Light are the two you
+# read or reach for immediately on opening an image.
+_SECTION_DEFAULT_EXPANDED = frozenset({"histogram", "light"})
+
+# Collapse state for the rest of the run, keyed by section settings_key.
+#
+# Deliberately in-process rather than QSettings: persisted across restarts,
+# one session spent opening every section to find something left the panel
+# fully expanded forever after. Session-scoped gives both halves of what is
+# actually wanted -- a predictable starting shape each launch, and a panel
+# that stays exactly as arranged while working through a folder. It survives
+# image navigation and closing/reopening the editor because it outlives the
+# panel widget, not because the widget remembers anything.
+_SECTION_EXPANDED_SESSION: dict[str, bool] = {}
+
+
+def reset_section_expanded_session() -> None:
+    """Forget this run's collapse state (tests; a genuinely fresh panel)."""
+    _SECTION_EXPANDED_SESSION.clear()
 
 
 class _FileDropFrame(QFrame):
@@ -385,9 +406,11 @@ class PanelTabBar(QWidget):
 class CollapsibleSection(QWidget):
     """A clean, Lightroom-style collapsible accordion section for PyQt6.
 
-    When constructed with a ``settings_key``, the expanded/collapsed state
-    persists across sessions (QSettings) -- so a user who never touches HSL
-    doesn't have to keep collapsing it every time they open the editor.
+    With a ``settings_key``, the expanded/collapsed state is remembered for
+    the rest of the run (see ``_SECTION_EXPANDED_SESSION``): rearranging the
+    panel survives switching image and closing/reopening the editor, but each
+    launch starts from the same predictable shape rather than from whatever
+    state a previous session happened to end in.
     """
     def __init__(self, title: str, parent=None, *, settings_key: str | None = None):
         super().__init__(parent)
@@ -473,13 +496,10 @@ class CollapsibleSection(QWidget):
     def _load_expanded_default(self) -> bool:
         if not self._settings_key:
             return True
-        return bool(
-            QSettings("RAWviewer", "RAWviewer").value(
-                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key,
-                True,
-                type=bool,
-            )
-        )
+        remembered = _SECTION_EXPANDED_SESSION.get(self._settings_key)
+        if remembered is not None:
+            return remembered
+        return self._settings_key in _SECTION_DEFAULT_EXPANDED
 
     def _on_header_pressed(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -490,9 +510,7 @@ class CollapsibleSection(QWidget):
         self.content.setVisible(self._expanded)
         self.arrow.setText("▼" if self._expanded else "▶")
         if self._settings_key:
-            QSettings("RAWviewer", "RAWviewer").setValue(
-                _SECTION_EXPANDED_SETTINGS_PREFIX + self._settings_key, self._expanded
-            )
+            _SECTION_EXPANDED_SESSION[self._settings_key] = self._expanded
 
     def add_widget(self, widget: QWidget) -> None:
         self.content_layout.addWidget(widget)
