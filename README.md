@@ -164,6 +164,7 @@ While the Adjust panel is open (**E**):
 |-----|--------|
 | **E** / **Esc** | Close Adjust (returns to browse mode) |
 | **D** / **B** / **X** / **H** | Hold to paint **Dodge** / **Burn** / **Eraser** / **Heal** — sweep the pointer, no mouse button. Releasing puts the tool away |
+| **P** | Hold to paint into the selected **mask**. On the Masks tab, **X** erases from it instead of from Dodge/Burn |
 | **O** | Toggle **Mask** overlay (when a brush tool is armed) |
 | **Two-finger scroll** | Change **Brush Size** when a brush is armed (**Ctrl+scroll** still zooms) |
 | **←** / **→** | Nudge the focused slider (or previous/next image if none focused) |

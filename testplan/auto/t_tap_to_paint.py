@@ -599,6 +599,118 @@ def test_whole_stroke_snap_has_no_straight_cut():
     print(f"  OK   whole-stroke snap stays smooth (worst step {ratio:.1f}x mean)")
 
 
+# ------------------------------------------- mask brushes are momentary too
+
+
+class _MaskHost:
+    """Just the host methods the mask-brush keys touch."""
+
+    def __init__(self, panel):
+        import main
+
+        self._m = main
+        self._handle_brush_key_down = main.RAWImageViewer._handle_brush_key_down.__get__(self)
+        self._handle_brush_key_up = main.RAWImageViewer._handle_brush_key_up.__get__(self)
+        self._handle_mask_brush_key_down = main.RAWImageViewer._handle_mask_brush_key_down.__get__(self)
+        self._masks_tab_is_forward = main.RAWImageViewer._masks_tab_is_forward.__get__(self)
+        self.single_image_adjust_panel = panel
+        self.gpu_view = _StubView()
+        self._brush_key_held = None
+        self.status = []
+
+    def ensure_mask_layer_for_painting(self):
+        return self.single_image_adjust_panel.active_mask_index() is not None
+
+    def _show_status(self, msg, *a, **k):
+        self.status.append(msg)
+
+
+class _StubView:
+    def __init__(self):
+        self.began = 0
+        self.ended = 0
+
+    def begin_key_paint(self):
+        self.began += 1
+
+    def end_key_paint(self):
+        self.ended += 1
+
+
+def _mask_panel_and_host():
+    from raw_mask_layers import MaskLayer, MaskLayerStack
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget, reset_section_expanded_session
+
+    reset_section_expanded_session()
+    p = ImageAdjustPanelWidget()
+    p.show()
+    layer = MaskLayer.empty(64, 64, name="M1")
+    layer.alpha[10:40, 10:40] = 1.0
+    layer.touch()
+    p.set_mask_layer_stack(MaskLayerStack([layer]))
+    p._panel_tabs.set_current(1)
+    return p, _MaskHost(p)
+
+
+def test_p_holds_to_paint_the_mask():
+    p, h = _mask_panel_and_host()
+    assert h._handle_brush_key_down("mask_paint") is True
+    assert p.mask_layer_mode() == "paint", "P did not arm the mask brush"
+    assert h.gpu_view.began == 1, "P did not open the paint gate"
+
+    assert h._handle_brush_key_up("mask_paint") is True
+    assert p.mask_layer_mode() is None, "releasing P left the mask brush armed"
+    assert h.gpu_view.ended == 1
+    print("  OK   P holds to paint the mask, release puts it away")
+
+
+def test_x_erases_whichever_system_is_in_play():
+    p, h = _mask_panel_and_host()
+
+    # Masks tab forward -> X is the mask eraser.
+    assert h._masks_tab_is_forward()
+    h._handle_brush_key_down("mask_erase")
+    assert p.mask_layer_mode() == "erase"
+    assert p.dodge_burn_mode() is None, "X armed dodge/burn while masking"
+    h._handle_brush_key_up("mask_erase")
+    assert p.mask_layer_mode() is None
+
+    # Global tab -> X is the dodge/burn eraser, as it always was.
+    p._panel_tabs.set_current(0)
+    assert not h._masks_tab_is_forward()
+    h._handle_brush_key_down("erase")
+    assert p.dodge_burn_mode() == "erase"
+    assert p.mask_layer_mode() is None
+    h._handle_brush_key_up("erase")
+    assert p.dodge_burn_mode() is None
+    print("  OK   X erases in whichever system is forward")
+
+
+def test_erase_key_release_follows_the_press_not_the_tab():
+    """Switching tabs mid-hold must not orphan the stroke."""
+    src = (REPO / "src" / "main.py").read_text(encoding="utf-8")
+    assert 'held == "mask_erase"' in src, (
+        "the X release maps from the current tab rather than what the press armed"
+    )
+    print("  OK   the release matches what the press armed")
+
+
+def test_erasing_with_no_mask_says_so():
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget, reset_section_expanded_session
+
+    reset_section_expanded_session()
+    p = ImageAdjustPanelWidget()
+    p.show()
+    p._panel_tabs.set_current(1)
+    h = _MaskHost(p)
+    assert h._handle_brush_key_down("mask_erase") is False, (
+        "X armed an eraser with no mask to erase"
+    )
+    assert h.status and "paint one first" in h.status[-1], h.status
+    assert h.gpu_view.began == 0, "the paint gate opened with nothing to paint"
+    print("  OK   X with no mask explains instead of arming nothing")
+
+
 def main() -> int:
     test_latch_survives_key_release()
     test_latched_move_paints_without_any_button()
@@ -617,6 +729,10 @@ def main() -> int:
     test_focus_loss_abort_also_disarms()
     test_mask_overlay_togglable_with_nothing_armed()
     test_mask_toggle_stays_enabled_after_disarm()
+    test_p_holds_to_paint_the_mask()
+    test_x_erases_whichever_system_is_in_play()
+    test_erase_key_release_follows_the_press_not_the_tab()
+    test_erasing_with_no_mask_says_so()
     test_release_snap_leaves_no_rectangular_edge()
     test_release_snap_still_snaps_to_real_edges()
     test_feather_window_shape_and_bounds()

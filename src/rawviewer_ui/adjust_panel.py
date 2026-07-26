@@ -1140,7 +1140,7 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(reset_btn)
         layout.addLayout(header)
 
-        hint = QLabel("E closes · hold D B X H to paint · scroll = size")
+        hint = QLabel("E closes · hold D B X H P to paint · scroll = size")
         # 9px and faint on purpose: it is discoverability for shortcuts, not
         # content. At 10px across two wrapped lines it was the largest text
         # block in the header and outweighed the controls underneath. The full
@@ -3688,14 +3688,15 @@ class ImageAdjustPanelWidget(QWidget):
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Paint — brush coverage into the selected mask.\n\n"
+                "Paint (hold P) — brush coverage into the selected mask.\n\n"
                 "Repeated strokes build toward full coverage. With no mask yet, "
                 "this makes one.\nSize, Flow, Feather and Edge Assist come from "
                 "the Local section.",
             ),
             (
                 self._mask_erase_btn,
-                "Erase — remove coverage from the selected mask under the brush.\n\n"
+                "Erase (hold X) — remove coverage from the selected mask under "
+                "the brush.\n\n"
                 "Use it to trim what Smart Object, Sky or AI Selection got wrong.",
             ),
             (
@@ -3984,8 +3985,23 @@ class ImageAdjustPanelWidget(QWidget):
 
     def arm_mask_paint(self) -> None:
         """Arm the mask Paint brush (used right after Add Mask)."""
-        if not self._mask_paint_btn.isChecked():
-            self._mask_paint_btn.setChecked(True)  # fires _on_mask_tool_toggled
+        self.set_mask_layer_mode("paint")
+
+    def set_mask_layer_mode(self, mode: str | None) -> bool:
+        """Arm a mask brush by name, or disarm with None.
+
+        Force-selects rather than toggling, because the hotkeys that call this
+        are momentary: a held key must always arm its own tool, and releasing
+        is what stops it. Returns whether a tool ended up armed.
+        """
+        wanted = (mode or "").strip().lower()
+        for btn, name in self._mask_tool_buttons():
+            if name == wanted:
+                if not btn.isChecked():
+                    btn.setChecked(True)  # fires _on_mask_tool_toggled
+                return self.mask_layer_mode() is not None
+        self.disarm_mask_layer_tools()
+        return False
 
     def select_mask_index(self, index: int) -> None:
         if 0 <= index < self._mask_list.count():

@@ -23236,6 +23236,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None or not hasattr(panel, "set_dodge_burn_mode"):
             return False
+
+        # Mask brushes take the same momentary route as dodge/burn: hold to
+        # paint, release to put the tool away. The Masks tab's buttons stay
+        # the persistent alternative -- a mask stroke is usually longer than a
+        # dodge dab, and an armed tool that painted on pointer movement alone
+        # could not be moved across the photo without drawing on the way.
+        if mode in ("mask_paint", "mask_erase"):
+            return self._handle_mask_brush_key_down(panel, mode)
+
         if not HOLD_TO_PAINT:
             # The tap both arms the tool and latches painting on: sweeping the
             # pointer stamps with no mouse button down. Requiring a click
@@ -23264,6 +23273,44 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gv.begin_key_paint()
         return True
 
+    def _masks_tab_is_forward(self) -> bool:
+        """True when the Adjust panel is showing its Masks page."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        tabs = getattr(panel, "_panel_tabs", None) if panel is not None else None
+        try:
+            return tabs is not None and tabs.current() == 1
+        except Exception:
+            return False
+
+    def _handle_mask_brush_key_down(self, panel, mode: str) -> bool:
+        """Arm a mask brush from P / X and open the paint gate."""
+        if not hasattr(panel, "set_mask_layer_mode"):
+            return False
+        # Paint makes its own mask, exactly as the button does -- otherwise the
+        # key would silently do nothing on a photo with no masks yet.
+        if mode == "mask_paint" and not self.ensure_mask_layer_for_painting():
+            return False
+        if panel.active_mask_index() is None:
+            self._show_status("No mask to erase yet — paint one first.", 2500)
+            return False
+
+        if hasattr(panel, "show_masks_tab"):
+            panel.show_masks_tab()
+        armed = panel.set_mask_layer_mode(
+            "paint" if mode == "mask_paint" else "erase"
+        )
+        if not armed:
+            return False
+
+        gv = getattr(self, "gpu_view", None)
+        if getattr(self, "_brush_key_held", None) not in (None, mode):
+            if gv is not None and hasattr(gv, "end_key_paint"):
+                gv.end_key_paint()
+        self._brush_key_held = mode
+        if gv is not None and hasattr(gv, "begin_key_paint"):
+            gv.begin_key_paint()
+        return True
+
     def _handle_brush_key_up(self, mode: str) -> bool:
         """Route a brush hotkey release: close the stroke and disarm the tool.
 
@@ -23286,7 +23333,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if gv is not None and hasattr(gv, "end_key_paint"):
             gv.end_key_paint()
         panel = getattr(self, "single_image_adjust_panel", None)
-        if panel is not None and hasattr(panel, "disarm_dodge_burn"):
+        if panel is None:
+            return True
+        if mode in ("mask_paint", "mask_erase"):
+            if hasattr(panel, "disarm_mask_layer_tools"):
+                panel.disarm_mask_layer_tools()
+        elif hasattr(panel, "disarm_dodge_burn"):
             panel.disarm_dodge_burn()
         return True
 
@@ -31059,7 +31111,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 Qt.Key.Key_B: "burn",
                 Qt.Key.Key_X: "erase",
                 Qt.Key.Key_H: "heal",
+                # P paints into the selected mask. It toggles RAW recovery in
+                # browse, but browse keys do not apply while Adjust is open.
+                Qt.Key.Key_P: "mask_paint",
             }.get(key)
+            # X means "erase" in whichever brush system is in play: the mask
+            # one when the Masks tab is forward, dodge/burn otherwise. One key,
+            # one meaning -- the alternative was a second erase key whose only
+            # job is to say which mask system you meant.
+            if brush_mode == "erase" and self._masks_tab_is_forward():
+                brush_mode = "mask_erase"
             if brush_mode is not None and not ctrl_or_cmd:
                 if self._handle_brush_key_down(brush_mode):
                     return True
@@ -33977,7 +34038,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     Qt.Key.Key_B: "burn",
                     Qt.Key.Key_X: "erase",
                     Qt.Key.Key_H: "heal",
+                    Qt.Key.Key_P: "mask_paint",
                 }.get(event.key())
+                # Release matches whatever the press armed, not what the tab
+                # says now: switching tabs mid-stroke must not orphan the hold.
+                held = getattr(self, "_brush_key_held", None)
+                if brush_mode == "erase" and held == "mask_erase":
+                    brush_mode = "mask_erase"
                 if brush_mode is not None and self._handle_brush_key_up(brush_mode):
                     return True
 
