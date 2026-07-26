@@ -214,9 +214,16 @@ def main() -> int:
     bare_adj = dict(DEFAULT_ADJUSTMENTS)
     bare_adj[AS_SHOT_TEMP_KEY] = 5500.0
     out_bare = _render(flat, bare_adj)
+    # "Flat" means flat to within the display encode's +/-1 LSB TPDF dither
+    # (raw_edit_pipeline.linear_to_display_uint8), which perturbs every
+    # pixel independently so a uniform input is deliberately not bit-uniform
+    # on output. The distinction this check exists to make is unaffected:
+    # dither moves these pixels apart by 1 code, the mask by ~40.
+    bare_diff = abs(int(out_bare[50, 75, 0]) - int(out_bare[5, 5, 0]))
     check(
         "bare panel adj (no mask folded in) is flat -- proves overlay is required",
-        int(out_bare[50, 75, 0]) == int(out_bare[5, 5, 0]),
+        bare_diff <= 1,
+        f"diff={bare_diff}",
     )
     overlaid_adj = dict(bare_adj)
     overlaid_adj[MASK_KEY] = serial

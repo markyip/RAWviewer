@@ -51,6 +51,11 @@ def main() -> int:
         m._sync_dodge_burn_mask_overlay = (
             mainmod.RAWImageViewer._sync_dodge_burn_mask_overlay.__get__(m)
         )
+        # Restoring a mask also drops per-image AI-mask state (the SAM
+        # embedding and click history belong to the previous buffer).
+        # Bound from the real class rather than stubbed, so this mock keeps
+        # failing if that method's own contract changes.
+        m._reset_ai_mask_state = mainmod.RAWImageViewer._reset_ai_mask_state.__get__(m)
         return m
 
     # 1. Undo to a previous painted mask restores that buffer.

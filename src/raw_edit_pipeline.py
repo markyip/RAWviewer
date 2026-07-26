@@ -872,18 +872,34 @@ def linear_to_display_uint8(img: np.ndarray, adj: dict[str, float] | None = None
         display = _apply_display_stage_banded(img, merged, n_workers)
     else:
         display = _apply_display_stage(img, merged)
-    # TPDF dither (±1 LSB of the 8-bit output) before quantization. Denoised
-    # smooth gradients otherwise posterize into visible banding on 8-bit
-    # export -- the sensor noise that used to dither them for free is gone.
-    # Deterministic tiled pattern (no per-call RNG state, no full-frame
-    # random buffer) so exports stay byte-reproducible.
+    display = apply_pipeline_lut_linear(display, merged)
+    idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+
+    # TPDF dither (±1 LSB of the 8-bit output) applied in ENCODED space,
+    # immediately before the 8-bit quantization it exists to smooth.
+    # Denoised smooth gradients otherwise posterize into visible banding on
+    # 8-bit export -- the sensor noise that used to dither them for free is
+    # gone. Deterministic tiled pattern (no per-call RNG state, no
+    # full-frame random buffer) so exports stay byte-reproducible.
+    #
+    # This used to add +/-1/255 to the LINEAR buffer instead. The BT.709
+    # toe has a 4.5x slope, so near black that perturbation came out as
+    # +/-4-5 output codes rather than +/-1: deep shadows were visibly
+    # noisy, a black frame quantized to 1 instead of 0, and a ramp lost
+    # monotonicity. Dithering after the encode makes "1 LSB" mean one LSB
+    # at every brightness, which is the whole point of dithering.
     tile = _dither_tile()
     th, tw = display.shape[0], display.shape[1]
     d = tile[np.arange(th) % tile.shape[0]][:, np.arange(tw) % tile.shape[1]]
-    display = display + (d * (1.0 / 255.0))[..., None]
-    display = apply_pipeline_lut_linear(display, merged)
-    idx = np.clip(display * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
-    encoded = apply_pipeline_lut_encoded(_gamma_lut8()[idx], merged, 255.0)
+    from fast_raw_decode import gamma_curve16
+
+    # 256 units of the 16-bit encoded curve == 1 LSB of the 8-bit output.
+    enc16 = gamma_curve16()[idx].astype(np.float32) + (d * 256.0)[..., None]
+    # >> 8 (truncation) matches dcraw's write_ppm and _gamma_lut8 exactly,
+    # so a zero-dither pixel encodes bit-identically to the old path.
+    encoded = (np.clip(enc16, 0.0, 65535.0).astype(np.uint16) >> 8).astype(np.uint8)
+
+    encoded = apply_pipeline_lut_encoded(encoded, merged, 255.0)
     return apply_channel_curves_encoded(encoded, merged, 255.0)
 
 

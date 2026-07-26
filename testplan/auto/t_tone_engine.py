@@ -22,6 +22,31 @@ def main() -> int:
     def render(img, adj):
         return linear_to_display_uint8(process_linear_edit_buffer(img, adj, preview=True), adj)
 
+    # The display encode adds +/-1 LSB of TPDF dither so denoised gradients
+    # do not posterize on 8-bit export. That is correct and deliberate, but
+    # two independent TPDF samples differ by up to 2 LSB, so a dithered
+    # ramp legitimately steps backwards by 1-2 codes and cannot be used to
+    # test the CURVE's monotonicity. render_undithered isolates the curve;
+    # the dither's own contract (never more than 1 LSB from the undithered
+    # value) is asserted separately below.
+    import contextlib
+
+    import raw_edit_pipeline as _rep
+
+    @contextlib.contextmanager
+    def dither_disabled():
+        saved_fn, saved_cache = _rep._dither_tile, _rep._dither_tile_cache
+        _rep._dither_tile = lambda: np.zeros((512, 512), dtype=np.float32)
+        _rep._dither_tile_cache = None
+        try:
+            yield
+        finally:
+            _rep._dither_tile, _rep._dither_tile_cache = saved_fn, saved_cache
+
+    def render_undithered(img, adj):
+        with dither_disabled():
+            return render(img, adj)
+
     # 1. Identity: defaults / zeroed sliders are an exact no-op
     img = (np.random.RandomState(7).rand(64, 64, 3).astype(np.float32)) ** 2
     a0 = render(img, {})
@@ -29,18 +54,33 @@ def main() -> int:
         d = np.abs(a0.astype(int) - render(img, adj).astype(int)).max()
         check(f"identity {list(adj)[0]}=0", d == 0, f"maxdiff={d}")
 
-    # 2. Monotonicity at slider extremes (no tone-curve inversion/banding)
+    # 2. Monotonicity at slider extremes (no tone-curve inversion/banding).
+    # Measured on the undithered encode -- see render_undithered above.
     xs = np.linspace(1e-5, 1.2, 800, dtype=np.float32)
     ramp = np.repeat(xs[None, :, None], 3, axis=2).reshape(1, -1, 3)
-    for adj in (
+    extremes = (
         {"Shadows2012": 100.0}, {"Shadows2012": -100.0},
         {"Blacks2012": 100.0}, {"Blacks2012": -100.0},
         {"Whites2012": 100.0}, {"Highlights2012": -100.0},
         {"Shadows2012": 100.0, "Blacks2012": 100.0},
-    ):
-        out = render(ramp, adj)[0, :, 0].astype(int)
-        mono = bool(np.all(np.diff(out) >= -1))
-        check(f"monotonic {adj}", mono)
+    )
+    for adj in extremes:
+        out = render_undithered(ramp, adj)[0, :, 0].astype(int)
+        worst = int(np.diff(out).min())
+        check(f"monotonic {adj}", worst >= -1, f"worst step={worst}")
+
+    # 2b. Dither contract: it must perturb by at most 1 LSB, at EVERY
+    # brightness. This is the guard for a real defect -- the dither was
+    # added to the LINEAR buffer before the BT.709 encode, whose toe has a
+    # 4.5x slope, so near black "1 LSB" arrived as 4-5 output codes: noisy
+    # deep shadows, a black frame quantizing to 1, and a ramp that lost
+    # monotonicity. Dithering after the encode makes 1 LSB mean 1 LSB
+    # everywhere. A regression to linear-space dither fails here loudly.
+    for adj in extremes:
+        dithered = render(ramp, adj)[0, :, 0].astype(int)
+        clean = render_undithered(ramp, adj)[0, :, 0].astype(int)
+        worst = int(np.abs(dithered - clean).max())
+        check(f"dither <= 1 LSB {adj}", worst <= 1, f"worst deviation={worst}")
 
     # 3. Black anchor: absolute black stays 0 under max lift
     black = np.zeros((4, 4, 3), dtype=np.float32)
