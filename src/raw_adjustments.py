@@ -506,13 +506,55 @@ def _parse_rating_value(raw: object) -> int:
         return 0
 
 
+_XMP_ROOT_CACHE: "OrderedDict[str, tuple[tuple[int, int], object]]" = OrderedDict()
+_XMP_ROOT_CACHE_MAX = 8
+_XMP_ROOT_CACHE_LOCK = threading.Lock()
+
+
+def _cached_xmp_root(xmp_path: str):
+    """Parsed root element for a sidecar, memoised on (mtime_ns, size).
+
+    A single ``load_adjustments_for_file`` calls ~11 different parse helpers,
+    each of which used to re-read and re-parse the whole sidecar.  On a mask-
+    heavy sidecar (>1 MB of base64 PNG) that parse dominates load time, so the
+    root is shared across helpers instead.
+
+    Callers must treat the returned tree as read-only -- the sidecar *write*
+    path mutates its tree and so deliberately parses its own fresh copy.
+    Returns ``None`` if the file is missing or malformed.
+    """
+    if not xmp_path:
+        return None
+    try:
+        st = os.stat(xmp_path)
+    except OSError:
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    with _XMP_ROOT_CACHE_LOCK:
+        hit = _XMP_ROOT_CACHE.get(xmp_path)
+        if hit is not None and hit[0] == sig:
+            _XMP_ROOT_CACHE.move_to_end(xmp_path)
+            return hit[1]
+    try:
+        root = ET.parse(xmp_path).getroot()
+    except Exception:
+        return None
+    with _XMP_ROOT_CACHE_LOCK:
+        _XMP_ROOT_CACHE[xmp_path] = (sig, root)
+        _XMP_ROOT_CACHE.move_to_end(xmp_path)
+        while len(_XMP_ROOT_CACHE) > _XMP_ROOT_CACHE_MAX:
+            _XMP_ROOT_CACHE.popitem(last=False)
+    return root
+
+
 def parse_xmp_rating(xmp_path: str) -> int:
     """Parse xmp:Rating from a sidecar without loading adjustment sliders."""
     if not xmp_path or not os.path.isfile(xmp_path):
         return 0
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return 0
         ns = {
             "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
             "xmp": "http://ns.adobe.com/xap/1.0/",
@@ -727,8 +769,9 @@ def _parse_point_curve_from_xmp(xmp_path: str, tag_name: str) -> str:
 
     points: list[tuple[float, float]] = []
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {
             "rdf": RDF_NS,
             "crs": CRS_NS,
@@ -778,8 +821,9 @@ def _parse_crs_child_text_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {"rdf": RDF_NS, "crs": CRS_NS}
         for desc in root.findall(".//rdf:Description", ns):
             for child in desc:
@@ -805,8 +849,9 @@ def _parse_crs_string_from_xmp(xmp_path: str, local_name: str) -> str:
     if not xmp_path or not os.path.isfile(xmp_path) or not local_name:
         return ""
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return ""
         ns = {"rdf": RDF_NS, "crs": CRS_NS}
         for desc in root.findall(".//rdf:Description", ns):
             for key, val in desc.attrib.items():
@@ -1162,9 +1207,10 @@ def parse_xmp_adjustments(xmp_path: str) -> dict[str, float]:
     """Parse Lightroom-compatible crs adjustment sliders from an XMP sidecar file."""
     adjustments = {}
     try:
-        tree = ET.parse(xmp_path)
-        root = tree.getroot()
-        
+        root = _cached_xmp_root(xmp_path)
+        if root is None:
+            return adjustments
+
         ns = {
             'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
             'x': 'adobe:ns:meta/',
