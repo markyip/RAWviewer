@@ -8119,6 +8119,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             if image is None or image.isNull():
                 return
+            # Check staleness BEFORE converting. on_manager_pixmap_ready ends
+            # in a path-match guard, so a buffer for a photo the user has
+            # already left was converted and then dropped -- and the
+            # conversion is 18 ms on the GUI thread for a 33 MP frame, plus a
+            # full-size QPixmap allocated only to be freed. The cheap checks
+            # are cheap; do them first.
+            if getattr(self, "view_mode", "single") not in ("single", "compare"):
+                return
+            if _norm_path(file_path) != _norm_path(
+                getattr(self, "current_file_path", None)
+            ) and getattr(self, "view_mode", "single") != "compare":
+                return
             pixmap = _QPixmap.fromImage(image)
             if pixmap.isNull():
                 return

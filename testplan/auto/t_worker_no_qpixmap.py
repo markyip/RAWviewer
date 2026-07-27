@@ -114,6 +114,21 @@ def main() -> int:
     src = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "image_load_manager.py")).read()
     check("the worker emits QImage buffers rather than dropping them", "qimage_ready.emit" in src)
 
+    # --- the conversion must not be paid for a photo already navigated away ---
+    import inspect
+
+    slot_src = inspect.getsource(mainmod.RAWImageViewer.on_manager_qimage_ready)
+    guard_at = min(
+        slot_src.find("view_mode"),
+        slot_src.find("_norm_path"),
+    )
+    convert_at = slot_src.find("fromImage")
+    check(
+        "staleness is checked BEFORE the QPixmap conversion",
+        guard_at != -1 and convert_at != -1 and guard_at < convert_at,
+        "converting first costs ~18ms of GUI thread for a 33MP frame that is then dropped",
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
