@@ -2016,14 +2016,27 @@ class ImageCache(QObject):
         # critical-pressure purge freed everything except a couple of
         # hundred MB of float32 bases.
         try:
-            from unified_image_processor import release_edit_base_cache
+            from unified_image_processor import (
+                release_adjusted_full_cache,
+                release_edit_base_cache,
+                release_unpacked_raw_cache,
+            )
 
-            freed = release_edit_base_cache()
+            # All three live in unified_image_processor at module scope so they
+            # survive the one-shot workers that build them. That is what makes
+            # them useful, and also what puts them outside every cache this
+            # class owns -- a critical-pressure purge used to clear everything
+            # it could see and leave these whole.
+            freed = (
+                release_edit_base_cache()
+                + release_adjusted_full_cache()
+                + release_unpacked_raw_cache()
+            )
             if freed:
                 import logging
 
                 logging.getLogger(__name__).info(
-                    "[MEMORY] released %.0f MB of edit bases", freed / 1e6
+                    "[MEMORY] released %.0f MB of decode/edit buffers", freed / 1e6
                 )
         except Exception:
             pass
@@ -3009,14 +3022,27 @@ class ImageCache(QObject):
         # critical-pressure purge freed everything except a couple of
         # hundred MB of float32 bases.
         try:
-            from unified_image_processor import release_edit_base_cache
+            from unified_image_processor import (
+                release_adjusted_full_cache,
+                release_edit_base_cache,
+                release_unpacked_raw_cache,
+            )
 
-            freed = release_edit_base_cache()
+            # All three live in unified_image_processor at module scope so they
+            # survive the one-shot workers that build them. That is what makes
+            # them useful, and also what puts them outside every cache this
+            # class owns -- a critical-pressure purge used to clear everything
+            # it could see and leave these whole.
+            freed = (
+                release_edit_base_cache()
+                + release_adjusted_full_cache()
+                + release_unpacked_raw_cache()
+            )
             if freed:
                 import logging
 
                 logging.getLogger(__name__).info(
-                    "[MEMORY] released %.0f MB of edit bases", freed / 1e6
+                    "[MEMORY] released %.0f MB of decode/edit buffers", freed / 1e6
                 )
         except Exception:
             pass

@@ -205,6 +205,61 @@ class RgbGlImageItem(QGraphicsObject):
         self._cuda_uploaded_key = None
         if slot is not None:
             self._pending_cuda_release.append(slot)
+            # paint() is the reliable place to free this, but it is not a
+            # guaranteed one: the item can be destroyed, the scene cleared, or
+            # the view switched away without this item ever painting again --
+            # and then the texture and the CUDA registration leak. Schedule a
+            # fallback for the next event-loop turn, which finds the GL widget
+            # itself. If paint gets there first this is a no-op.
+            self._schedule_pending_cuda_drain()
+
+    def _gl_widget(self):
+        """The QOpenGLWidget viewport backing this item's scene, if any."""
+        try:
+            scene = self.scene()
+            if scene is None:
+                return None
+            for view in scene.views():
+                vp = view.viewport()
+                if vp is not None and hasattr(vp, "makeCurrent"):
+                    return vp
+        except Exception:
+            pass
+        return None
+
+    def _schedule_pending_cuda_drain(self) -> None:
+        from PyQt6.QtCore import QTimer
+
+        def _drain():
+            try:
+                if not self._pending_cuda_release:
+                    return
+                widget = self._gl_widget()
+                if widget is None:
+                    # No context reachable. Drop the CUDA registration, which
+                    # does not need GL, and let the texture go with the
+                    # context when it is destroyed.
+                    self._drain_pending_cuda_releases(None)
+                    return
+                try:
+                    widget.makeCurrent()
+                    self._drain_pending_cuda_releases(widget)
+                finally:
+                    try:
+                        widget.doneCurrent()
+                    except Exception:
+                        pass
+            except RuntimeError:
+                # Underlying C++ item already deleted; nothing left to free
+                # through it.
+                pass
+            except Exception:
+                pass
+
+        try:
+            QTimer.singleShot(0, _drain)
+        except Exception:
+            pass
 
     def _drain_pending_cuda_releases(self, widget) -> None:
         """Release deferred interop slots. Call from paint(), context current."""

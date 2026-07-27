@@ -635,8 +635,9 @@ class ImageLoadWorker(QRunnable):
                 self.manager.error_occurred.emit(file_path, str(e))
         finally:
             self.manager._mark_task_not_running(self.task)
-            if self._safe_emit():
-                self.manager._task_finished(self.task)
+            # Always: the bookkeeping (active map, heavy slot) has to happen
+            # even when the manager is tearing down. Only the signal is gated.
+            self.manager._task_finished(self.task, emit=self._safe_emit())
             worker_thread_local.priority = None
             worker_thread_local.task = None
 
@@ -1860,8 +1861,15 @@ class ImageLoadManager(QObject):
                 except Exception:
                     pass
 
-    def _task_finished(self, task: ImageLoadTask):
-        """Remove completed/cancelled work from active map and keep the queue moving."""
+    def _task_finished(self, task: ImageLoadTask, *, emit: bool = True):
+        """Remove completed work from the active map and keep the queue moving.
+
+        ``emit=False`` skips the signal but still does the bookkeeping. The
+        worker used to gate this ENTIRE call on _safe_emit(), so a manager
+        going away mid-flight meant the heavy RAW slot was never released --
+        the holder set kept it forever. Releasing a slot is not an emission
+        and must not depend on one.
+        """
         lock = getattr(self, "_running_tasks_lock", None)
         if lock is not None:
             with lock:
@@ -1876,6 +1884,8 @@ class ImageLoadManager(QObject):
             # Pairs with the claim through the holder set, so a task cancelled
             # while still running cannot decrement a second time.
             self._release_raw_slot_locked(task)
+        if not emit:
+            return
         self.task_completed.emit(task.file_path)
         self._schedule_next_task()
 

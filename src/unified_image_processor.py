@@ -106,8 +106,48 @@ def _on_gui_thread() -> bool:
         return True
 
 
-# Full-res sidecar-applied buffers, shared across processor instances.
+# Full-res sidecar-applied buffers, shared across processor instances -- with
+# the lock and the in-flight map that go WITH them. Hoisting the list alone
+# left concurrent workers mutating one shared list under different locks (lost
+# updates), and gave each worker its own empty in-flight map, so the
+# coalescing that exists to stop two workers both running a ~2s full-res apply
+# for the same file never once coalesced. The state and its guard have to move
+# together.
 _ADJUSTED_FULL_SLOTS: list = []
+_ADJUSTED_FULL_LOCK = _ebt.Lock()
+_ADJUSTED_INFLIGHT: dict = {}
+
+
+def release_adjusted_full_cache() -> int:
+    """Drop the full-res adjusted memo. Returns approximate bytes freed.
+
+    Up to six sensor-resolution buffers; at 45MP that is well over a
+    gigabyte, and it was invisible to the memory-pressure purge -- which
+    cleared every other heavy cache and left this one whole.
+    """
+    freed = 0
+    with _ADJUSTED_FULL_LOCK:
+        for entry in _ADJUSTED_FULL_SLOTS:
+            try:
+                freed += int(getattr(entry[2], "nbytes", 0) or 0)
+            except Exception:
+                pass
+        _ADJUSTED_FULL_SLOTS.clear()
+    return freed
+
+
+def release_unpacked_raw_cache() -> int:
+    """Drop the unpacked-mosaic stash. Returns approximate bytes freed."""
+    freed = 0
+    with _UNPACKED_RAW_LOCK:
+        for value in _UNPACKED_RAW_SLOTS.values():
+            try:
+                arr = value[0] if isinstance(value, tuple) else value
+                freed += int(getattr(arr, "nbytes", 0) or 0)
+            except Exception:
+                pass
+        _UNPACKED_RAW_SLOTS.clear()
+    return freed
 
 # Serialises the post-decode persist work. Each of these captures the FULL
 # sensor buffer (hundreds of MB) in a closure and may re-apply the sidecar at
@@ -246,7 +286,7 @@ class UnifiedImageProcessor:
         # Key_E shortcut, and XMP-saving are all still live in main.py, so
         # that no-op silently hid saved edits from the full-res view while
         # the live panel/preview tier still showed them. Restored.)
-        self._adjusted_full_lock = _threading.Lock()
+        self._adjusted_full_lock = _ADJUSTED_FULL_LOCK
         # Module-level, for the same reason the unpack stash and the in-flight
         # registry are: ImageLoadWorker is a one-shot QRunnable that builds its
         # own UnifiedImageProcessor, so an instance memo died with the worker
@@ -258,7 +298,7 @@ class UnifiedImageProcessor:
         # thread asking for the same apply WAITS for the first instead of
         # recomputing -- overlapping duplicate applies of a 32MP buffer
         # measured as stacked 3.5s+7.2s entries in the same second.
-        self._adjusted_inflight: dict = {}
+        self._adjusted_inflight = _ADJUSTED_INFLIGHT
         # Generation tokens for deferred put_full / preview persist threads —
         # a newer decode of the same path bumps the token so a late write
         # cannot poison the cache after cancel/navigation.
