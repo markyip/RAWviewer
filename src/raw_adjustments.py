@@ -417,25 +417,55 @@ def _decode_srgb_uint8_to_linear(arr: np.ndarray) -> np.ndarray:
 
 
 import threading
-_already_adjusted_ids = set()
+import weakref
+
+# id(arr) -> weakref to that exact array.
+#
+# This was a bare set of id()s, which was wrong in BOTH directions. numpy
+# hands the same address back for the next same-shaped allocation, so a fresh
+# preview at a recycled address was read as "already adjusted" and skipped its
+# XMP edits. And the overflow guard called set.pop(), which removes an
+# ARBITRARY element -- often a live, still-in-flight buffer -- so that one got
+# adjusted a second time.
+#
+# The weakref settles identity (a recycled address cannot match, because the
+# referent is dead or different) and the finalizer keeps the map from growing,
+# which removes the need to evict live entries at all.
+_already_adjusted_ids: "dict[int, weakref.ref]" = {}
 _already_adjusted_lock = threading.Lock()
+
 
 def mark_array_as_already_adjusted(arr):
     if arr is None:
         return
+    key = id(arr)
+
+    def _drop(_ref, _key=key):
+        with _already_adjusted_lock:
+            _already_adjusted_ids.pop(_key, None)
+
+    try:
+        ref = weakref.ref(arr, _drop)
+    except TypeError:
+        # Not weak-referenceable: better to re-apply than to record a mark
+        # that can never be validated.
+        return
     with _already_adjusted_lock:
-        _already_adjusted_ids.add(id(arr))
-        if len(_already_adjusted_ids) > 10000:
-            # Pop some elements to prevent memory accumulation
-            for _ in range(2000):
-                if _already_adjusted_ids:
-                    _already_adjusted_ids.pop()
+        _already_adjusted_ids[key] = ref
+
+
+def is_array_already_adjusted(arr) -> bool:
+    """Whether THIS array object was marked -- not merely its address."""
+    if arr is None:
+        return False
+    with _already_adjusted_lock:
+        ref = _already_adjusted_ids.get(id(arr))
+    return ref is not None and ref() is arr
 
 def apply_saved_edits_for_display(file_path: str, arr):
     """Apply saved XMP edits to a display-bound uint8 RGB ndarray."""
-    with _already_adjusted_lock:
-        if id(arr) in _already_adjusted_ids:
-            return arr
+    if is_array_already_adjusted(arr):
+        return arr
     """Apply saved XMP edits to a display-bound uint8 RGB ndarray.
 
     Returns the input unchanged when previews-with-edits is disabled, the

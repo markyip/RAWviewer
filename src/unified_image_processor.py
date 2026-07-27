@@ -106,6 +106,41 @@ def _on_gui_thread() -> bool:
         return True
 
 
+# Full-res sidecar-applied buffers, shared across processor instances.
+_ADJUSTED_FULL_SLOTS: list = []
+
+# Serialises the post-decode persist work. Each of these captures the FULL
+# sensor buffer (hundreds of MB) in a closure and may re-apply the sidecar at
+# full resolution, so fast navigation used to overlap several unbounded
+# daemon threads, each holding its own buffer alive. One worker means at most
+# one such buffer is pinned, and the generation checks inside the job still
+# drop work whose file has moved on.
+_PERSIST_POOL = None
+_PERSIST_POOL_LOCK = _ebt.Lock()
+
+
+def _persist_executor():
+    global _PERSIST_POOL
+    with _PERSIST_POOL_LOCK:
+        if _PERSIST_POOL is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            _PERSIST_POOL = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="rv-persist"
+            )
+        return _PERSIST_POOL
+
+
+def _submit_persist(fn) -> None:
+    """Queue background persist work; never raise into the decode path."""
+    try:
+        _persist_executor().submit(fn)
+    except Exception:
+        try:
+            fn()
+        except Exception:
+            pass
+
 _UNPACKED_RAW_LOCK = _ebt.Lock()
 _UNPACKED_RAW_SLOTS: OrderedDict = OrderedDict()
 
@@ -212,7 +247,13 @@ class UnifiedImageProcessor:
         # that no-op silently hid saved edits from the full-res view while
         # the live panel/preview tier still showed them. Restored.)
         self._adjusted_full_lock = _threading.Lock()
-        self._adjusted_full_slots: list = []  # [(norm_path, adj_key, np.ndarray)]
+        # Module-level, for the same reason the unpack stash and the in-flight
+        # registry are: ImageLoadWorker is a one-shot QRunnable that builds its
+        # own UnifiedImageProcessor, so an instance memo died with the worker
+        # and an A-B-A revisit of an edited file never hit it -- re-paying a
+        # multi-second full-res apply each time, which is the entire reason
+        # this memo exists.
+        self._adjusted_full_slots = _ADJUSTED_FULL_SLOTS
         # In-flight sidecar applies keyed (norm_path, adj_key): a second
         # thread asking for the same apply WAITS for the first instead of
         # recomputing -- overlapping duplicate applies of a 32MP buffer
@@ -283,10 +324,10 @@ class UnifiedImageProcessor:
         if rgb_image is None:
             return None
         try:
-            from raw_adjustments import _already_adjusted_ids, _already_adjusted_lock
-            with _already_adjusted_lock:
-                if id(rgb_image) in _already_adjusted_ids:
-                    return rgb_image
+            from raw_adjustments import is_array_already_adjusted
+
+            if is_array_already_adjusted(rgb_image):
+                return rgb_image
         except Exception:
             pass
         if not force:
@@ -403,9 +444,13 @@ class UnifiedImageProcessor:
                     # to 6 files: the previous 3-slot global list was evicted
                     # wholesale by neighbor prefetch, so revisits re-paid the
                     # full multi-second apply.
-                    self._adjusted_full_slots = [
+                    # In place: rebinding self._adjusted_full_slots would give
+                    # this instance a private list again and unshare the memo.
+                    kept = [
                         e for e in self._adjusted_full_slots if e[0] != norm
-                    ][-5:] + [(norm, adj_key, out)]
+                    ][-5:]
+                    kept.append((norm, adj_key, out))
+                    self._adjusted_full_slots[:] = kept
                 return out
             finally:
                 with self._adjusted_full_lock:
@@ -2147,9 +2192,7 @@ class UnifiedImageProcessor:
                                 except Exception:
                                     pass
 
-                            threading.Thread(
-                                target=_cache_device_host, daemon=True
-                            ).start()
+                            _submit_persist(_cache_device_host)
                             host = None
                         else:
                             self.cache.put_full_image(
@@ -2252,9 +2295,7 @@ class UnifiedImageProcessor:
                         except Exception:
                             pass
 
-                    threading.Thread(
-                        target=_persist_libraw_preview, daemon=True
-                    ).start()
+                    _submit_persist(_persist_libraw_preview)
 
             return rgb_image
                 

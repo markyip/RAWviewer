@@ -33,6 +33,35 @@ _HSL_BANDS: tuple[tuple[str, float, float], ...] = (
 )
 
 
+_HSV_PACKING_PROBE = None
+
+
+def _cv2_packs_hsv_as_uint8() -> bool:
+    """Whether this OpenCV build returns uint8-scaled HSV for float input.
+
+    A property of the build, so it is measured once on a 2x2 image rather
+    than re-measured on every frame at full resolution.
+    """
+    global _HSV_PACKING_PROBE
+    if _HSV_PACKING_PROBE is None:
+        try:
+            import cv2
+
+            probe = np.array(
+                [[[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+                 [[1.0, 0.0, 0.0], [0.5, 0.5, 0.5]]],
+                dtype=np.float32,
+            )
+            out = cv2.cvtColor(probe, cv2.COLOR_BGR2HSV)
+            _HSV_PACKING_PROBE = bool(
+                float(np.nanmax(out[:, :, 1])) > 1.5
+                or float(np.nanmax(out[:, :, 2])) > 1.5
+            )
+        except Exception:
+            _HSV_PACKING_PROBE = False
+    return _HSV_PACKING_PROBE
+
+
 def _rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """RGB float [0,1] → H [0,360], S/V [0,1] (OpenCV float32 HSV convention)."""
     import cv2
@@ -40,11 +69,17 @@ def _rgb_to_hsv(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     bgr = np.ascontiguousarray(np.clip(rgb[..., ::-1], 0.0, 1.0), dtype=np.float32)
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     # Defensive: some builds historically surprised callers with uint8-like
-    # packing even on float input. Detect and convert once.
+    # packing even on float input.
+    #
+    # This used to run two full-plane nanmax scans on EVERY HSL-active tick --
+    # ~20 ms at 24MP -- to test a property of the OpenCV build, which cannot
+    # change between frames. The input is already clipped to [0,1] just above,
+    # so a conforming build always returns S,V in [0,1] and the branch never
+    # fired. Probed once on a 2x2 image instead.
     h = hsv[:, :, 0]
     s = hsv[:, :, 1]
     v = hsv[:, :, 2]
-    if float(np.nanmax(s)) > 1.5 or float(np.nanmax(v)) > 1.5:
+    if _cv2_packs_hsv_as_uint8():
         # Treat as uint8-scaled channels packed into float.
         h = h * (360.0 / 179.0) if float(np.nanmax(h)) <= 180.5 else h
         s = s / 255.0

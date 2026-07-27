@@ -777,6 +777,9 @@ class ImageLoadManager(QObject):
         self._current_thread_pool = QThreadPool()
         # Tasks currently inside ImageLoadWorker.run() (running-only yield checks).
         self._running_tasks: set = set()
+        # Tasks currently holding a heavy RAW slot. Source of truth for
+        # _active_raw_tasks; see _claim_raw_slot_locked.
+        self._raw_slot_holders: set = set()
         self._running_tasks_lock = threading.Lock()
         
         self._stopped = False  # Flag to stop scheduling new tasks
@@ -785,11 +788,19 @@ class ImageLoadManager(QObject):
         self._indexing_throttle_depth = 0
         # Semantic indexing throttle is toggled from the background index worker
         # thread as well as the UI thread (face scan), so guard the depth counter.
-        self._indexing_throttle_lock = threading.Lock()
+        # SAME object as _throttle_lock, deliberately. These were separate
+        # locks over one piece of state: update_volume_throttling read
+        # _indexing_throttle_depth while holding only _throttle_lock, so it
+        # could tear against the index worker, and it wrote _raw_load_limit
+        # outside both. The interleaving that bit: indexing enter saves
+        # raw_limit=4 and sets 1, the volume probe then writes 8, indexing
+        # exit restores 4 -- and the new volume's limit is silently lost.
+        # An RLock so the existing nesting cannot deadlock.
+        self._indexing_throttle_lock = self._throttle_lock
         # Guards io-pressure/gallery-warmup depth counters, saved baselines,
         # and setMaxThreadCount save/restore against concurrent enter/exit
         # from worker threads and the VolumeSpeedProbe daemon thread.
-        self._throttle_lock = threading.Lock()
+        self._throttle_lock = threading.RLock()
         
         # Throttled workers on macOS external drives to prevent IO overload crashes
         self.update_volume_throttling(os.getcwd())
@@ -926,12 +937,15 @@ class ImageLoadManager(QObject):
             self._warmup_saved_current_threads = current_workers
             self._indexing_saved_current_threads = current_workers
             self._current_pool_baseline = current_workers
-        
-        from common_image_loader import raw_load_limit_aligned_to_gpu
 
-        self._raw_load_limit = raw_load_limit_aligned_to_gpu(
-            raw_concurrent_load_limit(folder_path)
-        )
+            from common_image_loader import raw_load_limit_aligned_to_gpu
+
+            # Inside the lock: the indexing throttle saves and restores this
+            # around its own enter/exit, so an unlocked write here was lost
+            # the moment indexing exited.
+            self._raw_load_limit = raw_load_limit_aligned_to_gpu(
+                raw_concurrent_load_limit(folder_path)
+            )
 
     def apply_gpu_decode_profile(self) -> None:
         """After GPU backend import: drop process pool conflict; align RAW slots."""
@@ -1578,13 +1592,32 @@ class ImageLoadManager(QObject):
                     self._task_keys_by_path[fp].discard(key)
                     if not self._task_keys_by_path[fp]:
                         self._task_keys_by_path.pop(fp, None)
-                if getattr(task, "_counted_raw_slot", False):
-                    self._active_raw_tasks = max(0, int(self._active_raw_tasks or 0) - 1)
-                    task._counted_raw_slot = False
+                self._release_raw_slot_locked(task)
                 cancelled += 1
             if cancelled:
                 self._compact_work_queue()
         return cancelled
+
+    def _claim_raw_slot_locked(self, task) -> None:
+        """Record that ``task`` holds a heavy RAW slot. Under ``_queue_lock``.
+
+        The holder SET is the source of truth, not the task's flag and not
+        membership of _active_tasks. Slots used to be reconciled by counting
+        _active_tasks, which silently forgot any task that had been cancelled
+        while its demosaic was still running -- the counter dropped, new
+        heavies were admitted, and then the old ones finished and decremented
+        again, taking it below the real concurrency. On heavy_limit=1 that is
+        exactly the thrash the limit exists to prevent.
+        """
+        if task is None or getattr(task, "_counted_raw_slot", False):
+            return
+        task._counted_raw_slot = True
+        self._raw_slot_holders.add(task)
+        self._active_raw_tasks = len(self._raw_slot_holders)
+
+    def _reconcile_raw_slots_locked(self) -> None:
+        """Recount from the holder set. Under ``_queue_lock``."""
+        self._active_raw_tasks = len(self._raw_slot_holders)
 
     def _release_raw_slot_locked(self, task: Optional["ImageLoadTask"]) -> None:
         """Drop a heavy RAW slot immediately when cancelling a counted task.
@@ -1597,8 +1630,9 @@ class ImageLoadManager(QObject):
         if task is None:
             return
         if getattr(task, "_counted_raw_slot", False):
-            self._active_raw_tasks = max(0, int(self._active_raw_tasks or 0) - 1)
             task._counted_raw_slot = False
+        self._raw_slot_holders.discard(task)
+        self._active_raw_tasks = len(self._raw_slot_holders)
 
     def cancel_task(self, file_path: str):
         """取消任務（非阻塞）"""
@@ -1644,11 +1678,7 @@ class ImageLoadManager(QObject):
                     if not self._task_keys_by_path[fp]:
                         self._task_keys_by_path.pop(fp, None)
                 self._release_raw_slot_locked(task)
-            self._active_raw_tasks = sum(
-                1
-                for t in self._active_tasks.values()
-                if getattr(t, "_counted_raw_slot", False)
-            )
+            self._reconcile_raw_slots_locked()
             self._compact_work_queue()
 
     def cancel_queued_non_gallery_tasks(self) -> None:
@@ -1676,11 +1706,7 @@ class ImageLoadManager(QObject):
                             self._task_keys_by_path.pop(fp, None)
             for task in kept:
                 self._work_queue.put(task)
-            self._active_raw_tasks = sum(
-                1
-                for t in self._active_tasks.values()
-                if getattr(t, "_counted_raw_slot", False)
-            )
+            self._reconcile_raw_slots_locked()
 
     def cancel_gallery_tasks(self) -> None:
         """Cancel queued/active gallery thumbnail decodes (leaving single-view work)."""
@@ -1711,11 +1737,7 @@ class ImageLoadManager(QObject):
                     kept.append(task)
                 for task in kept:
                     self._work_queue.put(task)
-            self._active_raw_tasks = sum(
-                1
-                for t in self._active_tasks.values()
-                if getattr(t, "_counted_raw_slot", False)
-            )
+            self._reconcile_raw_slots_locked()
             self._compact_work_queue()
 
     def cancel_tasks_by_priority(self, priority: Priority) -> None:
@@ -1726,6 +1748,7 @@ class ImageLoadManager(QObject):
                 if task is None or task.priority != priority:
                     continue
                 task.cancel()
+                self._release_raw_slot_locked(task)
                 self._active_tasks.pop(key, None)
                 file_path = getattr(task, 'file_path', None)
                 if file_path and file_path in self._task_keys_by_path:
@@ -1739,11 +1762,14 @@ class ImageLoadManager(QObject):
         with self._queue_lock:
             for task in self._active_tasks.values():
                 task.cancel()
+                # Release rather than zeroing the counter: a task cancelled
+                # mid-demosaic keeps running, and blindly resetting to 0 let
+                # its later _task_finished decrement a counter that by then
+                # described a different set of tasks.
+                self._release_raw_slot_locked(task)
             self._active_tasks.clear()
             self._task_keys_by_path.clear()
-            # Reset RAW slot counter when dropping all tracked tasks; otherwise old
-            # running tasks can leak the counter and block future RAW scheduling.
-            self._active_raw_tasks = 0
+            self._reconcile_raw_slots_locked()
             self._compact_work_queue()
 
     def cancel_all_tasks_except(self, keep_path: Optional[str]) -> None:
@@ -1769,11 +1795,7 @@ class ImageLoadManager(QObject):
                     if not self._task_keys_by_path[fp]:
                         self._task_keys_by_path.pop(fp, None)
             # In-flight RAW slots for kept tasks stay counted; everything else is gone.
-            self._active_raw_tasks = sum(
-                1
-                for t in self._active_tasks.values()
-                if getattr(t, "_counted_raw_slot", False)
-            )
+            self._reconcile_raw_slots_locked()
             self._compact_work_queue()
 
     def _compact_work_queue(self) -> None:
@@ -1796,10 +1818,11 @@ class ImageLoadManager(QObject):
         with self._queue_lock:
             for task in self._active_tasks.values():
                 task.cancel()
+                self._release_raw_slot_locked(task)
             self._active_tasks.clear()
             self._task_keys_by_path.clear()
             self._work_queue = queue.PriorityQueue()
-            self._active_raw_tasks = 0
+            self._reconcile_raw_slots_locked()
 
     def shutdown(self):
         """關閉管理器並清理資源"""
@@ -1843,9 +1866,9 @@ class ImageLoadManager(QObject):
                 self._task_keys_by_path[task.file_path].discard(key)
                 if not self._task_keys_by_path[task.file_path]:
                     self._task_keys_by_path.pop(task.file_path, None)
-            if getattr(task, "_counted_raw_slot", False):
-                self._active_raw_tasks = max(0, self._active_raw_tasks - 1)
-                task._counted_raw_slot = False
+            # Pairs with the claim through the holder set, so a task cancelled
+            # while still running cannot decrement a second time.
+            self._release_raw_slot_locked(task)
         self.task_completed.emit(task.file_path)
         self._schedule_next_task()
 
@@ -2146,13 +2169,10 @@ class ImageLoadManager(QObject):
             keep_path = None
             with self._queue_lock:
                 # Reconcile leaked counters (cancelled workers that never finished).
-                counted = sum(
-                    1
-                    for t in self._active_tasks.values()
-                    if getattr(t, "_counted_raw_slot", False)
-                )
-                if int(self._active_raw_tasks or 0) != counted:
-                    self._active_raw_tasks = counted
+                # From the holder set: _active_tasks excludes tasks cancelled
+                # while their demosaic is still running, and counting it
+                # dropped their slots on the floor.
+                self._reconcile_raw_slots_locked()
                 if int(self._active_raw_tasks or 0) > 0:
                     tmp = []
                     while not self._work_queue.empty():
@@ -2272,8 +2292,7 @@ class ImageLoadManager(QObject):
                         # against a limit of one. Rolled back below if the
                         # pool refuses the worker.
                         provisional_raw += 1
-                        self._active_raw_tasks = int(self._active_raw_tasks or 0) + 1
-                        task._counted_raw_slot = True
+                        self._claim_raw_slot_locked(task)
                     to_start.append((task, pool, is_heavy))
             except queue.Empty:
                 pass
@@ -2298,10 +2317,7 @@ class ImageLoadManager(QObject):
                 # Give the slot back: it was claimed at admission time.
                 if is_heavy:
                     with self._queue_lock:
-                        self._active_raw_tasks = max(
-                            0, int(self._active_raw_tasks or 0) - 1
-                        )
-                        task._counted_raw_slot = False
+                        self._release_raw_slot_locked(task)
                 requeue.append(task)
                 continue
 
