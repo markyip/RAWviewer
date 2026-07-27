@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 FAILURES = []
+_QAPP = None
 
 
 def check(name, ok, detail=""):
@@ -78,6 +79,32 @@ def _finish(m, task):
 def main() -> int:
     import image_load_manager as ilm
     from image_load_manager import Priority
+
+    # Construct the REAL object first. Every other case here uses __new__ to
+    # isolate the slot accounting, which meant __init__ was never exercised --
+    # and a lock aliased one line before it was created shipped green, with
+    # the app unable to start at all. Cheap check, caught nothing else.
+    from PyQt6.QtWidgets import QApplication
+
+    # Bound to a name: an unreferenced QApplication is collected, and
+    # ImageLoadManager refuses to construct without one.
+    global _QAPP
+    _QAPP = QApplication.instance() or QApplication([])
+    try:
+        real = ilm.ImageLoadManager()
+        check("ImageLoadManager() constructs", True)
+        check(
+            "throttle state uses one lock",
+            real._throttle_lock is real._indexing_throttle_lock,
+        )
+        check(
+            "and it is reentrant, so the existing nesting is safe",
+            type(real._throttle_lock).__name__ == "RLock",
+            type(real._throttle_lock).__name__,
+        )
+        real.shutdown()
+    except Exception as exc:  # noqa: BLE001
+        check("ImageLoadManager() constructs", False, repr(exc))
 
     # --- the exact interleaving from the report ---
     m = _manager()
@@ -149,6 +176,38 @@ def main() -> int:
     _admit(m, g)
     _admit(m, g)
     check("double claim counts once", m._active_raw_tasks == 1, str(m._active_raw_tasks))
+
+    # --- cancelled after claim, before tryStart: the slot must come back ---
+    m = _manager()
+    m._stopped = False
+    late = _Task("/late.CR3", Priority.CURRENT)
+    _admit(m, late)
+    late.cancel()
+    # What the start loop does for a task cancelled between admit and tryStart.
+    with m._queue_lock:
+        m._release_raw_slot_locked(late)
+        m._active_tasks.pop(late.task_key, None)
+    check(
+        "slot released when the task never runs",
+        m._active_raw_tasks == 0,
+        f"{m._active_raw_tasks} -- a leak here pins the limit forever",
+    )
+
+    # --- cancel_all_tasks_except must release the ones it drops ---
+    m = _manager()
+    keep2 = _Task("/keep2.CR3", Priority.CURRENT)
+    drop2 = _Task("/drop2.CR3", Priority.CURRENT)
+    _admit(m, keep2)
+    _admit(m, drop2)
+    m._task_keys_by_path = {"/keep2.CR3": {keep2.task_key}}
+    m._work_queue = None
+    ilm.ImageLoadManager.cancel_all_tasks_except(m, "/keep2.CR3")
+    check(
+        "cancel_all_tasks_except releases the cancelled heavy",
+        m._active_raw_tasks == 1,
+        f"{m._active_raw_tasks} (2 means the neighbour still holds the limit)",
+    )
+    check("the kept task still holds its slot", keep2._counted_raw_slot is True)
 
     # --- reconcile agrees with the holder set, not the task map ---
     m = _manager()

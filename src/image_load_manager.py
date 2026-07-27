@@ -788,19 +788,22 @@ class ImageLoadManager(QObject):
         self._indexing_throttle_depth = 0
         # Semantic indexing throttle is toggled from the background index worker
         # thread as well as the UI thread (face scan), so guard the depth counter.
-        # SAME object as _throttle_lock, deliberately. These were separate
-        # locks over one piece of state: update_volume_throttling read
-        # _indexing_throttle_depth while holding only _throttle_lock, so it
-        # could tear against the index worker, and it wrote _raw_load_limit
-        # outside both. The interleaving that bit: indexing enter saves
-        # raw_limit=4 and sets 1, the volume probe then writes 8, indexing
-        # exit restores 4 -- and the new volume's limit is silently lost.
+        # ONE lock for every piece of throttle state: the io-pressure and
+        # gallery-warmup depths, the saved baselines, the setMaxThreadCount
+        # save/restore, the semantic-indexing depth, and _raw_load_limit.
+        #
+        # These used to be two locks over one piece of state:
+        # update_volume_throttling read _indexing_throttle_depth while holding
+        # only _throttle_lock, and wrote _raw_load_limit outside both. The
+        # interleaving that bit: indexing enter saves raw_limit=4 and sets 1,
+        # the volume probe then writes 8, indexing exit restores 4 -- and the
+        # new volume's limit is silently lost.
+        #
+        # Defined BEFORE the alias below: assigning the alias first raised
+        # AttributeError and no ImageLoadManager could be constructed at all.
         # An RLock so the existing nesting cannot deadlock.
-        self._indexing_throttle_lock = self._throttle_lock
-        # Guards io-pressure/gallery-warmup depth counters, saved baselines,
-        # and setMaxThreadCount save/restore against concurrent enter/exit
-        # from worker threads and the VolumeSpeedProbe daemon thread.
         self._throttle_lock = threading.RLock()
+        self._indexing_throttle_lock = self._throttle_lock
         
         # Throttled workers on macOS external drives to prevent IO overload crashes
         self.update_volume_throttling(os.getcwd())
@@ -1788,13 +1791,17 @@ class ImageLoadManager(QObject):
                 if key in keep_keys:
                     continue
                 task.cancel()
+                self._release_raw_slot_locked(task)
                 fp = getattr(task, "file_path", None)
                 self._active_tasks.pop(key, None)
                 if fp and fp in self._task_keys_by_path:
                     self._task_keys_by_path[fp].discard(key)
                     if not self._task_keys_by_path[fp]:
                         self._task_keys_by_path.pop(fp, None)
-            # In-flight RAW slots for kept tasks stay counted; everything else is gone.
+            # Reconcile alone is len(_raw_slot_holders), so cancelled heavies
+            # stayed in the set and kept holding the limit until their
+            # demosaic finished -- the CURRENT starvation the early release
+            # exists to prevent. Releasing happens per task above.
             self._reconcile_raw_slots_locked()
             self._compact_work_queue()
 
@@ -2305,6 +2312,12 @@ class ImageLoadManager(QObject):
         for task, pool, is_heavy in to_start:
             if self._stopped or task.is_cancelled():
                 with self._queue_lock:
+                    # The slot was claimed at admission. This task will never
+                    # run, so _task_finished will never release it -- without
+                    # this the holder set pins it forever and, at
+                    # heavy_limit=1, every later full RAW decode is blocked.
+                    if is_heavy:
+                        self._release_raw_slot_locked(task)
                     key = getattr(task, "task_key", None)
                     if key in self._active_tasks and self._active_tasks[key] is task:
                         del self._active_tasks[key]

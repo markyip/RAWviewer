@@ -106,6 +106,9 @@ class RgbGlImageItem(QGraphicsObject):
         self._qimage = None  # Optional[QImage]
         self._device_rgb = None
         self._cuda_slot = None  # Optional[CudaGlTextureSlot]
+        # Slots dropped while no GL context was current; released at the next
+        # paint. See _defer_cuda_gl_release.
+        self._pending_cuda_release: list = []
         self._rgba_device = None
         self._cuda_upload_failed = False
         self._cuda_uploaded_key = None  # (id(device_rgb), generation) after upload
@@ -114,7 +117,7 @@ class RgbGlImageItem(QGraphicsObject):
     def set_rgb_uint8(self, rgb) -> None:
         import numpy as np
 
-        self._release_cuda_gl(None)
+        self._defer_cuda_gl_release()
         arr = np.ascontiguousarray(rgb)
         if arr.ndim != 3 or arr.shape[2] < 3:
             raise ValueError(f"expected HxWx3+ RGB, got shape={getattr(arr, 'shape', None)}")
@@ -149,12 +152,12 @@ class RgbGlImageItem(QGraphicsObject):
         self._w = int(device_rgb.width)
         self._h = int(device_rgb.height)
         # Drop previous interop slot; recreated on next paint with GL current.
-        self._release_cuda_gl(None)
+        self._defer_cuda_gl_release()
         self.update()
 
     def clear_rgb(self) -> None:
         self.prepareGeometryChange()
-        self._release_cuda_gl(None)
+        self._defer_cuda_gl_release()
         self._arr = None
         self._qimage = None
         self._device_rgb = None
@@ -182,11 +185,45 @@ class RgbGlImageItem(QGraphicsObject):
     def boundingRect(self) -> QRectF:
         return QRectF(0, 0, float(self._w), float(self._h))
 
+    def _defer_cuda_gl_release(self) -> None:
+        """Queue the interop slot for release at the next paint.
+
+        set_rgb_uint8 / set_device_rgb / clear_rgb used to call
+        _release_cuda_gl(None) directly. With no widget there is no
+        makeCurrent(), so glDeleteTextures ran with NO CURRENT CONTEXT --
+        which does not delete the texture, it just clears our handle, leaking
+        the GL object while still unregistering the CUDA resource.
+
+        This item is a QGraphicsObject; the GL widget only reaches it as
+        paint()'s ``widget`` argument. So the release is deferred to there,
+        where a context is guaranteed current. Freeing a frame later is
+        strictly better than not freeing at all.
+        """
+        slot = self._cuda_slot
+        self._cuda_slot = None
+        self._rgba_device = None
+        self._cuda_uploaded_key = None
+        if slot is not None:
+            self._pending_cuda_release.append(slot)
+
+    def _drain_pending_cuda_releases(self, widget) -> None:
+        """Release deferred interop slots. Call from paint(), context current."""
+        if not self._pending_cuda_release:
+            return
+        pending, self._pending_cuda_release = self._pending_cuda_release, []
+        for slot in pending:
+            self._release_cuda_slot(slot, widget)
+
     def _release_cuda_gl(self, widget) -> None:
         slot = self._cuda_slot
         self._cuda_slot = None
         self._rgba_device = None
         self._cuda_uploaded_key = None
+        if slot is None:
+            return
+        self._release_cuda_slot(slot, widget)
+
+    def _release_cuda_slot(self, slot, widget) -> None:
         if slot is None:
             return
         try:
@@ -375,6 +412,13 @@ class RgbGlImageItem(QGraphicsObject):
         fns.glLoadMatrixf(mat)
 
     def paint(self, painter: QPainter, option, widget=None) -> None:  # noqa: ARG002
+        # A GL context is current here, which is the only place it reliably
+        # is -- release anything dropped while it was not.
+        if self._pending_cuda_release:
+            try:
+                self._drain_pending_cuda_releases(widget)
+            except Exception:
+                pass
         # Device path: CUDA→GL texture then native textured quad.
         if self._device_rgb is not None and not self._cuda_upload_failed:
             vp = widget
