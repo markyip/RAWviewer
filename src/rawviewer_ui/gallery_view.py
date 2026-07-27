@@ -1311,6 +1311,16 @@ class JustifiedGallery(QWidget):
                 # Ensure worker wiring exists before first render pass.
                 self._post_init()
             new_images = list(images or [])
+            # Drop caches keyed by path when the set of paths changes. Both
+            # were only ever added to: _metadata_cache holds a full EXIF dict
+            # per file and had no cap at all, so browsing folder after folder
+            # grew it for the life of the session. The thumbnail cache is
+            # byte-budgeted, but keeping another folder's tiles just spends
+            # that budget on pixmaps nothing will ask for again.
+            _prev = set(self.images or ())
+            _next = set(new_images)
+            if _prev and _prev != _next:
+                self._prune_path_caches(_next)
             self._gallery_folder_token = self._current_folder_load_token()
             if new_images:
                 self.hide_empty_message()
@@ -1661,6 +1671,35 @@ class JustifiedGallery(QWidget):
             return True
 
     _THUMB_CACHE_BYTE_BUDGET = 768 * 1024 * 1024  # ~768 MiB of QPixmaps
+
+    def _prune_path_caches(self, keep: set) -> None:
+        """Forget cached data for paths that are no longer on show.
+
+        Keeps entries for files still present, so re-sorting or filtering the
+        same folder does not throw away work; only a genuine change of
+        contents evicts.
+        """
+        try:
+            stale = [p for p in self._metadata_cache if p not in keep]
+            for p in stale:
+                self._metadata_cache.pop(p, None)
+        except Exception:
+            self._metadata_cache = {}
+
+        cache = getattr(self, "_thumbnail_cache", None)
+        if cache is None:
+            return
+        try:
+            with cache.lock:
+                # Keys are the path plus a size-bucket suffix, so match on the
+                # path prefix rather than equality.
+                for key in [
+                    k for k in list(cache.cache.keys())
+                    if not any(str(k).startswith(p) for p in keep)
+                ]:
+                    cache.cache.pop(key, None)
+        except Exception:
+            pass
 
     def _enforce_thumbnail_cache_budget(self) -> None:
         """Evict LRU thumbnails until the cache is under the byte budget.

@@ -275,13 +275,40 @@ class UnifiedImageProcessor:
             norm = os.path.normcase(os.path.abspath(file_path))
             # Fingerprint includes the base buffer's shape so a half-size
             # cached result can never be served for a full-res request.
-            from raw_dodge_burn import MASK_KEY as _db_mask_key
+            #
+            # EVERY non-numeric edit is folded in, not a hand-picked few. This
+            # used to name _tone_curve_pv2012 and the dodge/burn mask
+            # explicitly, which silently excluded per-channel curves, the heal
+            # mask and the entire mask-layer stack -- so editing a mask and
+            # asking for the full-res render again served the previous one. A
+            # list of keys is a list somebody has to remember to extend;
+            # hashing whatever is present cannot fall behind.
+            #
+            # Serials are large (mask alpha is base64 PNG), so they are hashed
+            # rather than carried in the key.
+            import hashlib as _hashlib
+
+            numeric = []
+            strings = _hashlib.sha1()
+            for _k in sorted(adj.keys()):
+                _v = adj[_k]
+                if isinstance(_v, bool):
+                    strings.update(f"{_k}={int(_v)}\x00".encode())
+                elif isinstance(_v, (int, float)):
+                    numeric.append((_k, round(float(_v), 4)))
+                elif isinstance(_v, str):
+                    if _v:
+                        strings.update(f"{_k}={_v}\x00".encode())
+                elif _v is not None:
+                    # Live objects (the MaskLayerStack under _mask_layers_obj)
+                    # have no cheap value hash, but their serialized twin is
+                    # already in this dict, so identity is enough to notice a
+                    # swap without pretending to fingerprint the contents.
+                    strings.update(f"{_k}=obj{id(_v)}\x00".encode())
 
             adj_key = (
-                tuple(sorted((k, round(float(v), 4)) for k, v in adj.items()
-                             if isinstance(v, (int, float)))),
-                str(adj.get("_tone_curve_pv2012", "") or ""),
-                str(adj.get(_db_mask_key, "") or ""),
+                tuple(numeric),
+                strings.hexdigest(),
                 rgb_image.shape,
             )
             import threading as _threading

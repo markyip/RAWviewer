@@ -109,11 +109,24 @@ def _box_blur(gray: np.ndarray, radius: int) -> np.ndarray:
             tuple((0, 0) if i != axis else (radius, radius) for i in range(2)),
             mode="reflect",
         )
-        c = np.cumsum(pad, axis=axis, dtype=np.float32)
-        # Same-size box filter: pad length is H + 2*radius = H + k - 1 along this axis.
-        # Use cumsum differences k-1 apart (not k) so output matches input geometry.
-        hi = tuple(slice(None) if i != axis else slice(k - 1, None) for i in range(2))
-        lo = tuple(slice(None) if i != axis else slice(None, -(k - 1)) for i in range(2))
+        # A cumsum difference k apart sums k samples, but c[k-1] - c[-1] is
+        # only reachable with a leading zero -- without it the first window
+        # has no "before" term, so the code differenced k-1 apart to keep the
+        # shape right and summed one sample too few while still dividing by k.
+        # A constant 1.0 image came out at 0.83 instead of 1.0, and every
+        # window sat half a pixel off. Prepend the zero and difference k.
+        zero_shape = tuple(
+            1 if i == axis else pad.shape[i] for i in range(2)
+        )
+        c = np.concatenate(
+            [
+                np.zeros(zero_shape, dtype=np.float32),
+                np.cumsum(pad, axis=axis, dtype=np.float32),
+            ],
+            axis=axis,
+        )
+        hi = tuple(slice(None) if i != axis else slice(k, None) for i in range(2))
+        lo = tuple(slice(None) if i != axis else slice(None, -k) for i in range(2))
         x = (c[hi] - c[lo]) / float(k)
     return x
 
