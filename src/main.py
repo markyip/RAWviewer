@@ -24990,6 +24990,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is not None and hasattr(panel, "set_mask_layer_stack"):
             panel.set_mask_layer_stack(stack)
 
+    @staticmethod
+    def _adjustments_match(a: dict, b: dict) -> bool:
+        """Whether two adjustment dicts describe the same edit.
+
+        Live objects (the mask stack under its _obj key) are excluded: they
+        are rebuilt on every panel bind, so comparing them by identity would
+        report a change every time and defeat the point. Their serialized
+        twins are in the dict and are compared.
+        """
+        def _clean(d):
+            out = {}
+            for k, v in (d or {}).items():
+                if k.endswith("_obj"):
+                    continue
+                if isinstance(v, float):
+                    out[k] = round(v, 6)
+                else:
+                    out[k] = v
+            return out
+
+        return _clean(a) == _clean(b)
+
     def _on_adjust_panel_editing_finished(self, adj: dict) -> None:
         path = getattr(self, "current_file_path", None)
         if not path:
@@ -25014,10 +25036,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             from raw_spot_heal import serialize_mask as serialize_heal_mask
 
+            # Loaded unconditionally: the no-change check below needs it, and
+            # it used to be bound only inside the undo branch -- so with undo
+            # tracking disabled the comparison would have raised NameError.
+            old_adj = load_adjustments_for_file(path)
             if not getattr(self, "_disable_undo_tracking", False):
                 if not hasattr(self, "_undo_stack"):
                     self._undo_stack = {}
-                old_adj = load_adjustments_for_file(path)
                 history = self._undo_stack.setdefault(path, [])
                 if not history or history[-1] != old_adj:
                     history.append(old_adj)
@@ -25056,7 +25081,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 adj.pop(_ML_KEY, None)
 
-            write_xmp_adjustments_for_file(path, adj)
+            # Nothing actually changed? Then do not write, and above all do
+            # not invalidate. editing_finished fires on opening and closing
+            # the panel, not only on an edit, and the invalidate below drops
+            # EVERY tier for this file including the full image -- so simply
+            # visiting the editor and going back forced a fresh 33MP decode.
+            # Measured on a real session: 24 full-image misses, every one of
+            # them "invalidated", none from eviction, with the cache sitting
+            # at 0/8.
+            if self._adjustments_match(adj, old_adj):
+                self._skip_editing_finished_side_effects = True
+            else:
+                self._skip_editing_finished_side_effects = False
+                write_xmp_adjustments_for_file(path, adj)
         except Exception as exc:
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
@@ -25085,12 +25122,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # the gallery grid and on the FIRST click into single view -- both
         # read a pre-edit cached render until something else happened to
         # evict it.
-        try:
-            from image_cache import get_image_cache
+        if not getattr(self, "_skip_editing_finished_side_effects", False):
+            try:
+                from image_cache import get_image_cache
 
-            get_image_cache().invalidate_file(path)
-        except Exception:
-            pass
+                get_image_cache().invalidate_file(path)
+            except Exception:
+                pass
         # Bake editor-aligned browse thumbs AFTER invalidate so gallery /
         # single-view match the Adjust panel without re-running the linear
         # pipeline on the embedded JPEG (which diverges from the demosaic
