@@ -87,6 +87,40 @@ def release_edit_base_cache() -> int:
     return freed
 
 
+def _normalise_raster_edit_base(img):
+    """Coerce a decoded raster into the edit base contract.
+
+    RGB, and either uint8 (8-bit sources, unchanged) or float32 in [0, 1]
+    (anything deeper). IMREAD_UNCHANGED gives back whatever the file holds --
+    grayscale, BGRA, 16-bit, even float -- so the shapes and depths are
+    reconciled here rather than downstream.
+    """
+    import cv2
+
+    if img is None:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+    elif img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    else:
+        return None
+
+    if img.dtype == np.uint8:
+        return img
+    if img.dtype == np.uint16:
+        return (img.astype(np.float32) / 65535.0)
+    if img.dtype in (np.float32, np.float64):
+        # Already linear-ish float (OpenEXR, float TIFF): clip rather than
+        # rescale, since the values are meaningful as they stand.
+        return np.clip(img.astype(np.float32), 0.0, 1.0)
+    # Anything else (int8/int32/...) is not a depth this app produces; fall
+    # back to a plain 8-bit read rather than guessing a scale factor.
+    return None
+
+
 def _on_gui_thread() -> bool:
     """True when running on Qt's GUI thread.
 
@@ -716,9 +750,28 @@ class UnifiedImageProcessor:
             if not is_raw_file(file_path):
                 try:
                     import cv2
-                    img = cv2.imread(file_path, cv2.IMREAD_COLOR)
+
+                    # IMREAD_UNCHANGED, not IMREAD_COLOR: the latter forces
+                    # 8-bit, so a 16-bit TIFF -- which is exactly what this
+                    # app's own HDR merge, panorama and focus-stack export --
+                    # reached the editor with 256 levels of the 65536 it had
+                    # on disk. Push shadows on a merged HDR and it banded
+                    # where the file would not have.
+                    #
+                    # The pipeline already accepts float32 [0,1]: that is what
+                    # the RAW branch below returns. So >8-bit sources are
+                    # normalised to float32 and travel the same high-precision
+                    # path, while 8-bit files stay uint8 and cost nothing.
+                    raw_img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                    img = _normalise_raster_edit_base(raw_img)
+                    if img is None:
+                        # Unreadable that way, or a depth this cannot place
+                        # (int32, and so on). An 8-bit read is worse than the
+                        # file but far better than refusing to open it.
+                        img = cv2.imread(file_path, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     if img is not None:
-                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                         try:
                             exif = self.exif_extractor.extract_exif_data(file_path)
                             orient = int((exif or {}).get("orientation", 1) or 1)
