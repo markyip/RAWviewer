@@ -9747,6 +9747,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self.shortcuts_hint_button = QPushButton("i")
         self.shortcuts_hint_button.setFlat(True)
+        # Clicking it opens the full cheat sheet. The tooltip stays for a
+        # quick glance, but a tooltip can only be read one line at a time and
+        # disappears the moment you move to try what it said.
+        self.shortcuts_hint_button.clicked.connect(self.show_keyboard_shortcuts)
         self.shortcuts_hint_button.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
         self.shortcuts_hint_button.setFixedSize(28, 28)
         self.shortcuts_hint_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -18221,11 +18225,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
             "← / → — Previous / next image",
             "0–5 — Star rating (0 clears; click bottom stars too)",
-            "↓ — Move image(s) to Discard folder",
-            "Delete — Delete image(s)",
+            "↓ — Single view: move to Discard (not while the Adjust panel is open)",
+            "Delete — Delete image(s); on the Masks tab, delete the selected mask",
             "Esc — Gallery: clear selection / exit filters; single view: back to gallery",
             "Gallery: Ctrl/Cmd+click — toggle selection; Shift+click two photos for range",
-            "Gallery: ↑ / ↓ — Scroll (↓ with selection: move selection to Discard)",
+            "Gallery: ↑ / ↓ — Scroll · Shift + ↓ — Move the selection to Discard",
             "C — Toggle Compare mode (requires multiple images selected)",
             "H — Show/hide histogram",
             "J — Show/hide highlight (red) and shadow (blue) clipping",
@@ -18316,7 +18320,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             """)
 
     def show_keyboard_shortcuts(self):
-        """Show keyboard shortcuts dialog"""
+        """Open the shortcut cheat sheet for whatever the user is doing now."""
+        try:
+            from rawviewer_ui.shortcut_cheatsheet import ShortcutCheatSheet
+
+            existing = getattr(self, "_cheatsheet", None)
+            if existing is not None:
+                try:
+                    existing.close()
+                except Exception:
+                    pass
+            if getattr(self, "view_mode", "single") == "compare":
+                mode = "compare"
+            elif getattr(self, "_adjust_overlay_visible", False):
+                mode = "editor"
+            else:
+                mode = "browse"
+            sheet = ShortcutCheatSheet(self, mode=mode)
+            self._cheatsheet = sheet
+            sheet.destroyed.connect(lambda *_: setattr(self, "_cheatsheet", None))
+            sheet.show_centred_on(self)
+            return
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[HELP] cheat sheet failed; falling back to the list", exc_info=True
+            )
+
         lines = [
             ln.strip()
             for ln in self._keyboard_shortcuts_help_text().split("\n")
