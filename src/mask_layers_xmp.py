@@ -142,6 +142,12 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
                 }
             )
             continue
+        if getattr(layer, "is_group", False):
+            entry = _serialize_group(layer)
+            if entry is not None:
+                entries.append(entry)
+            continue
+
         alpha_serial = _encode_alpha(_downscale_for_store(layer.alpha))
         if not alpha_serial:
             continue
@@ -164,6 +170,121 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     if not entries:
         return ""
     return json.dumps(entries, separators=(",", ":"))
+
+
+def _component_entry(comp: MaskLayer) -> Optional[dict]:
+    """One component of a group. No adjustments -- the group owns those."""
+    entry = {
+        "name": comp.name,
+        "blend": "subtract" if comp.blend == "subtract" else "add",
+        "enabled": bool(comp.enabled),
+        "invert": bool(comp.invert),
+        "source": comp.source,
+        "kind": comp.kind,
+    }
+    if getattr(comp, "is_parametric", False):
+        entry["params"] = {
+            k: round(float(v), 5) for k, v in (comp.params or {}).items()
+        }
+        # Its alpha buffer is never read, but the SHAPE is -- alpha_at
+        # regenerates at whatever size is asked for.
+        entry["shape"] = [int(comp.alpha.shape[0]), int(comp.alpha.shape[1])]
+        return entry
+    alpha = _encode_alpha(_downscale_for_store(comp.alpha))
+    if not alpha:
+        return None
+    entry["alpha"] = alpha
+    return entry
+
+
+def _serialize_group(layer: MaskLayer) -> Optional[dict]:
+    """A group, written so an older build still renders it correctly.
+
+    Two representations of the same coverage share one entry:
+
+      ``alpha``       the components already combined, at storage resolution
+      ``components``  the pieces, so this build can still ungroup and edit
+
+    A build predating grouping reads only ``alpha`` and ``adjustments`` and
+    draws exactly the right thing -- it just cannot take the group apart.
+    Nesting the components instead would leave such a build looking at an
+    entry with no ``alpha``, silently dropping the mask. The duplication
+    costs bytes; losing a user's mask costs more.
+    """
+    components = [c for c in layer.components if c is not None]
+    if not components:
+        return None
+    h, w = layer.frame_shape()
+    baked = _encode_alpha(_downscale_for_store(layer.alpha_at(h, w)))
+    if not baked:
+        return None
+
+    comp_entries = [e for e in (_component_entry(c) for c in components) if e]
+    if not comp_entries:
+        return None
+
+    return {
+        "alpha": baked,
+        "adjustments": {
+            k: round(float(v), 4)
+            for k, v in layer.adjustments.items()
+            if k in _all_keys() and abs(float(v)) > 1e-4
+        },
+        "name": layer.name,
+        "enabled": bool(layer.enabled),
+        "invert": bool(layer.invert),
+        "blend": layer.blend,
+        "source": layer.source,
+        "components": comp_entries,
+    }
+
+
+def _deserialize_group(entry: dict, common: dict, raw_components: list):
+    """Rebuild a group from ``components``; the baked alpha is ignored here."""
+    components = []
+    for raw in raw_components:
+        if not isinstance(raw, dict):
+            continue
+        kind = str(raw.get("kind", "") or "brush")
+        shared = {
+            "name": str(raw.get("name", "") or ""),
+            "blend": "subtract" if raw.get("blend") == "subtract" else "add",
+            "enabled": bool(raw.get("enabled", True)),
+            "invert": bool(raw.get("invert", False)),
+            "source": str(raw.get("source", "") or ""),
+            "kind": kind,
+        }
+        if kind in PARAMETRIC_KINDS:
+            params = raw.get("params")
+            if not isinstance(params, dict):
+                continue
+            shape = raw.get("shape") or [_SHAPE_REF_DIM, _SHAPE_REF_DIM]
+            try:
+                hh, ww = int(shape[0]), int(shape[1])
+            except Exception:
+                hh = ww = _SHAPE_REF_DIM
+            components.append(
+                MaskLayer(
+                    np.zeros((max(1, hh), max(1, ww)), dtype=np.float32),
+                    params={k: float(v) for k, v in params.items()},
+                    **shared,
+                )
+            )
+            continue
+        alpha = _decode_alpha(str(raw.get("alpha", "") or ""))
+        if alpha is None:
+            continue
+        components.append(MaskLayer(alpha, **shared))
+
+    if not components:
+        return None
+
+    # The group's own alpha is a placeholder -- coverage comes from the
+    # components -- but it is sized like one so frame_shape() is sane.
+    h, w = components[0].alpha.shape[:2]
+    return MaskLayer(
+        np.zeros((h, w), dtype=np.float32), components=components, **common
+    )
 
 
 def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
@@ -190,6 +311,16 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
             "blend": str(entry.get("blend", "add") or "add"),
             "source": str(entry.get("source", "") or ""),
         }
+
+        raw_components = entry.get("components")
+        if isinstance(raw_components, list) and raw_components:
+            group = _deserialize_group(entry, common, raw_components)
+            if group is not None:
+                layers.append(group)
+                continue
+            # Fall through on a malformed component list: the baked "alpha"
+            # is still a faithful render of the group, so the mask survives
+            # as a flat layer rather than vanishing.
 
         kind = str(entry.get("kind", "") or "brush")
         if kind in PARAMETRIC_KINDS:

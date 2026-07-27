@@ -208,10 +208,24 @@ class MaskLayer:
     # a one-shot AI tool being offered again when its mask already exists --
     # matching on the layer NAME would break the moment a user renames a row.
     source: str = ""
+    # Grouped masks (Lightroom's model). When non-empty this layer is a GROUP:
+    # its coverage is its components combined by each component's ``blend``,
+    # not its own ``alpha``. Components are MaskLayer instances too, but only
+    # their alpha/kind/params/blend/invert/enabled are consulted -- the
+    # adjustments live on the group, exactly one set per mask.
+    #
+    # That is precisely why dropping one mask onto another discards the
+    # dragged mask's adjustments: a component cannot own any.
+    #
+    # One pass, not N: a group applies its adjustment once through the
+    # combined alpha, so grouping three masks costs less than three separate
+    # layers rather than more.
+    components: list = field(default_factory=list)
     version: int = field(default=0, compare=False, repr=False)
     _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _bbox_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _shape_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
+    _group_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def empty(cls, height: int, width: int, **kwargs) -> "MaskLayer":
@@ -223,6 +237,7 @@ class MaskLayer:
         self._empty_cache = None
         self._bbox_cache = None
         self._shape_alpha_cache = None
+        self._group_alpha_cache = None
 
     @property
     def is_parametric(self) -> bool:
@@ -230,14 +245,62 @@ class MaskLayer:
 
         return self.kind in PARAMETRIC_KINDS
 
+    @property
+    def is_group(self) -> bool:
+        return bool(self.components)
+
+    def _combined_alpha_at(self, height: int, width: int) -> np.ndarray:
+        """Components combined by their ``blend``, at the given resolution.
+
+        Add is a union (max), not a sum: two overlapping brush strokes should
+        cover the overlap once, not twice as hard. Subtract removes coverage
+        proportionally, so a soft eraser gradient thins the mask rather than
+        punching a hard hole.
+
+        The first component is always added regardless of its blend -- a mask
+        whose first component subtracts would otherwise be empty forever, and
+        silently so.
+        """
+        cache = self._group_alpha_cache
+        key = (self._components_version(), height, width)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+
+        out = None
+        for comp in self.components:
+            if not comp.enabled:
+                continue
+            a = comp.effective_alpha_at(height, width)
+            if out is None:
+                out = a.astype(np.float32, copy=True)
+                continue
+            if comp.blend == "subtract":
+                out *= 1.0 - a
+            else:
+                np.maximum(out, a, out=out)
+        if out is None:
+            out = np.zeros((height, width), dtype=np.float32)
+        np.clip(out, 0.0, 1.0, out=out)
+        self._group_alpha_cache = (key, out)
+        return out
+
+    def _components_version(self) -> tuple:
+        """Version tuple that changes whenever any component does."""
+        return tuple(
+            (c.version, c.blend, c.enabled, c.invert) for c in self.components
+        )
+
     def alpha_at(self, height: int, width: int) -> np.ndarray:
         """This layer's alpha at a given resolution.
 
         A brush layer resizes its buffer; a parametric layer regenerates from
         params, which is exact at any size rather than an interpolation of a
-        buffer authored at some other one. Cached per (version, shape) because
-        the compositor asks for the same size every tick.
+        buffer authored at some other one. A group combines its components.
+        Cached per (version, shape) because the compositor asks for the same
+        size every tick.
         """
+        if self.is_group:
+            return self._combined_alpha_at(height, width)
         if not self.is_parametric:
             return resize_alpha_to(self.alpha, height, width)
         cached = self._shape_alpha_cache
@@ -261,6 +324,10 @@ class MaskLayer:
     def is_empty(self) -> bool:
         if not self.enabled:
             return True
+        if self.is_group:
+            # Not cached on self.version: a component can be edited without
+            # the group's own version moving.
+            return all(c.is_empty for c in self.components)
         cached = self._empty_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
@@ -285,9 +352,23 @@ class MaskLayer:
         if self.invert:
             if not self.enabled:
                 return None
-            h, w = self.alpha.shape[:2]
+            h, w = self.frame_shape()
             return (0, h, 0, w)
         return self.bbox()
+
+    def frame_shape(self) -> tuple:
+        """(h, w) of this mask's coordinate space.
+
+        A group's own ``alpha`` is unused, so its frame comes from a
+        component instead -- reading self.alpha.shape there would give the
+        placeholder size and confine an inverted group to a corner.
+        """
+        if self.is_group:
+            for c in self.components:
+                h, w = c.frame_shape()
+                if h > 1 and w > 1:
+                    return (h, w)
+        return tuple(self.alpha.shape[:2])
 
     def bbox(self) -> Optional[tuple]:
         """Non-zero alpha bbox in this layer's own (alpha-resolution) coordinates.
@@ -297,6 +378,20 @@ class MaskLayer:
         overlay want. The compositor wants ``effective_bbox()``. Parametric
         masks (gradient/radial) will derive a bbox analytically from params.
         """
+        if self.is_group:
+            # Union of the ADDING components. A subtracting one can only
+            # remove coverage, so it never widens where the group applies.
+            boxes = [
+                c.bbox()
+                for c in self.components
+                if c.enabled and c.blend != "subtract" and c.bbox() is not None
+            ]
+            if not boxes:
+                return None
+            return (
+                min(b[0] for b in boxes), max(b[1] for b in boxes),
+                min(b[2] for b in boxes), max(b[3] for b in boxes),
+            )
         cached = self._bbox_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
@@ -324,9 +419,12 @@ class MaskLayer:
                 f"{k}={float(self.params.get(k, 0.0)):.5f}"
                 for k in sorted(self.params)
             )
+        group_sig = ""
+        if self.is_group:
+            group_sig = ":grp[" + "|".join(c.fingerprint() for c in self.components) + "]"
         return (
             f"mem:{int(h)}x{int(w)}:v{int(self.version)}:inv{int(self.invert)}"
-            f":en{enabled_sig}:bl{self.blend}{shape_sig}:{adj_sig}"
+            f":en{enabled_sig}:bl{self.blend}{shape_sig}{group_sig}:{adj_sig}"
         )
 
 
