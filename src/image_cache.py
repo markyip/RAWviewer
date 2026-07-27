@@ -1704,10 +1704,24 @@ class MemoryMonitor:
         return {
             # Opt-in override for zoomed-culling workflows: retaining more
             # sensor-res buffers makes zoomed A<->B revisits instant, at
-            # ~100-200MB per slot. Default stays conservative for 8GB machines.
+            # ~100-200MB per slot.
+            #
+            # This was min(max_full_images, 8). The 8 was a second, cruder
+            # limit on top of the byte budget that already governs this cache
+            # (_enforce_numpy_cache_byte_budget, 55% of max_memory_mb), and it
+            # only ever bound when the byte budget said there was room:
+            # measured on a 17GB machine, bytes allowed 13 entries at 24MP and
+            # 9 at 33MP while the count cap allowed 8. At 61MP the byte budget
+            # binds first (5) and correctly, which is the case the 8 was meant
+            # to protect and does not need it.
+            #
+            # So the RAM-derived figure stands on its own now, with maximum=32
+            # as a sanity bound rather than the operative one. Memory is still
+            # bounded by bytes; it is simply bounded ONCE, by the limit that
+            # knows how large these buffers actually are.
             'full_images': _env_int(
                 "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS",
-                min(max_full_images, 8),
+                max_full_images,
                 minimum=2,
                 maximum=32,
             ),
