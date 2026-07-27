@@ -168,10 +168,21 @@ def apply_spot_heal(
     radius = max(1, int(inpaint_radius))
     # Must include the source buffer identity — caching only by mask
     # version returned a stale healed frame after Exposure/WB changes.
+    #
+    # id() alone is NOT enough. numpy hands the same address back for the
+    # next same-shaped allocation essentially every time, so a freed base
+    # buffer replaced by a different one of identical shape collides on
+    # (version, h, w, radius, id) and serves the previous heal. A weakref
+    # settles it: if the array the key was built from is gone, or is not
+    # this array, the entry cannot match.
+    import weakref as _weakref
+
     cache_key = (mask.version, h, w, radius, id(img))
     cached = mask._inpaint_cache
     if cached is not None and cached[0] == cache_key:
-        return cached[1]
+        _ref = cached[2] if len(cached) > 2 else None
+        if _ref is not None and _ref() is img:
+            return cached[1]
 
     import cv2
 
@@ -195,7 +206,14 @@ def apply_spot_heal(
     # Dilate inside the ROI so Telea has a clean border of source pixels.
     bin_roi = cv2.dilate(bin_roi, np.ones((3, 3), np.uint8), iterations=1)
 
-    peak = float(np.percentile(img, 99.8))
+    # Normalise against the ROI, not the whole frame. Everything else here
+    # already works on the ROI, and the full-frame version cost ~675 ms per
+    # stroke on a 24 MP buffer -- a complete sort of the image to scale a
+    # patch a hundred pixels across. It was wrong in a quieter way too: a
+    # specular highlight anywhere in the photo set the exposure the heal was
+    # encoded at, so the same blemish healed differently depending on
+    # something at the far edge of the frame.
+    peak = float(np.percentile(roi, 99.8))
     peak = max(peak, 1e-4)
     norm = np.clip(roi / peak, 0.0, 1.0)
     u8 = np.clip(np.power(norm, 1.0 / 2.2) * 255.0 + 0.5, 0, 255).astype(np.uint8)
@@ -210,7 +228,12 @@ def apply_spot_heal(
     patched = roi * (1.0 - alpha) + healed * alpha
     out = np.array(img, dtype=np.float32, copy=True)
     out[y0:y1, x0:x1] = patched
-    mask._inpaint_cache = (cache_key, out)
+    try:
+        mask._inpaint_cache = (cache_key, out, _weakref.ref(img))
+    except TypeError:
+        # Not weak-referenceable (a view or a non-array): skip the cache
+        # rather than store an entry that cannot be validated.
+        mask._inpaint_cache = None
     return out
 
 

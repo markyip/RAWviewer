@@ -361,6 +361,20 @@ class UnifiedImageProcessor:
                 if ev is not None:
                     ev.set()
         except Exception:
+            # Falling back to the UNADJUSTED image is a real answer to give a
+            # caller, but it must not be a silent one: it looks identical to
+            # "this photo has no edits", so a broken pipeline reads as a photo
+            # the user never edited. Logged, and deliberately not cached --
+            # caching the fallback would make one transient failure stick for
+            # the rest of the session.
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[EDIT] Sidecar apply failed for %s -- showing the unadjusted "
+                "image. Edits are NOT lost; they are still in the sidecar.",
+                os.path.basename(file_path or ""),
+                exc_info=True,
+            )
             return rgb_image
 
     def apply_sidecar_progressive(

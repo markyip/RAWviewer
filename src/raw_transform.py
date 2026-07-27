@@ -309,6 +309,15 @@ def apply_geometry(
 
         return np.ascontiguousarray(out)
     except Exception:
+        # Same reasoning as unified_image_processor's apply fallback: an
+        # untransformed frame is indistinguishable from an uncropped one, so
+        # say why rather than letting a geometry failure look like intent.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[TRANSFORM] geometry stage failed; returning the untransformed "
+            "image", exc_info=True,
+        )
         return img
 
 

@@ -326,6 +326,10 @@ class ImageLoadWorker(QRunnable):
         worker_thread_local.priority = getattr(self.task, 'priority', None)
         worker_thread_local.task = self.task
         self.manager._mark_task_running(self.task)
+        # Bound before the try: the logging block below can raise, and an
+        # exception handler that then referenced file_path would fail with
+        # UnboundLocalError, hiding whatever actually went wrong.
+        file_path = self.task.file_path
         try:
             if self.task.priority == Priority.CURRENT:
                 import logging
@@ -343,7 +347,6 @@ class ImageLoadWorker(QRunnable):
                     self.manager._task_finished(self.task)
                 return
             
-            file_path = self.task.file_path
             self._yield_if_needed()
             stages = self.task.stages or set()
             if self._safe_emit() and not self.task.is_cancelled():
@@ -2251,7 +2254,18 @@ class ImageLoadManager(QObject):
                         continue
 
                     if is_heavy:
+                        # Claim the slot on the SHARED counter, not just the
+                        # local one. _schedule_next_task has no re-entrancy
+                        # guard and runs from worker completions as well as
+                        # the watchdog, so a pass that had merely decided to
+                        # start a heavy task -- lock dropped, tryStart not yet
+                        # returned -- left _active_raw_tasks reading low, and
+                        # a concurrent pass admitted a second heavy demosaic
+                        # against a limit of one. Rolled back below if the
+                        # pool refuses the worker.
                         provisional_raw += 1
+                        self._active_raw_tasks = int(self._active_raw_tasks or 0) + 1
+                        task._counted_raw_slot = True
                     to_start.append((task, pool, is_heavy))
             except queue.Empty:
                 pass
@@ -2273,12 +2287,15 @@ class ImageLoadManager(QObject):
                 continue
             worker = ImageLoadWorker(task, self)
             if not pool.tryStart(worker):
+                # Give the slot back: it was claimed at admission time.
+                if is_heavy:
+                    with self._queue_lock:
+                        self._active_raw_tasks = max(
+                            0, int(self._active_raw_tasks or 0) - 1
+                        )
+                        task._counted_raw_slot = False
                 requeue.append(task)
                 continue
-            if is_heavy:
-                with self._queue_lock:
-                    self._active_raw_tasks += 1
-                    task._counted_raw_slot = True
 
         if requeue:
             with self._queue_lock:
@@ -2288,11 +2305,13 @@ class ImageLoadManager(QObject):
 
     def get_stats(self) -> Dict[str, Any]:
         """獲取管理器統計信息"""
+        with self._running_tasks_lock:
+            running = len(self._running_tasks)
         with self._queue_lock:
             return {
                 'queue_size': self._work_queue.qsize(),
                 'active_tasks': len(self._active_tasks),
-                'running_tasks': len(self._running_tasks),
+                'running_tasks': running,
                 'active_threads': self._thread_pool.activeThreadCount(),
                 'max_threads': self._thread_pool.maxThreadCount(),
                 'current_active_threads': self._current_thread_pool.activeThreadCount(),

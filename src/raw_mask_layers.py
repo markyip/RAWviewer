@@ -658,13 +658,25 @@ def apply_mask_layers(
         return img
     h, w = img.shape[:2]
 
+    import weakref as _weakref
+
     if active_index is None:
+        # id(img) identifies the upstream buffer, but numpy reuses the same
+        # address for the next same-shaped allocation almost every time, so a
+        # different base with an identical fingerprint and shape would hit
+        # this entry and render the previous frame. The weakref makes the
+        # match exact: a dead or different referent cannot satisfy it.
         cache_key = (stack.fingerprint(), h, w, id(img))
         cached = stack._composite_cache
         if cached is not None and cached[0] == cache_key:
-            return cached[1]
+            ref = cached[2] if len(cached) > 2 else None
+            if ref is not None and ref() is img:
+                return cached[1]
         out = _composite_layers(img, stack.layers)
-        stack._composite_cache = (cache_key, out)
+        try:
+            stack._composite_cache = (cache_key, out, _weakref.ref(img))
+        except TypeError:
+            stack._composite_cache = None
         return out
 
     n = len(stack.layers)
@@ -675,10 +687,16 @@ def apply_mask_layers(
     prefix_fp = "|".join(l.fingerprint() for l in prefix_layers) if prefix_layers else "empty"
     prefix_key = (prefix_fp, h, w, id(img))
     cached_prefix = stack._prefix_cache
+    prefix_out = None
     if cached_prefix is not None and cached_prefix[0] == prefix_key:
-        prefix_out = cached_prefix[1]
-    else:
+        ref = cached_prefix[2] if len(cached_prefix) > 2 else None
+        if ref is not None and ref() is img:
+            prefix_out = cached_prefix[1]
+    if prefix_out is None:
         prefix_out = _composite_layers(img, prefix_layers)
-        stack._prefix_cache = (prefix_key, prefix_out)
+        try:
+            stack._prefix_cache = (prefix_key, prefix_out, _weakref.ref(img))
+        except TypeError:
+            stack._prefix_cache = None
 
     return _composite_layers(prefix_out, stack.layers[active_index:])
