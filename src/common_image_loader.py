@@ -577,6 +577,81 @@ def _regular_image_max_edge() -> int:
     return max(2048, min(v, 65536))
 
 
+def load_qimage_safe(file_path: str, max_edge: int = 0):
+    """QImage twin of load_pixmap_safe, for WORKER THREADS.
+
+    QPixmap is GUI-thread-only in Qt -- it is backed by platform paint
+    resources -- but ImageLoadWorker reaches load_pixmap_safe through
+    process_full_image -> _process_regular_image for every non-RAW file, so
+    a QPixmap was being constructed off the GUI thread on every JPEG, PNG,
+    WebP and TIFF, then handed across via pixmap_ready. QImage has no such
+    restriction: it is plain pixel data, safe to build anywhere and cheap to
+    convert once it reaches the GUI thread.
+
+    Deliberately narrower than load_pixmap_safe: QImageReader for the common
+    formats, PIL for TIFF and as the fallback. HDR/EDR paths are NOT
+    replicated -- they set module state about the last load and belong on the
+    GUI thread -- so this returns a null QImage for anything it cannot handle
+    plainly, and the caller decides what to do.
+
+    Returns a null QImage on failure; never raises.
+    """
+    from PyQt6.QtCore import QSize
+    from PyQt6.QtGui import QImageReader
+
+    try:
+        if is_tiff_file(file_path):
+            return _pil_file_to_qimage(file_path, max_edge=max_edge)
+
+        reader = QImageReader(file_path)
+        reader.setAutoTransform(True)
+        if max_edge > 0:
+            size = reader.size()
+            w, h = size.width(), size.height()
+            if w > 0 and h > 0 and max(w, h) > max_edge:
+                if w >= h:
+                    sw, sh = max_edge, max(1, int(h * max_edge / max(w, 1)))
+                else:
+                    sh, sw = max_edge, max(1, int(w * max_edge / max(h, 1)))
+                reader.setScaledSize(QSize(sw, sh))
+        img = reader.read()
+        if img is not None and not img.isNull():
+            return img
+    except Exception:
+        pass
+    try:
+        return _pil_file_to_qimage(file_path, max_edge=max_edge)
+    except Exception:
+        return QImage()
+
+
+def _pil_file_to_qimage(file_path: str, max_edge: int = 0):
+    """PIL load -> QImage, orientation applied. The QPixmap-free half of
+    _pil_file_to_qpixmap, so worker threads can use it."""
+    from PIL import Image, ImageFile, ImageOps
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
+    Image.MAX_IMAGE_PIXELS = None
+    with Image.open(file_path) as pil_image:
+        pil_image = ImageOps.exif_transpose(pil_image)
+        if max_edge > 0:
+            w, h = pil_image.size
+            if max(w, h) > max_edge:
+                pil_image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        if pil_image.mode != "RGB":
+            pil_image = pil_image.convert("RGB")
+        width, height = pil_image.size
+        import numpy as np
+
+        arr = np.ascontiguousarray(np.asarray(pil_image))
+        qimage = QImage(
+            arr.data, width, height, width * 3, QImage.Format.Format_RGB888
+        )
+        # copy(): the QImage above borrows the numpy buffer, and this one
+        # crosses a thread boundary where the array's lifetime is not ours.
+        return qimage.copy()
+
+
 def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
     """Load JPEG/PNG/WebP via PIL with EXIF orientation; optional downscale."""
     import logging

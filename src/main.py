@@ -5231,6 +5231,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.image_manager.image_ready.connect(self.on_manager_image_ready)
         # QPixmap 就緒（非 RAW 文件）
         self.image_manager.pixmap_ready.connect(self.on_manager_pixmap_ready)
+        self.image_manager.qimage_ready.connect(self.on_manager_qimage_ready)
         # EXIF 數據就緒
         self.image_manager.exif_data_ready.connect(self.on_manager_exif_ready)
         # 錯誤處理
@@ -8106,6 +8107,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.setFocus()
         self.schedule_save_session_state()
         self._start_preloading()
+
+    def on_manager_qimage_ready(self, file_path: str, image):
+        """A worker produced a QImage because it could not legally build a
+        QPixmap. This slot runs on the GUI thread, so convert here and hand it
+        to the existing pixmap path -- including the pixmap cache, which the
+        worker deliberately does not touch.
+        """
+        try:
+            from PyQt6.QtGui import QPixmap as _QPixmap
+
+            if image is None or image.isNull():
+                return
+            pixmap = _QPixmap.fromImage(image)
+            if pixmap.isNull():
+                return
+            try:
+                self.image_cache.put_pixmap(file_path, pixmap)
+            except Exception:
+                pass
+            self.on_manager_pixmap_ready(file_path, pixmap)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[LOAD] QImage -> QPixmap failed for %s",
+                os.path.basename(file_path or ""),
+                exc_info=True,
+            )
 
     def on_manager_pixmap_ready(self, file_path: str, pixmap):
         """處理 ImageLoadManager 的 QPixmap 就緒信號（非 RAW 文件）"""

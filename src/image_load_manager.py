@@ -555,6 +555,11 @@ class ImageLoadWorker(QRunnable):
 
                     if isinstance(buf, (np.ndarray, _DeviceRgb)):
                         self.manager.image_ready.emit(file_path, buf)
+                    elif isinstance(buf, QImage):
+                        # Built on this worker because QPixmap cannot be. The
+                        # signal is queued, so the conversion below lands on
+                        # the GUI thread, which is the only place it is legal.
+                        self.manager.qimage_ready.emit(file_path, buf)
                     elif isinstance(buf, QPixmap):
                         self.manager.pixmap_ready.emit(file_path, buf)
 
@@ -721,6 +726,9 @@ class ImageLoadManager(QObject):
     thumbnail_ready = pyqtSignal(str, object)  # file_path, thumbnail (np.ndarray or QImage)
     image_ready = pyqtSignal(str, object)  # file_path, full_image (ndarray or DeviceRgb)
     pixmap_ready = pyqtSignal(str, QPixmap)  # file_path, pixmap
+    # Non-RAW full buffers arrive as QImage: workers cannot legally build a
+    # QPixmap. Converted to one on the GUI thread by the receiving slot.
+    qimage_ready = pyqtSignal(str, QImage)  # file_path, image
     error_occurred = pyqtSignal(str, str)  # file_path, error_message
     task_completed = pyqtSignal(str)  # file_path
     progress_updated = pyqtSignal(str, str)  # file_path, status_message

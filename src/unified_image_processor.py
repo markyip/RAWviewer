@@ -67,6 +67,25 @@ _EDIT_BASE_LRU_MAX = 2
 # Unpacked-RAW stash. Module-level for the same reason the in-flight registry
 # above is: workers build their own UnifiedImageProcessor, so instance state
 # is thrown away with the worker.
+def _on_gui_thread() -> bool:
+    """True when running on Qt's GUI thread.
+
+    QPixmap, and the pixmap cache the GUI thread reads, are only safe there.
+    Returns True if the question cannot be answered (no QApplication yet), so
+    single-process scripts and tests behave as before.
+    """
+    try:
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return True
+        return QThread.currentThread() is app.thread()
+    except Exception:
+        return True
+
+
 _UNPACKED_RAW_LOCK = _ebt.Lock()
 _UNPACKED_RAW_SLOTS: OrderedDict = OrderedDict()
 
@@ -2265,6 +2284,23 @@ class UnifiedImageProcessor:
             from image_cache import memory_preview_max_edge
 
             max_edge = 0 if use_full_resolution else memory_preview_max_edge()
+
+            # QPixmap is GUI-thread-only in Qt. This runs on an ImageLoadWorker
+            # for every non-RAW file, so off the GUI thread it returns a
+            # QImage instead and the conversion happens once the buffer has
+            # been delivered. The pixmap cache is skipped there too: the GUI
+            # thread reads it, and populating it from a worker was the second
+            # half of the same problem.
+            if not _on_gui_thread():
+                from common_image_loader import load_qimage_safe
+
+                qimg = load_qimage_safe(file_path, max_edge=max_edge)
+                if qimg is not None and not qimg.isNull():
+                    return qimg
+                # Nothing safe to return from here; the caller treats None as
+                # "no full-res buffer", which it already handles.
+                return None
+
             pixmap = load_pixmap_safe(file_path, max_edge=max_edge)
             if not pixmap.isNull():
                 self.cache.put_pixmap(file_path, pixmap)
