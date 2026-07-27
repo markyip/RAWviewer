@@ -21873,6 +21873,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if path:
             # Load sidecar on the reencode worker — never on the UI thread.
             self._reencode_persisted_preview_for_sidecar(path, None)
+            # Opening an already-edited photo and closing without touching
+            # anything used to leave the gallery tile as the embedded JPEG:
+            # the tile is only refreshed by the save-time bake, which needs an
+            # actual edit, and every other refresh path is gated on
+            # SIDECAR_ADJUST (off by default). So a photo edited in an earlier
+            # session showed unedited in the grid no matter how often you
+            # opened it. Bake on close instead, when there is a settled render
+            # to bake from.
+            self._bake_browse_caches_for_visited_edit(path)
         if getattr(self, "_adjust_forced_raw_workflow", False):
             self._adjust_forced_raw_workflow = False
             settings = self.get_settings()
@@ -25165,6 +25174,50 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         if getattr(self, "view_mode", "single") == "gallery":
             self._update_gallery_view()
+
+    def _bake_browse_caches_for_visited_edit(self, path: str) -> None:
+        """Refresh browse tiles after merely VIEWING an edited photo.
+
+        _persist_editor_aligned_browse_caches only runs from editing_finished,
+        so it needs a change to save. This covers the other case: a photo
+        carrying edits from a previous session, opened and closed untouched.
+
+        Deliberately narrow. It bakes only when a full-quality render for this
+        exact file is already in hand -- no decoding, no pipeline pass, just
+        the resize and encode that the save path performs -- and only when the
+        sidecar actually holds non-default edits, so an unedited photo never
+        rewrites its own cache.
+        """
+        try:
+            from common_image_loader import is_raw_file
+
+            if not path or not is_raw_file(path):
+                return
+            last = getattr(self, "_adjust_last_render", None)
+            if not last or not isinstance(last, tuple) or last[0] is None:
+                return
+            if _norm_path(getattr(self, "_adjust_last_render_norm", "") or "") != _norm_path(path):
+                return
+            array = last[0]
+            # Same floor the save-time bake uses: a small interim render must
+            # not be written into browse caches as if it were the real thing.
+            if getattr(array, "ndim", 0) != 3 or max(array.shape[0], array.shape[1]) < 1200:
+                return
+
+            from raw_adjustments import is_default_adjustments, load_adjustments_for_file
+
+            if is_default_adjustments(load_adjustments_for_file(path)):
+                return
+            self._persist_editor_aligned_browse_caches(path)
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "invalidate_thumbnails_for_path"):
+                gj.invalidate_thumbnails_for_path(path)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug(
+                "[BAKE] visited-edit bake skipped for %s", path, exc_info=True
+            )
 
     def _persist_editor_aligned_browse_caches(self, path: str) -> None:
         """Downscale the just-rendered Adjust frame into thumbnail/preview cache.
