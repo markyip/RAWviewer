@@ -184,6 +184,17 @@ def _submit_persist(fn) -> None:
 _UNPACKED_RAW_LOCK = _ebt.Lock()
 _UNPACKED_RAW_SLOTS: OrderedDict = OrderedDict()
 
+# Generation tokens for deferred put_full / preview persist. MODULE-level:
+# ImageLoadWorker builds a fresh UnifiedImageProcessor per task, so a
+# per-instance gen map could never see another worker's newer decode of the
+# same path. Persist jobs check "has the user moved on?" against THIS map;
+# if worker B's decode of path X cannot bump the token worker A's in-flight
+# job is watching, A's late write poisons the cache after B already put a
+# fresher buffer. Same half-hoist failure as lock/list and inflight pairs.
+_ASYNC_CACHE_GEN: OrderedDict = OrderedDict()
+_ASYNC_CACHE_GEN_LOCK = _ebt.Lock()
+_ASYNC_CACHE_GEN_MAX = 4096
+
 _LIBRAW_UNSUPPORTED_MAX = 2048
 
 
@@ -263,8 +274,6 @@ class UnifiedImageProcessor:
         # cost). Small LRU (~2 bytes/sensor-pixel per slot) so A↔B revisit
         # and neighbor prefetch do not immediately evict the current file.
         # Consumed by the full decode via _take_unpacked_raw.
-        import threading as _threading
-
         #
         # MODULE-level, not per instance. ImageLoadWorker is a one-shot
         # QRunnable that builds its own UnifiedImageProcessor, so an instance
@@ -299,13 +308,9 @@ class UnifiedImageProcessor:
         # recomputing -- overlapping duplicate applies of a 32MP buffer
         # measured as stacked 3.5s+7.2s entries in the same second.
         self._adjusted_inflight = _ADJUSTED_INFLIGHT
-        # Generation tokens for deferred put_full / preview persist threads —
-        # a newer decode of the same path bumps the token so a late write
-        # cannot poison the cache after cancel/navigation.
-        self._async_cache_lock = _threading.Lock()
-        # Bounded LRU (insertion-ordered): a long session visiting tens of
-        # thousands of files must not grow this token map without limit.
-        self._async_cache_gen: OrderedDict = OrderedDict()
+        # Async-persist gen tokens: module-level (see _ASYNC_CACHE_GEN).
+        self._async_cache_lock = _ASYNC_CACHE_GEN_LOCK
+        self._async_cache_gen = _ASYNC_CACHE_GEN
 
     def _bump_async_cache_gen(self, file_path: str) -> int:
         key = os.path.normcase(os.path.abspath(file_path or ""))
@@ -313,7 +318,7 @@ class UnifiedImageProcessor:
             gen = int(self._async_cache_gen.get(key, 0)) + 1
             self._async_cache_gen[key] = gen
             self._async_cache_gen.move_to_end(key)
-            while len(self._async_cache_gen) > 4096:
+            while len(self._async_cache_gen) > _ASYNC_CACHE_GEN_MAX:
                 self._async_cache_gen.popitem(last=False)
             return gen
 
@@ -345,6 +350,48 @@ class UnifiedImageProcessor:
         key = os.path.normcase(os.path.abspath(file_path))
         with self._unpacked_raw_lock:
             return self._unpacked_raw_slots.pop(key, None)
+
+    @staticmethod
+    def _adjustment_fingerprint(adj: dict, shape) -> tuple:
+        """Fingerprint for the full-res adjusted memo and its peekers.
+
+        Includes base-buffer shape so a half-size cache entry can never be
+        served for a full-res request. Every non-numeric edit is folded in
+        (hashed): a hand-picked key list lagged behind channel curves / heal /
+        mask layers. Serials (mask alpha as base64 PNG) are hashed, not stored.
+        """
+        import hashlib as _hashlib
+
+        numeric = []
+        strings = _hashlib.sha1()
+        for _k in sorted(adj.keys()):
+            _v = adj[_k]
+            if isinstance(_v, bool):
+                strings.update(f"{_k}={int(_v)}\x00".encode())
+            elif isinstance(_v, (int, float)):
+                numeric.append((_k, round(float(_v), 4)))
+            elif isinstance(_v, str):
+                if _v:
+                    strings.update(f"{_k}={_v}\x00".encode())
+            elif _v is not None:
+                # Live objects (MaskLayerStack under _mask_layers_obj): serialized
+                # twin is already in the dict; identity notices a swap.
+                strings.update(f"{_k}=obj{id(_v)}\x00".encode())
+        return (tuple(numeric), strings.hexdigest(), shape)
+
+    def _peek_adjusted_full(
+        self, file_path: str, adj: dict, shape
+    ) -> Optional[np.ndarray]:
+        """Return a warm full-res adjusted buffer, or None. Non-blocking."""
+        if adj is None or shape is None:
+            return None
+        norm = os.path.normcase(os.path.abspath(file_path or ""))
+        adj_key = self._adjustment_fingerprint(adj, shape)
+        with self._adjusted_full_lock:
+            for n, k, buf in self._adjusted_full_slots:
+                if n == norm and k == adj_key:
+                    return buf
+        return None
 
     def _apply_sidecar_if_needed(
         self,
@@ -406,44 +453,7 @@ class UnifiedImageProcessor:
             if is_default_adjustments(adj):
                 return rgb_image
             norm = os.path.normcase(os.path.abspath(file_path))
-            # Fingerprint includes the base buffer's shape so a half-size
-            # cached result can never be served for a full-res request.
-            #
-            # EVERY non-numeric edit is folded in, not a hand-picked few. This
-            # used to name _tone_curve_pv2012 and the dodge/burn mask
-            # explicitly, which silently excluded per-channel curves, the heal
-            # mask and the entire mask-layer stack -- so editing a mask and
-            # asking for the full-res render again served the previous one. A
-            # list of keys is a list somebody has to remember to extend;
-            # hashing whatever is present cannot fall behind.
-            #
-            # Serials are large (mask alpha is base64 PNG), so they are hashed
-            # rather than carried in the key.
-            import hashlib as _hashlib
-
-            numeric = []
-            strings = _hashlib.sha1()
-            for _k in sorted(adj.keys()):
-                _v = adj[_k]
-                if isinstance(_v, bool):
-                    strings.update(f"{_k}={int(_v)}\x00".encode())
-                elif isinstance(_v, (int, float)):
-                    numeric.append((_k, round(float(_v), 4)))
-                elif isinstance(_v, str):
-                    if _v:
-                        strings.update(f"{_k}={_v}\x00".encode())
-                elif _v is not None:
-                    # Live objects (the MaskLayerStack under _mask_layers_obj)
-                    # have no cheap value hash, but their serialized twin is
-                    # already in this dict, so identity is enough to notice a
-                    # swap without pretending to fingerprint the contents.
-                    strings.update(f"{_k}=obj{id(_v)}\x00".encode())
-
-            adj_key = (
-                tuple(numeric),
-                strings.hexdigest(),
-                rgb_image.shape,
-            )
+            adj_key = self._adjustment_fingerprint(adj, rgb_image.shape)
             import threading as _threading
 
             inflight_key = (norm, adj_key)
@@ -2270,10 +2280,15 @@ class UnifiedImageProcessor:
                     # visibly shifts when the fresh LibRaw render lands. With
                     # it, revisits paint consistent colors from the first
                     # frame. Workflow toggles already purge these caches, so
-                    # embedded mode is unaffected. Runs on a daemon thread --
-                    # the resize+JPEG encode costs ~110ms and must not delay
-                    # the image-ready callback.
-                    import threading
+                    # embedded mode is unaffected.
+                    #
+                    # Hybrid bake of browse-edits (when enabled):
+                    #   1) Warm full-res adjusted memo → resize+encode only
+                    #      (UI already paid the multi-second apply).
+                    #   2) Memo miss → resize FIRST, then apply at preview
+                    #      scale (never a second full-res apply just for a
+                    #      2304px JPEG; spatial tools run at preview scale).
+                    # Default (no browse-edits): persist the unadjusted base.
 
                     def _persist_libraw_preview(
                         rgb=rgb_image, fp=file_path, expected=cache_gen
@@ -2297,26 +2312,62 @@ class UnifiedImageProcessor:
                                 is_default_adjustments,
                                 sidecar_adjustments_enabled,
                             )
-                            # Only bake edits into the persisted preview when
-                            # browse tiers render edits; the default shows
-                            # original pixels outside the Adjust panel.
+
+                            source = rgb
+                            already_preview_sized = False
                             if sidecar_adjustments_enabled():
                                 adj = load_adjustments_for_file(fp)
                                 if adj and not is_default_adjustments(adj):
-                                    rgb = apply_adjustments_to_rgb(rgb, adj)
+                                    memo = self._peek_adjusted_full(
+                                        fp, adj, rgb.shape
+                                    )
+                                    if memo is not None:
+                                        # Path 1: warm memo — no re-apply.
+                                        source = memo
+                                    else:
+                                        # Path 2: miss — downscale then apply.
+                                        h0, w0 = rgb.shape[:2]
+                                        cap0 = memory_preview_max_edge()
+                                        if max(h0, w0) > cap0:
+                                            sc0 = cap0 / max(h0, w0)
+                                            small = cv2.resize(
+                                                rgb,
+                                                (
+                                                    max(1, int(w0 * sc0)),
+                                                    max(1, int(h0 * sc0)),
+                                                ),
+                                                interpolation=cv2.INTER_AREA,
+                                            )
+                                        else:
+                                            small = rgb
+                                        if (
+                                            self._async_cache_gen_current(fp)
+                                            != expected
+                                        ):
+                                            return
+                                        source = apply_adjustments_to_rgb(
+                                            small, adj
+                                        )
+                                        already_preview_sized = True
                             if self._async_cache_gen_current(fp) != expected:
                                 return
-                            h, w = rgb.shape[:2]
-                            cap = memory_preview_max_edge()
-                            if max(h, w) > cap:
-                                sc = cap / max(h, w)
-                                prev = cv2.resize(
-                                    rgb,
-                                    (max(1, int(w * sc)), max(1, int(h * sc))),
-                                    interpolation=cv2.INTER_AREA,
-                                )
+                            if already_preview_sized:
+                                prev = source
                             else:
-                                prev = rgb
+                                h, w = source.shape[:2]
+                                cap = memory_preview_max_edge()
+                                if max(h, w) > cap:
+                                    sc = cap / max(h, w)
+                                    prev = cv2.resize(
+                                        source,
+                                        (
+                                            max(1, int(w * sc)),
+                                            max(1, int(h * sc)),
+                                        ),
+                                        interpolation=cv2.INTER_AREA,
+                                    )
+                                else:
+                                    prev = source
                             if self._async_cache_gen_current(fp) != expected:
                                 return
                             ok, buf = cv2.imencode(

@@ -343,8 +343,12 @@ class ImageLoadWorker(QRunnable):
                         sorted(self.task.stages or set()),
                     )
             if self.task.is_cancelled():
-                if self._safe_emit():
-                    self.manager._task_finished(self.task)
+                # No explicit finish here: the `finally` below owns the
+                # bookkeeping and runs on this return too. Calling it in both
+                # places emitted task_completed twice for one task -- so the
+                # gallery kicked _request_load_visible_images twice -- and ran
+                # _schedule_next_task twice under exactly the churn that
+                # produces cancelled-at-start tasks.
                 return
             
             self._yield_if_needed()

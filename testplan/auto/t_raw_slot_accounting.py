@@ -209,6 +209,25 @@ def main() -> int:
     )
     check("the kept task still holds its slot", keep2._counted_raw_slot is True)
 
+    # --- a task cancelled at start finishes exactly ONCE ---
+    # run() returns early for an already-cancelled task, but `finally` still
+    # runs, so an explicit finish there made every such task complete twice:
+    # task_completed emitted twice and _schedule_next_task ran twice, under
+    # precisely the churn that produces cancelled-at-start tasks.
+    import inspect
+
+    run_src = inspect.getsource(ilm.ImageLoadWorker.run)
+    check(
+        "run() finishes a task in exactly one place",
+        run_src.count("_task_finished(") == 1,
+        f"{run_src.count('_task_finished(')} call sites",
+    )
+    check(
+        "and that place is the finally, which owns the bookkeeping",
+        "finally:" in run_src.split("_task_finished(")[0].rsplit("def ", 1)[-1]
+        or "emit=self._safe_emit()" in run_src,
+    )
+
     # --- reconcile agrees with the holder set, not the task map ---
     m = _manager()
     h = _Task("/h.CR3", Priority.CURRENT)
