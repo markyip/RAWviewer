@@ -239,3 +239,8 @@ models/birefnet.onnx
 models/skyseg.onnx
 models/mobilesam_encoder.onnx
 models/mobilesam_decoder.onnx
+
+# InstructPix2Pix ONNX set for the local generative provider (~2.2 GB).
+# Downloaded on demand by raw_generative_local.download(); never committed --
+# it is an optional model the user opts into, not something we ship.
+models/ip2p/

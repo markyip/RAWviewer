@@ -26,6 +26,9 @@ _K_API_KEY = "generative/api_key"
 _K_MODEL = "generative/model_name"
 _K_INSECURE = "generative/allow_insecure"
 _K_CONSENT_FOR = "generative/consent_endpoint"
+_K_LOCAL_STEPS = "generative/local_steps"
+_K_LOCAL_TEXT_G = "generative/local_text_guidance"
+_K_LOCAL_IMAGE_G = "generative/local_image_guidance"
 
 
 def _settings():
@@ -51,7 +54,28 @@ def load_settings() -> dict:
         "api_key": str(s.value(_K_API_KEY, "") or ""),
         "model_name": str(s.value(_K_MODEL, "remote") or "remote"),
         "allow_insecure": _as_bool(s.value(_K_INSECURE), False),
+        # Local provider (raw_generative_local). Defaults chosen for time,
+        # not fidelity: one UNet step costs ~10-19 s on Apple Silicon, so the
+        # reference 20 steps would be a 3-6 minute wait per edit.
+        "local_steps": int(s.value(_K_LOCAL_STEPS, 10) or 10),
+        "local_text_guidance": float(s.value(_K_LOCAL_TEXT_G, 7.5) or 7.5),
+        "local_image_guidance": float(s.value(_K_LOCAL_IMAGE_G, 1.5) or 1.5),
     }
+
+
+def save_local_settings(
+    *, steps: int = 10, text_guidance: float = 7.5, image_guidance: float = 1.5
+) -> None:
+    """Select the local provider and persist its sampling knobs.
+
+    No consent is revoked or granted here: the local model never sends the
+    photograph anywhere, so there is nothing to agree to.
+    """
+    s = _settings()
+    s.setValue(_K_PROVIDER, "local")
+    s.setValue(_K_LOCAL_STEPS, int(steps))
+    s.setValue(_K_LOCAL_TEXT_G, float(text_guidance))
+    s.setValue(_K_LOCAL_IMAGE_G, float(image_guidance))
 
 
 def save_settings(

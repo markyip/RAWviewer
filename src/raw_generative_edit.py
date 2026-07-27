@@ -426,6 +426,16 @@ def make_provider(settings: Optional[dict] = None) -> GenerativeProvider:
     kind = str(settings.get("provider", "http") or "http").strip().lower()
     if kind == "stub":
         return StubProvider()
+    if kind == "local":
+        # Imported lazily: it pulls in onnxruntime and the scheduler, which a
+        # user who never touches generative editing should not pay for.
+        from raw_generative_local import LocalInstructPix2PixProvider
+
+        return LocalInstructPix2PixProvider(
+            steps=int(settings.get("local_steps", 20) or 20),
+            text_guidance=float(settings.get("local_text_guidance", 7.5) or 7.5),
+            image_guidance=float(settings.get("local_image_guidance", 1.5) or 1.5),
+        )
     return HttpEndpointProvider(
         endpoint=str(settings.get("endpoint", "") or ""),
         api_key=str(settings.get("api_key", "") or ""),
