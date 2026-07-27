@@ -180,6 +180,24 @@ def test_settings_roundtrip():
         scope.clear()
 
 
+def test_weights_are_pinned():
+    """The conversion repo is a 2-download third-party upload.
+
+    Pinning the bytes is what makes that acceptable: a re-upload or a
+    substituted graph must fail loudly rather than run.
+    """
+    import raw_generative_local as loc
+
+    for key, entry in loc._FILES.items():
+        check(f"{key} carries a pinned hash", len(entry) == 3 and len(entry[2]) == 64)
+
+    if not loc.is_downloaded():
+        print("SKIP  weights not present; cannot verify contents")
+        return
+    bad = loc.verify_downloaded()
+    check("every downloaded file matches its pin", bad == [], f"mismatched: {bad}")
+
+
 def test_model_dir_is_not_committed():
     """2.2 GB must never enter the repository."""
     import subprocess
@@ -199,6 +217,7 @@ def main() -> int:
     test_fit_to_model()
     test_provider_wiring()
     test_settings_roundtrip()
+    test_weights_are_pinned()
     test_model_dir_is_not_committed()
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

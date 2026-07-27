@@ -57,14 +57,62 @@ MODEL_NAME = "instruct-pix2pix-onnx"
 # Published as a diffusers ONNX export; see docs for the licence note.
 _BASE_URL = "https://huggingface.co/ForserX/instruct-pix2pix-onnx/resolve/main"
 
+#
+# PROVENANCE, read this before changing the URL
+# --------------------------------------------
+# These are a community ONNX conversion of timbrooks/instruct-pix2pix (31k
+# downloads, the canonical publication). The conversion repo itself is a
+# one-person upload from March 2023 with TWO downloads and one like, made for
+# an unrelated GUI project. That is a weak trust signal, so the bytes are
+# pinned below by SHA-256: the hashes are of the exact files that were
+# downloaded, loaded and verified end-to-end here. A re-upload, a substituted
+# graph or a truncated download now fails loudly instead of running.
+#
+# ONNX is protobuf, not pickle, so loading one does not execute code the way
+# a .ckpt can -- the exposure is a model that behaves differently from the
+# one claimed, not arbitrary code execution. The hashes close that gap for
+# the files we have actually exercised.
+#
+# What is NOT verified: that this conversion faithfully matches timbrooks'
+# weights. Confirming that needs torch to re-export and compare, which is the
+# dependency this provider exists to avoid.
+#
 _FILES = {
-    "text_encoder": ("text_encoder/model.onnx", "text_encoder_model.onnx"),
-    "unet": ("unet/model.onnx", "unet_model.onnx"),
-    "vae_encoder": ("vae_encoder/model.onnx", "vae_encoder_model.onnx"),
-    "vae_decoder": ("vae_decoder/model.onnx", "vae_decoder_model.onnx"),
-    "vocab": ("tokenizer/vocab.json", "tokenizer_vocab.json"),
-    "merges": ("tokenizer/merges.txt", "tokenizer_merges.txt"),
-    "scheduler": ("scheduler/scheduler_config.json", "scheduler_scheduler_config.json"),
+    "text_encoder": (
+        "text_encoder/model.onnx",
+        "text_encoder_model.onnx",
+        "8f34e5ee561cba4d0624a1845f7e06d7fda6c8ca27741c1e75f291ae6991bbc7",
+    ),
+    "unet": (
+        "unet/model.onnx",
+        "unet_model.onnx",
+        "e756e0716b999c89c32312ea43eb5ba4458e89e9c61aa4cb5ff724a2a7515a6e",
+    ),
+    "vae_encoder": (
+        "vae_encoder/model.onnx",
+        "vae_encoder_model.onnx",
+        "2a8dd0b1a179446d5902fc35a8c8cac082820cb0530422134f9143fd08f8040a",
+    ),
+    "vae_decoder": (
+        "vae_decoder/model.onnx",
+        "vae_decoder_model.onnx",
+        "9eb64b3179d4301df2932423797053917e1e32a0e2292521bf6a537377f51d9b",
+    ),
+    "vocab": (
+        "tokenizer/vocab.json",
+        "tokenizer_vocab.json",
+        "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349",
+    ),
+    "merges": (
+        "tokenizer/merges.txt",
+        "tokenizer_merges.txt",
+        "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+    ),
+    "scheduler": (
+        "scheduler/scheduler_config.json",
+        "scheduler_scheduler_config.json",
+        "e199bc7f03bed345f780139e988dcf4b2ecfe4a3d1de1df9f3b21ce654a26e22",
+    ),
 }
 
 # Latents are 1/8 the image size, and the model was trained at 512. Larger
@@ -91,6 +139,32 @@ def file_path(key: str) -> str:
     return os.path.join(models_dir(), entry[1])
 
 
+def _sha256_of_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_downloaded(strict: bool = True) -> list:
+    """Names of files whose contents do not match the pinned hash.
+
+    Empty list means every present file is byte-identical to what was tested.
+    Missing files are reported too when ``strict``.
+    """
+    bad = []
+    for key, entry in _FILES.items():
+        path = os.path.join(models_dir(), entry[1])
+        if not os.path.isfile(path):
+            if strict:
+                bad.append(key)
+            continue
+        if _sha256_of_file(path) != entry[2]:
+            bad.append(key)
+    return bad
+
+
 def is_downloaded() -> bool:
     """Whether every file the provider needs is already on disk."""
     return all(os.path.isfile(file_path(k)) for k in _FILES)
@@ -107,15 +181,15 @@ def download(
 ) -> bool:
     """Fetch the model set. Returns True when everything is present.
 
-    Deliberately not verified against pinned hashes: unlike the mask models,
-    these are fetched from a third-party export whose files may be re-uploaded.
-    Integrity is checked by loading them -- a truncated or corrupt graph fails
-    at session creation, which is where the user gets a clear error.
+    Every file is checked against its pinned SHA-256 and a mismatch is
+    discarded rather than kept: the source repo is a low-traffic third-party
+    conversion (see the provenance note above), so "the bytes we tested" is a
+    much better guarantee than "whatever that URL serves today".
     """
     import urllib.request
 
     os.makedirs(models_dir(), exist_ok=True)
-    for key, (remote, local) in _FILES.items():
+    for key, (remote, local, expected_sha) in _FILES.items():
         dest = os.path.join(models_dir(), local)
         if os.path.isfile(dest):
             continue
@@ -142,6 +216,16 @@ def download(
                             pct = int(done * 100 / total)
                             if pct % 5 == 0:
                                 progress(f"Downloading {key}… {pct}%")
+            actual = _sha256_of_file(partial)
+            if actual != expected_sha:
+                os.remove(partial)
+                logger.error(
+                    "[IP2P] %s failed verification (expected %s, got %s)",
+                    key, expected_sha[:12], actual[:12],
+                )
+                if progress:
+                    progress(f"{key} failed verification — download rejected.")
+                return False
             os.replace(partial, dest)
         except Exception:
             try:
