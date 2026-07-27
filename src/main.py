@@ -9031,6 +9031,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_reorder_requested.connect(
                 self._on_mask_reorder_requested
             )
+            self.single_image_adjust_panel.mask_ungroup_requested.connect(
+                self._on_mask_ungroup_requested
+            )
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
@@ -22668,6 +22671,56 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             + (" — its adjustments were discarded" if lost else ""),
             5000,
         )
+
+    def _on_mask_ungroup_requested(
+        self, group_index: int, comp_index: int, new_index: int
+    ) -> None:
+        """Drag a component out of its group: it becomes its own mask again.
+
+        It comes out with no adjustments, which is what it had as a
+        component, so this is NOT the inverse of grouping. Undo is, and it
+        restores what the group discarded because the snapshot predates it.
+
+        A group emptied by the last component leaving is removed -- it has no
+        coverage of its own to fall back on.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if panel is None or stack is None:
+            return
+        if not (0 <= group_index < len(stack.layers)):
+            return
+        group = stack.layers[group_index]
+        if not group.is_group or not (0 <= comp_index < len(group.components)):
+            return
+
+        from raw_mask_layers import MaskLayer
+
+        comp = group.components.pop(comp_index)
+        promoted = MaskLayer(
+            comp.alpha,
+            name=comp.name or "Mask",
+            enabled=comp.enabled,
+            invert=comp.invert,
+            blend="add",
+            kind=comp.kind,
+            params=dict(comp.params or {}),
+            source=comp.source,
+        )
+        group.touch()
+
+        if not group.components:
+            del stack.layers[group_index]
+            if new_index > group_index:
+                new_index -= 1
+
+        new_index = max(0, min(new_index, len(stack.layers)))
+        stack.layers.insert(new_index, promoted)
+
+        panel.set_mask_layer_stack(stack)
+        panel.select_mask_index(new_index)
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        self._show_status(f"“{promoted.name}” is its own mask again", 4000)
 
     def _on_mask_reorder_requested(self, src_index: int, new_index: int) -> None:
         """Drag between rows: move a mask up or down the stack."""

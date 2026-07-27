@@ -76,7 +76,7 @@ run "masks tab cleanup + invert scope" testplan/auto/t_masks_ui_cleanup.py testp
 run "mask gradients (linear/radial)" testplan/auto/t_mask_gradients.py
 run "HE/HE* NEF editing" testplan/auto/t_he_nef_editing.py
 run "mask layers drag-time throttling" testplan/auto/t_mask_layers_drag_throttle.py
-run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py testplan/auto/t_mask_groups.py testplan/auto/t_mask_delete_key.py testplan/auto/t_mask_group_ui.py
+run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py testplan/auto/t_mask_groups.py testplan/auto/t_mask_delete_key.py testplan/auto/t_mask_group_ui.py testplan/auto/t_mask_group_undo.py
 run "HDR per-image recovery weights" testplan/auto/t_hdr_per_image_weights.py
 run "masks panel (headless UI)" testplan/auto/t_masks_panel.py
 run "camera profile apply" testplan/auto/t_camera_profile_apply.py

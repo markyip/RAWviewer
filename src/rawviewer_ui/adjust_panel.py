@@ -345,6 +345,9 @@ class MaskTreeWidget(QTreeWidget):
 
     group_requested = pyqtSignal(int, int)  # (source top-level, target top-level)
     reorder_requested = pyqtSignal(int, int)  # (source top-level, new position)
+    # Drag a component out of its group: (group index, component index,
+    # where it lands as a top-level mask).
+    ungroup_requested = pyqtSignal(int, int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -368,11 +371,32 @@ class MaskTreeWidget(QTreeWidget):
         target = self.itemAt(event.position().toPoint())
         position = self.dropIndicatorPosition()
 
-        # A component is not draggable out of its group in this pass: the
-        # meaningful gesture is grouping, and allowing half-defined moves
-        # would create states the host has no action for.
-        if source is None or source.parent() is not None:
+        if source is None:
             event.ignore()
+            return
+
+        # Dragging a component out of its group promotes it back to its own
+        # mask. Dropping it inside its own group is a no-op rather than a
+        # reorder: component order does not change the result, since add is
+        # a union and subtract is applied against what came before it.
+        if source.parent() is not None:
+            parent = source.parent()
+            group_index = self.indexOfTopLevelItem(parent)
+            comp_index = parent.indexOfChild(source)
+            if group_index < 0 or comp_index < 0:
+                event.ignore()
+                return
+            if target is not None and self._top_index(target) == group_index:
+                event.ignore()
+                return
+            dst = self._top_index(target)
+            if dst < 0:
+                dst = self.topLevelItemCount()
+            elif position == QAbstractItemView.DropIndicatorPosition.BelowItem:
+                dst += 1
+            event.setDropAction(Qt.DropAction.IgnoreAction)
+            event.accept()
+            self.ungroup_requested.emit(group_index, comp_index, dst)
             return
 
         src_index = self._top_index(source)
@@ -923,6 +947,8 @@ class ImageAdjustPanelWidget(QWidget):
     mask_group_requested = pyqtSignal(int, int)
     # Drag between rows to reorder: (source index, new position).
     mask_reorder_requested = pyqtSignal(int, int)
+    # Drag a component out of its group: (group, component, new position).
+    mask_ungroup_requested = pyqtSignal(int, int, int)
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -3727,6 +3753,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_list.itemChanged.connect(self._on_mask_item_changed)
         self._mask_list.group_requested.connect(self.mask_group_requested.emit)
         self._mask_list.reorder_requested.connect(self.mask_reorder_requested.emit)
+        self._mask_list.ungroup_requested.connect(self.mask_ungroup_requested.emit)
         self._mask_stack_head = self._mask_section_head("Masks", "top paints last")
         col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
@@ -4186,11 +4213,13 @@ class ImageAdjustPanelWidget(QWidget):
                         child_icon = self._mask_row_icon(comp)
                         if child_icon is not None:
                             child.setIcon(0, child_icon)
+                        # Draggable so it can be pulled out of the group;
+                        # never a drop target, since the model is two levels.
                         child.setFlags(
-                            (child.flags() | Qt.ItemFlag.ItemIsEditable)
+                            (child.flags() | Qt.ItemFlag.ItemIsEditable
+                             | Qt.ItemFlag.ItemIsDragEnabled)
                             & ~Qt.ItemFlag.ItemIsUserCheckable
                             & ~Qt.ItemFlag.ItemIsDropEnabled
-                            & ~Qt.ItemFlag.ItemIsDragEnabled
                         )
                         item.addChild(child)
                 else:

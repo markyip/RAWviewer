@@ -145,6 +145,56 @@ def main() -> int:
           str([l.name for l in st3.layers]))
     check("reorder groups nothing", all(not l.is_group for l in st3.layers))
 
+    # --- drag a component out of its group ---
+    ungroup_fn = mainmod.RAWImageViewer._on_mask_ungroup_requested
+
+    k = _layer("Keeper", 5, {"Exposure2012": 0.5})
+    d = _layer("Donor", 20)
+    st4 = MaskLayerStack(layers=[k, d])
+    p4 = _panel(st4)
+    h4 = _Host(p4, st4)
+    group_fn(h4, 1, 0)
+    grp = st4.layers[0]
+    check("set-up: one group of two", grp.is_group and len(grp.components) == 2)
+
+    ungroup_fn(h4, 0, 1, 1)  # pull the second component out, place it after
+    check("component left the group", len(st4.layers[0].components) == 1)
+    check("it became its own mask", len(st4.layers) == 2, str([l.name for l in st4.layers]))
+    check("promoted mask keeps its coverage", float(st4.layers[1].alpha_at(H, W)[24, 10]) > 0.9)
+    check(
+        "promoted mask has no adjustments",
+        not st4.layers[1].adjustments,
+        "a component had none to give back -- undo is what restores those",
+    )
+    check("group keeps its own adjustments", abs(grp.adjustments.get("Exposure2012", 0) - 0.5) < 1e-6)
+    check("the promotion is announced", any("own mask" in s for s in h4.status), str(h4.status[-1:]))
+
+    # --- emptying a group removes it ---
+    ungroup_fn(h4, 0, 0, 0)
+    check("group with no components left is removed", all(not l.is_group for l in st4.layers))
+    check("both masks survive as plain masks", len(st4.layers) == 2, str([l.name for l in st4.layers]))
+
+    # --- guards ---
+    n_before = len(st4.layers)
+    ungroup_fn(h4, 0, 0, 0)  # layer 0 is not a group any more
+    check("ungrouping a non-group is a no-op", len(st4.layers) == n_before)
+    ungroup_fn(h4, 99, 0, 0)
+    check("out-of-range group is a no-op", len(st4.layers) == n_before)
+
+    # --- the tree lets a component be dragged, but never dropped on ---
+    g5 = MaskLayer(np.zeros((H, W), np.float32), name="G", components=[_layer("c1", 5)])
+    st5 = MaskLayerStack(layers=[g5])
+    p5 = _panel(st5)
+    child = p5._mask_list.topLevelItem(0).child(0)
+    from PyQt6.QtCore import Qt as _Qt
+
+    check("component row is draggable", bool(child.flags() & _Qt.ItemFlag.ItemIsDragEnabled))
+    check(
+        "component row is not a drop target",
+        not (child.flags() & _Qt.ItemFlag.ItemIsDropEnabled),
+        "two levels only",
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
