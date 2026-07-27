@@ -63,9 +63,9 @@ def main() -> int:
     panel.set_mask_layer_stack(stack)
 
     check("stack bound", panel.mask_layer_stack() is stack)
-    check("list shows one row per layer", panel._mask_list.count() == 2)
+    check("list shows one row per layer", panel._mask_list.topLevelItemCount() == 2)
     check("first layer active by default", panel.active_mask_index() == 0)
-    check("layer names shown", panel._mask_list.item(0).text() == "Sky")
+    check("layer names shown", panel._mask_list.topLevelItem(0).text(0) == "Sky")
     check("sliders enabled with a layer", panel._mask_sliders["Exposure2012"].isEnabled())
 
     # --- slider edits mutate the ACTIVE layer in place ---
@@ -144,12 +144,12 @@ def main() -> int:
     # The redesign dropped the per-row check box: it doubled as an enable
     # toggle, which made a single click ambiguous ("did I select this row or
     # turn it off?"). Rows are now select-and-rename only.
-    item0 = panel._mask_list.item(0)
+    item0 = panel._mask_list.topLevelItem(0)
     check(
         "list rows are not user-checkable (no ambiguous select/disable click)",
         not (item0.flags() & Qt.ItemFlag.ItemIsUserCheckable),
     )
-    item0.setText("Renamed Sky")
+    item0.setText(0, "Renamed Sky")
     check("editing a row renames its layer", layer_a.name == "Renamed Sky")
 
     # layer.enabled is still honoured by the compositor and still persisted to
@@ -192,7 +192,7 @@ def main() -> int:
 
     # --- unbinding (file change / reset) ---
     panel.set_mask_layer_stack(None)
-    check("unbinding clears the list", panel._mask_list.count() == 0)
+    check("unbinding clears the list", panel._mask_list.topLevelItemCount() == 0)
     check("unbinding disables sliders", not panel._mask_sliders["Exposure2012"].isEnabled())
     check("unbinding disarms tools", panel.mask_layer_mode() is None)
 

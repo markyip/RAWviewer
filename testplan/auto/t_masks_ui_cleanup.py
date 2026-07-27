@@ -133,13 +133,13 @@ def test_rows_are_selectable_not_checkable():
     p.set_mask_layer_stack(MaskLayerStack([
         _painted_layer(name="Mask 1"), _painted_layer(name="Mask 2"),
     ]))
-    for row in range(p._mask_list.count()):
-        item = p._mask_list.item(row)
+    for row in range(p._mask_list.topLevelItemCount()):
+        item = p._mask_list.topLevelItem(row)
         assert not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable), (
             f"row {row} is still checkable"
         )
         assert item.flags() & Qt.ItemFlag.ItemIsSelectable, f"row {row} is not selectable"
-    p._mask_list.setCurrentRow(1)
+    p._mask_list.setCurrentItem(p._mask_list.topLevelItem(1))
     assert p.active_mask_index() == 1, "clicking a row did not select it"
     print("  OK   rows select on click, with no check box")
 
@@ -559,8 +559,8 @@ def test_mask_rows_show_the_mask_shape():
     )
     p.set_mask_layer_stack(MaskLayerStack([brush, gradient]))
 
-    for row in range(p._mask_list.count()):
-        icon = p._mask_list.item(row).icon()
+    for row in range(p._mask_list.topLevelItemCount()):
+        icon = p._mask_list.topLevelItem(row).icon(0)
         assert not icon.isNull(), f"row {row} has no thumbnail"
         sizes = icon.availableSizes()
         assert sizes and max(sizes[0].width(), sizes[0].height()) > 8, (

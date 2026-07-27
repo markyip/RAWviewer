@@ -9025,6 +9025,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_delete_requested.connect(
                 self._on_mask_layer_delete
             )
+            self.single_image_adjust_panel.mask_group_requested.connect(
+                self._on_mask_group_requested
+            )
+            self.single_image_adjust_panel.mask_reorder_requested.connect(
+                self._on_mask_reorder_requested
+            )
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
@@ -22599,6 +22605,88 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._on_mask_layer_add()
         stack = getattr(self, "_mask_layer_stack", None)
         return bool(stack is not None and stack.layers)
+
+    def _on_mask_group_requested(self, src_index: int, dst_index: int) -> None:
+        """Drag one mask onto another: fold the source in as a component.
+
+        The target keeps its adjustments and the source's are DISCARDED --
+        a component holds coverage only, exactly one adjustment set per mask
+        (Lightroom's model). That is a real loss, so it is announced and the
+        source's settings are the only thing that goes; its coverage is
+        preserved in full.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if panel is None or stack is None:
+            return
+        n = len(stack.layers)
+        if not (0 <= src_index < n and 0 <= dst_index < n) or src_index == dst_index:
+            return
+
+        from raw_mask_layers import MaskLayer
+
+        source = stack.layers[src_index]
+        target = stack.layers[dst_index]
+
+        def _as_component(layer):
+            """A copy of layer carrying coverage only."""
+            return MaskLayer(
+                layer.alpha,
+                name=layer.name,
+                enabled=layer.enabled,
+                invert=layer.invert,
+                blend="add",
+                kind=layer.kind,
+                params=dict(layer.params or {}),
+                source=layer.source,
+            )
+
+        if not target.is_group:
+            # Promote the target in place: its own coverage becomes the first
+            # component, its adjustments stay on the group.
+            target.components = [_as_component(target)]
+
+        if source.is_group:
+            # Merging two groups flattens the source's components in rather
+            # than nesting -- the model is deliberately two levels deep.
+            target.components.extend(source.components)
+        else:
+            target.components.append(_as_component(source))
+
+        lost = bool(source.adjustments)
+        del stack.layers[src_index]
+        target.touch()
+
+        panel.set_mask_layer_stack(stack)
+        panel.select_mask_index(
+            dst_index - 1 if dst_index > src_index else dst_index
+        )
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
+        name = source.name or "mask"
+        self._show_status(
+            f"Grouped “{name}”"
+            + (" — its adjustments were discarded" if lost else ""),
+            5000,
+        )
+
+    def _on_mask_reorder_requested(self, src_index: int, new_index: int) -> None:
+        """Drag between rows: move a mask up or down the stack."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        stack = getattr(self, "_mask_layer_stack", None)
+        if panel is None or stack is None:
+            return
+        n = len(stack.layers)
+        if not (0 <= src_index < n):
+            return
+        layer = stack.layers.pop(src_index)
+        # The removal shifts everything after it down one.
+        if new_index > src_index:
+            new_index -= 1
+        new_index = max(0, min(new_index, len(stack.layers)))
+        stack.layers.insert(new_index, layer)
+        panel.set_mask_layer_stack(stack)
+        panel.select_mask_index(new_index)
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
 
     def _masks_page_delete_target(self) -> bool:
         """Whether Delete should remove a mask rather than the photograph.

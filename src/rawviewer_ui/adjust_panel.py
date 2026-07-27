@@ -25,8 +25,11 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QAbstractItemView,
     QListWidget,
     QListWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QMenu,
     QPushButton,
     QScrollArea,
@@ -325,6 +328,66 @@ class _LooksRowWidget(QWidget):
     def _on_remove_clicked(self) -> None:
         self._suppress_item_click = True
         self.remove_clicked.emit()
+
+
+class MaskTreeWidget(QTreeWidget):
+    """Mask rows, two levels deep: masks, and the components inside a group.
+
+    Drag one mask onto another to group them. The drop is *not* performed
+    here -- it is reported to the host, which owns the stack and the undo
+    entry. Letting the widget move rows itself would leave the tree and the
+    model briefly disagreeing, and the host has to rebuild the tree anyway.
+
+    Only drops ONTO a row group. Dropping between rows is a reorder, which
+    is a different action, so the indicator position is checked rather than
+    treating every drop as a grouping.
+    """
+
+    group_requested = pyqtSignal(int, int)  # (source top-level, target top-level)
+    reorder_requested = pyqtSignal(int, int)  # (source top-level, new position)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setHeaderHidden(True)
+        self.setColumnCount(1)
+        self.setRootIsDecorated(True)
+        self.setIndentation(14)
+        self.setExpandsOnDoubleClick(False)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def _top_index(self, item) -> int:
+        """Index of item's top-level ancestor, or -1."""
+        while item is not None and item.parent() is not None:
+            item = item.parent()
+        return self.indexOfTopLevelItem(item) if item is not None else -1
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        source = self.currentItem()
+        target = self.itemAt(event.position().toPoint())
+        position = self.dropIndicatorPosition()
+
+        # A component is not draggable out of its group in this pass: the
+        # meaningful gesture is grouping, and allowing half-defined moves
+        # would create states the host has no action for.
+        if source is None or source.parent() is not None:
+            event.ignore()
+            return
+
+        src_index = self._top_index(source)
+        dst_index = self._top_index(target)
+        if src_index < 0 or dst_index < 0 or src_index == dst_index:
+            event.ignore()
+            return
+
+        event.setDropAction(Qt.DropAction.IgnoreAction)
+        event.accept()
+        if position == QAbstractItemView.DropIndicatorPosition.OnItem:
+            self.group_requested.emit(src_index, dst_index)
+        else:
+            below = position == QAbstractItemView.DropIndicatorPosition.BelowItem
+            self.reorder_requested.emit(src_index, dst_index + (1 if below else 0))
 
 
 class PanelTabBar(QWidget):
@@ -855,6 +918,11 @@ class ImageAdjustPanelWidget(QWidget):
     mask_gradient_tool_changed = pyqtSignal(str)
     # Selected mask row changed -- the host moves the gradient handles to it.
     mask_selection_changed = pyqtSignal()
+    # Drag one mask onto another to group them: (source index, target index).
+    # The host owns the stack, so it performs the move and the undo entry.
+    mask_group_requested = pyqtSignal(int, int)
+    # Drag between rows to reorder: (source index, new position).
+    mask_reorder_requested = pyqtSignal(int, int)
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -2437,11 +2505,11 @@ class ImageAdjustPanelWidget(QWidget):
                 margin: 0;
                 border-radius: 4px;
             }}
-            QListWidget::item:selected {{
+            QTreeWidget::item:selected {{
                 background: {theme.EMBER_DIM};
                 color: {theme.INK};
             }}
-            QListWidget::item:hover {{
+            QTreeWidget::item:hover {{
                 background: {theme.RAISED};
             }}
             """
@@ -3582,6 +3650,20 @@ class ImageAdjustPanelWidget(QWidget):
         return wrap
 
     @staticmethod
+    def _component_label(comp) -> str:
+        """Row text for a component: its name, and how it combines.
+
+        The blend is the one thing a component has that a plain mask does
+        not, and it decides whether the row adds coverage or removes it --
+        too important to leave to an icon.
+        """
+        base = comp.name or {
+            "linear": "Linear gradient",
+            "radial": "Radial gradient",
+        }.get(comp.kind, "Brush")
+        return f"− {base}" if comp.blend == "subtract" else f"+ {base}"
+
+    @staticmethod
     def _mask_family_label(text: str) -> QLabel:
         """"you draw it" / "it finds it" -- the split is who chooses."""
         label = QLabel(text)
@@ -3609,26 +3691,26 @@ class ImageAdjustPanelWidget(QWidget):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(6)
 
-        self._mask_list = QListWidget()
-        self._mask_list.setMaximumHeight(140)
+        self._mask_list = MaskTreeWidget()
+        self._mask_list.setMaximumHeight(160)
         self._mask_list.setIconSize(QSize(self._MASK_ICON_BOX, self._MASK_ICON_BOX))
         self._mask_list.setStyleSheet(
             f"""
-            QListWidget {{
+            QTreeWidget {{
                 background-color: {theme.SURFACE};
                 border: 1px solid {theme.LINE};
                 border-radius: 4px;
                 color: {theme.INK};
                 font-size: 11px;
             }}
-            QListWidget::item {{
+            QTreeWidget::item {{
                 padding: 3px 4px 3px 7px;
                 border-left: 2px solid transparent;
             }}
-            QListWidget::item:hover {{
+            QTreeWidget::item:hover {{
                 background-color: {theme.RAISED};
             }}
-            QListWidget::item:selected {{
+            QTreeWidget::item:selected {{
                 /* A lit leading edge, not a filled block: EMBER marks the
                    active thing the same way it does on the tab rule, so the
                    panel reads as one system and the two never compete for
@@ -3639,8 +3721,12 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             """
         )
-        self._mask_list.currentRowChanged.connect(self._on_mask_row_changed)
+        self._mask_list.currentItemChanged.connect(
+            lambda *_: self._on_mask_row_changed(self.active_mask_index() or -1)
+        )
         self._mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self._mask_list.group_requested.connect(self.mask_group_requested.emit)
+        self._mask_list.reorder_requested.connect(self.mask_reorder_requested.emit)
         self._mask_stack_head = self._mask_section_head("Masks", "top paints last")
         col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
@@ -3991,13 +4077,35 @@ class ImageAdjustPanelWidget(QWidget):
         return self._mask_stack
 
     def active_mask_index(self) -> int | None:
+        """Index of the selected MASK.
+
+        Selecting a component inside a group reports the group: the
+        adjustment sliders always target the mask that owns them, so every
+        existing caller keeps working when the selection moves inside a
+        group. Use active_component_index() to know where the selection
+        really is.
+        """
         stack = self._mask_stack
         if stack is None or not stack.layers:
             return None
-        row = self._mask_list.currentRow()
+        item = self._mask_list.currentItem()
+        if item is None:
+            return None
+        row = self._mask_list._top_index(item)
         if row < 0 or row >= len(stack.layers):
             return None
         return row
+
+    def active_component_index(self) -> int | None:
+        """Index of the selected component within its group, or None.
+
+        None means the selection is a whole mask -- either a plain one or a
+        group's own row.
+        """
+        item = self._mask_list.currentItem()
+        if item is None or item.parent() is None:
+            return None
+        return item.parent().indexOfChild(item)
 
     def _mask_tool_buttons(self) -> tuple:
         """(button, mode) for every mutually-exclusive mask tool."""
@@ -4043,35 +4151,55 @@ class ImageAdjustPanelWidget(QWidget):
         return False
 
     def select_mask_index(self, index: int) -> None:
-        if 0 <= index < self._mask_list.count():
-            self._mask_list.setCurrentRow(index)
+        if 0 <= index < self._mask_list.topLevelItemCount():
+            self._mask_list.setCurrentItem(self._mask_list.topLevelItem(index))
 
     def _rebuild_mask_list(self) -> None:
         self._mask_block = True
         try:
-            prev_row = self._mask_list.currentRow()
+            prev_row = self.active_mask_index() or 0
             self._mask_list.clear()
             stack = self._mask_stack
             layers = stack.layers if stack is not None else []
             for i, layer in enumerate(layers):
-                name = layer.name or f"Mask {i + 1}"
-                item = QListWidgetItem(name)
+                item = QTreeWidgetItem([layer.name or f"Mask {i + 1}"])
                 icon = self._mask_row_icon(layer)
                 if icon is not None:
-                    item.setIcon(icon)
-                # No check box: a click selects the row. The check state was
-                # doubling as an enable toggle and made a single click
-                # ambiguous -- "did I select this or turn it off?".
-                # Qt gives QListWidgetItem the checkable flag by default, so it
-                # has to be cleared, not merely left unset.
+                    item.setIcon(0, icon)
+                # No check box: a click selects the row. The check state used
+                # to double as an enable toggle, which made a single click
+                # ambiguous -- "did I select this or turn it off?". Qt sets
+                # the checkable flag by default, so it must be cleared.
                 item.setFlags(
                     (item.flags() | Qt.ItemFlag.ItemIsEditable)
                     & ~Qt.ItemFlag.ItemIsUserCheckable
+                    & ~Qt.ItemFlag.ItemIsDropEnabled
+                    | Qt.ItemFlag.ItemIsDragEnabled
                 )
-                self._mask_list.addItem(item)
+                if getattr(layer, "is_group", False):
+                    # Drops land ON a mask to group with it, so a group must
+                    # accept them; a component row must not, since two-level
+                    # nesting is the whole model.
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
+                    for comp in layer.components:
+                        child = QTreeWidgetItem([self._component_label(comp)])
+                        child_icon = self._mask_row_icon(comp)
+                        if child_icon is not None:
+                            child.setIcon(0, child_icon)
+                        child.setFlags(
+                            (child.flags() | Qt.ItemFlag.ItemIsEditable)
+                            & ~Qt.ItemFlag.ItemIsUserCheckable
+                            & ~Qt.ItemFlag.ItemIsDropEnabled
+                            & ~Qt.ItemFlag.ItemIsDragEnabled
+                        )
+                        item.addChild(child)
+                else:
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
+                self._mask_list.addTopLevelItem(item)
+                item.setExpanded(True)
             if layers:
                 row = min(max(0, prev_row), len(layers) - 1)
-                self._mask_list.setCurrentRow(row)
+                self._mask_list.setCurrentItem(self._mask_list.topLevelItem(row))
         finally:
             self._mask_block = False
         self._sync_mask_sliders_from_active()
@@ -4260,16 +4388,24 @@ class ImageAdjustPanelWidget(QWidget):
         self._sync_mask_controls_enabled()
         self.mask_selection_changed.emit()
 
-    def _on_mask_item_changed(self, item: QListWidgetItem) -> None:
+    def _on_mask_item_changed(self, item, column: int = 0) -> None:
         """Rename in place. Enable/disable went away with the check box."""
         if self._mask_block:
             return
-        row = self._mask_list.row(item)
         stack = self._mask_stack
-        if stack is None or not (0 <= row < len(stack.layers)):
+        if stack is None or item is None:
+            return
+        row = self._mask_list._top_index(item)
+        if not (0 <= row < len(stack.layers)):
             return
         layer = stack.layers[row]
-        layer.name = item.text()
+        if item.parent() is None:
+            layer.name = item.text(0)
+            return
+        # A component row: rename the component, not its group.
+        idx = item.parent().indexOfChild(item)
+        if 0 <= idx < len(layer.components):
+            layer.components[idx].name = item.text(0)
 
     def _on_mask_delete_clicked(self) -> None:
         idx = self.active_mask_index()
