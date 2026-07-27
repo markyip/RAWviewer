@@ -59,7 +59,7 @@ run "detail enhance (sharpness/clarity/defringe) perf" testplan/auto/t_detail_en
 run "CR3 preview extraction perf" testplan/auto/t_cr3_preview_perf.py
 run "EXIF cache read concurrency" testplan/auto/t_exif_cache_concurrency.py
 run "NEF HE/HE* detection" testplan/auto/t_nef_he_detection.py
-run "NEF HE/HE* editing & export" testplan/auto/t_nef_he_editing_export.py
+run "NEF HE/HE* editing & export" testplan/auto/t_nef_he_editing_export.py t_he_nef_thumbnail.py
 run "full-res decode dedup" testplan/auto/t_full_decode_dedup.py
 run "redundant full re-display" testplan/auto/t_redundant_full_redisplay.py
 run "capture-time-only sort" testplan/auto/t_capture_time_only_sort.py

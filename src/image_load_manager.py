@@ -119,6 +119,49 @@ def _min_acceptable_preview_dim(file_path: str) -> int:
     return _display_preview_min_dim()
 
 
+# Memo for _preview_is_best_possible: HE detection reads the file's EXIF, and
+# a folder scan asks about the same paths repeatedly.
+_HE_PREVIEW_ONLY_CACHE: dict = {}
+
+
+def _preview_is_best_possible(processor, file_path: str) -> bool:
+    """Whether no larger preview could exist for this file, however we try.
+
+    An undersized preview is normally discarded so a better one can be built
+    by demosaicing. That is the wrong move when demosaicing cannot work: the
+    embedded JPEG is all there is, and dropping it leaves a grey tile instead
+    of a slightly-small thumbnail.
+
+    processor.is_libraw_unsupported() is the existing test, but it only knows
+    paths that have ALREADY failed a decode and been registered -- and the
+    registry is in-memory and pruned under pressure. During a cold gallery
+    scan an HE/HE* NEF has not failed anything yet, so the guard missed
+    exactly the files it exists for. Nikon HE is detectable up front, so ask
+    directly rather than waiting for a failure to teach us.
+    """
+    try:
+        if processor.is_libraw_unsupported(file_path):
+            return True
+    except Exception:
+        pass
+    if not file_path.lower().endswith(".nef"):
+        return False
+    key = os.path.normcase(os.path.abspath(file_path))
+    cached = _HE_PREVIEW_ONLY_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        from enhanced_raw_processor import _detect_nef_he_compression
+
+        result = _detect_nef_he_compression(file_path) is True
+    except Exception:
+        result = False
+    if len(_HE_PREVIEW_ONLY_CACHE) > 4096:
+        _HE_PREVIEW_ONLY_CACHE.clear()
+    _HE_PREVIEW_ONLY_CACHE[key] = result
+    return result
+
+
 def _gallery_grid_min_dim() -> int:
     from image_cache import disk_preview_max_edge
 
@@ -336,7 +379,7 @@ class ImageLoadWorker(QRunnable):
                         if (
                             processor._preview_buffer_max_dim(thumbnail)
                             < min_preview_dim
-                            and not processor.is_libraw_unsupported(file_path)
+                            and not _preview_is_best_possible(processor, file_path)
                         ):
                             thumbnail = None
                 if thumbnail is not None and not self.task.is_cancelled():
@@ -420,6 +463,7 @@ class ImageLoadWorker(QRunnable):
                             self.manager.exif_data_ready.emit(file_path, exif_data)
                     if allow_heavy_fallback and processor._is_raw_file(file_path):
                         min_preview_dim = _min_acceptable_preview_dim(file_path)
+                        _d0 = processor._preview_buffer_max_dim(thumbnail) if thumbnail is not None else -1
                         if (
                             thumbnail is not None
                             and processor._preview_buffer_max_dim(thumbnail)
@@ -428,11 +472,21 @@ class ImageLoadWorker(QRunnable):
                             thumbnail = processor.ensure_display_tier_preview(
                                 file_path, thumbnail
                             )
+                        if os.environ.get("RAWVIEWER_DEBUG_THUMB"):
+                            import logging
+
+                            logging.getLogger(__name__).warning(
+                                "[DBGTHUMB] %s heavy=%s first=%s after_ensure=%s min=%s best_possible=%s",
+                                os.path.basename(file_path), allow_heavy_fallback, _d0,
+                                processor._preview_buffer_max_dim(thumbnail) if thumbnail is not None else None,
+                                min_preview_dim,
+                                _preview_is_best_possible(processor, file_path),
+                            )
                         if (
                             thumbnail is not None
                             and processor._preview_buffer_max_dim(thumbnail)
                             < min_preview_dim
-                            and not processor.is_libraw_unsupported(file_path)
+                            and not _preview_is_best_possible(processor, file_path)
                         ):
                             thumbnail = None
                     if thumbnail is not None and not self.task.is_cancelled():
