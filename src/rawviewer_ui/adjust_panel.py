@@ -24,16 +24,17 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QAbstractItemView,
+    QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
     QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
+    QTreeWidget,
+    QTreeWidgetItem,
     QSizePolicy,
     QStyle,
     QStyleOptionSlider,
@@ -278,10 +279,70 @@ class _LutDropFrame(_FileDropFrame):
 _LOOKS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
+class _LooksNameEdit(QLineEdit):
+    """The name in a Looks row: a label until double-clicked, then a field.
+
+    A permanently-editable field in a list whose rows are also click-to-apply
+    would swallow the click that applies the look, so it stays read-only and
+    frameless until the user asks to rename.
+    """
+
+    rename_committed = pyqtSignal(str)
+
+    def __init__(self, name: str, parent=None):
+        super().__init__(name, parent)
+        self._original = name
+        self.setReadOnly(True)
+        self.setFrame(False)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setStyleSheet(
+            f"QLineEdit {{ color: {theme.INK}; font-size: 11px; "
+            f"background: transparent; border: none; padding: 0; }}"
+            f"QLineEdit:!read-only {{ background: {theme.VOID}; "
+            f"border: 1px solid {theme.EMBER}; border-radius: 3px; padding: 0 2px; }}"
+        )
+        self.editingFinished.connect(self._commit)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 (Qt naming)
+        self.begin_edit()
+
+    def begin_edit(self) -> None:
+        self._original = self.text()
+        self.setReadOnly(False)
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        # Select the stem, not the extension: the extension is part of what
+        # the file IS, and typing over it would silently change the format.
+        stem = self.text().rsplit(".", 1)[0]
+        self.setSelection(0, len(stem))
+
+    def keyPressEvent(self, event):  # noqa: N802 (Qt naming)
+        if event.key() == Qt.Key.Key_Escape and not self.isReadOnly():
+            self.setText(self._original)
+            self._finish()
+            return
+        super().keyPressEvent(event)
+
+    def _finish(self) -> None:
+        self.setReadOnly(True)
+        self.deselect()
+        self.clearFocus()
+
+    def _commit(self) -> None:
+        if self.isReadOnly():
+            return
+        new = self.text().strip()
+        self._finish()
+        if new and new != self._original:
+            self.rename_committed.emit(new)
+        else:
+            self.setText(self._original)
+
+
 class _LooksRowWidget(QWidget):
     """One Looks list row: name + type badge + remove (×)."""
 
     remove_clicked = pyqtSignal()
+    rename_requested = pyqtSignal(str)
 
     def __init__(self, name: str, kind: str, parent=None):
         super().__init__(parent)
@@ -290,9 +351,11 @@ class _LooksRowWidget(QWidget):
         row.setContentsMargins(4, 2, 2, 2)
         row.setSpacing(6)
 
-        title = QLabel(name)
-        title.setStyleSheet(f"color: {theme.INK}; font-size: 11px; background: transparent;")
+        title = _LooksNameEdit(name)
+        title.setToolTip("Double-click to rename")
+        title.rename_committed.connect(self.rename_requested.emit)
         title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._title = title
         row.addWidget(title, 1)
 
         badge = QLabel(".cube" if kind == "cube" else ".xmp")
@@ -949,6 +1012,8 @@ class ImageAdjustPanelWidget(QWidget):
     mask_reorder_requested = pyqtSignal(int, int)
     # Drag a component out of its group: (group, component, new position).
     mask_ungroup_requested = pyqtSignal(int, int, int)
+    # A Looks rename could not be completed (name taken, unwritable, ...).
+    looks_rename_failed = pyqtSignal(str)
     # "paint" / "erase" / "ai_click" / None -- see main.py._on_mask_layer_mode_changed.
     mask_layer_mode_changed = pyqtSignal(object)
     spot_heal_clear_requested = pyqtSignal()
@@ -2642,6 +2707,9 @@ class ImageAdjustPanelWidget(QWidget):
                 row.remove_clicked.connect(
                     lambda checked=False, n=name, k=kind: self._remove_look(n, k)
                 )
+                row.rename_requested.connect(
+                    lambda new, n=name, k=kind: self._rename_look(n, k, new)
+                )
                 item.setSizeHint(QSize(0, max(28, row.sizeHint().height())))
                 lw.addItem(item)
                 lw.setItemWidget(item, row)
@@ -2703,6 +2771,40 @@ class ImageAdjustPanelWidget(QWidget):
         self._refresh_looks_list(
             select_lut=getattr(self, "_lut_active_name", "") or None
         )
+
+    def _rename_look(self, old_name: str, kind: str, new_name: str) -> None:
+        """Rename a managed LUT or preset on disk.
+
+        The row IS the filename -- neither format carries a title of its own
+        -- so this renames the file. A collision is reported rather than
+        overwriting somebody's other look, and the applied-look name follows
+        the rename so the highlight does not jump off the row.
+        """
+        from raw_lut import rename_managed_lut
+        from raw_xmp_presets import rename_managed_preset
+
+        self._looks_ignore_item_click = True
+        final = old_name
+        error = ""
+        try:
+            if kind == "cube":
+                final = rename_managed_lut(old_name, new_name)
+                if getattr(self, "_lut_active_name", "") == old_name:
+                    self._lut_active_name = final
+            else:
+                final = rename_managed_preset(old_name, new_name)
+                if getattr(self, "_xmp_highlight_name", "") == old_name:
+                    self._xmp_highlight_name = final
+        except FileExistsError as exc:
+            error = f"“{exc}” already exists"
+        except (OSError, ValueError) as exc:
+            error = str(exc)
+
+        self._refresh_looks_list(
+            select_lut=getattr(self, "_lut_active_name", "") or None
+        )
+        if error:
+            self.looks_rename_failed.emit(error)
 
     def _remove_look(self, name: str, kind: str) -> None:
         from raw_lut import remove_managed_lut

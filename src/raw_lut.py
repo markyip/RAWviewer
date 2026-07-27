@@ -94,6 +94,44 @@ def remove_managed_lut(name: str) -> None:
     _LUT_CACHE.pop(path, None)
 
 
+def rename_managed_lut(old_name: str, new_name: str) -> str:
+    """Rename a managed LUT on disk; return the name actually used.
+
+    The list shows filenames because that is what a ``.cube`` *is* -- there
+    is no separate title inside the format -- so renaming the row means
+    renaming the file. The extension is preserved whatever the user types,
+    and a name that would collide or escape the managed folder is refused
+    rather than silently adjusted.
+    """
+    old_base = os.path.basename(old_name or "")
+    src = os.path.join(luts_dir(), old_base)
+    if not old_base or not os.path.isfile(src):
+        raise FileNotFoundError(old_name)
+
+    wanted = os.path.basename((new_name or "").strip())
+    wanted = _sanitize_look_name(wanted)
+    if not wanted:
+        raise ValueError("A LUT needs a name")
+    if not wanted.lower().endswith(".cube"):
+        wanted += ".cube"
+    if wanted == old_base:
+        return old_base
+
+    dest = os.path.join(luts_dir(), wanted)
+    if os.path.exists(dest):
+        raise FileExistsError(wanted)
+    os.rename(src, dest)
+    _LUT_CACHE.pop(src, None)
+    _LUT_CACHE.pop(dest, None)
+    return wanted
+
+
+def _sanitize_look_name(name: str) -> str:
+    """Strip anything that would make the name a path or an invalid file."""
+    cleaned = "".join(c for c in (name or "") if c not in '\\/:*?"<>|').strip()
+    return cleaned.strip(". ")
+
+
 def managed_lut_path(name: str) -> str:
     return os.path.join(luts_dir(), os.path.basename(name or ""))
 

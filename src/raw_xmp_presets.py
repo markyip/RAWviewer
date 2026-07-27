@@ -68,6 +68,35 @@ def remove_managed_preset(name: str) -> None:
         os.remove(path)
 
 
+def rename_managed_preset(old_name: str, new_name: str) -> str:
+    """Rename a managed XMP preset on disk; return the name actually used.
+
+    Same contract as raw_lut.rename_managed_lut -- the row is the filename,
+    so renaming it renames the file, the extension is preserved, and a
+    collision is an error rather than an overwrite.
+    """
+    from raw_lut import _sanitize_look_name
+
+    old_base = os.path.basename(old_name or "")
+    src = managed_preset_path(old_base)
+    if not old_base or not os.path.isfile(src):
+        raise FileNotFoundError(old_name)
+
+    wanted = _sanitize_look_name(os.path.basename((new_name or "").strip()))
+    if not wanted:
+        raise ValueError("A preset needs a name")
+    if not wanted.lower().endswith(".xmp"):
+        wanted += ".xmp"
+    if wanted == old_base:
+        return old_base
+
+    dest = os.path.join(presets_dir(), wanted)
+    if os.path.exists(dest):
+        raise FileExistsError(wanted)
+    os.rename(src, dest)
+    return wanted
+
+
 def load_preset_adjustments(name: str) -> Dict[str, float]:
     """Load global edit settings from a managed preset basename."""
     from raw_adjustments import load_adjustments_from_xmp

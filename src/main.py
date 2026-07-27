@@ -9034,6 +9034,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_ungroup_requested.connect(
                 self._on_mask_ungroup_requested
             )
+            self.single_image_adjust_panel.looks_rename_failed.connect(
+                lambda msg: self._show_status(f"Rename failed — {msg}", 5000)
+            )
             self.single_image_adjust_panel.mask_duplicate_requested.connect(
                 self._on_mask_layer_duplicate
             )
@@ -31227,12 +31230,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._compare_handle_reject_candidate()
             return
         if vm == "gallery":
-            if self._gallery_has_selection():
+            # Plain Down always scrolls here. It used to discard whenever a
+            # selection existed, which made the same key mean "move" or
+            # "throw away" depending on state the user could easily have
+            # forgotten -- and in a grid, Down is overwhelmingly a navigation
+            # key. Discarding now needs the modifier, so it cannot happen by
+            # reflex while scrolling.
+            from PyQt6.QtWidgets import QApplication
+
+            mods = QApplication.keyboardModifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier and self._gallery_has_selection():
                 self.discard_gallery_selection()
                 return
             self._scroll_gallery_vertical(1)
             return
         if vm == "single":
+            # Not while the editor is open. Down is a culling key, and culling
+            # is what you do BEFORE editing -- once the Adjust panel is up the
+            # user is committed to this frame, the arrow keys are nudging
+            # sliders and handles, and discarding mid-edit throws away the
+            # work as well as the file.
+            if getattr(self, "_adjust_overlay_visible", False):
+                return
             self.move_current_image_to_discard()
 
     def _handle_app_shortcut(self, event):
