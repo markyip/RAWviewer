@@ -22600,6 +22600,42 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         stack = getattr(self, "_mask_layer_stack", None)
         return bool(stack is not None and stack.layers)
 
+    def _masks_page_delete_target(self) -> bool:
+        """Whether Delete should remove a mask rather than the photograph.
+
+        Deliberately strict, and asked of the panel rather than tracked here:
+        the editor must be open and visible, the Masks page forward, and a
+        mask row selected. Anything less and Delete keeps its usual meaning.
+        """
+        if not getattr(self, "_adjust_overlay_visible", False):
+            return False
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not panel.isVisible():
+            return False
+        if not hasattr(panel, "masks_page_has_selection"):
+            return False
+        try:
+            return bool(panel.masks_page_has_selection())
+        except Exception:
+            return False
+
+    def _delete_selected_mask_layer(self) -> None:
+        """Delete the selected mask, as the Delete key's target."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        index = panel.active_mask_index()
+        if index is None:
+            return
+        name = ""
+        stack = getattr(self, "_mask_layer_stack", None)
+        if stack is not None and 0 <= index < len(stack.layers):
+            name = stack.layers[index].name or ""
+        self._on_mask_layer_delete(index)
+        # Say which thing went, so a user who expected the photo to be
+        # deleted finds out immediately rather than at the next scroll.
+        self._show_status(f"Deleted mask{f' “{name}”' if name else ''}", 3000)
+
     def _on_mask_layer_delete(self, index: int) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         stack = getattr(self, "_mask_layer_stack", None)
@@ -31187,6 +31223,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.delete_gallery_selection()
                 return True
             if vm == "single":
+                # Delete targets whatever the user is looking at. With the
+                # Masks page forward and a mask selected, that is the mask.
+                # Deleting the photograph instead is not a mild mis-target:
+                # it is the most destructive action in the app, fired by a
+                # key the user pressed meaning something small and undoable.
+                if self._masks_page_delete_target():
+                    self._delete_selected_mask_layer()
+                    return True
                 self.delete_current_image()
                 return True
         elif key == Qt.Key.Key_Escape:

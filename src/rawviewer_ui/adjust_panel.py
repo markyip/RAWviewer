@@ -3117,6 +3117,19 @@ class ImageAdjustPanelWidget(QWidget):
         if scroll is not None:
             scroll.verticalScrollBar().setValue(0)
 
+    def masks_page_has_selection(self) -> bool:
+        """True when the Masks page is showing AND a mask row is selected.
+
+        The host asks this to decide what Delete means. Both halves matter:
+        on the Masks page with nothing selected there is no mask to delete,
+        and a mask selected while some other page is forward is not what the
+        user is looking at.
+        """
+        tabs = getattr(self, "_panel_tabs", None)
+        if tabs is None or tabs.current() != 1:
+            return False
+        return self.active_mask_index() is not None
+
     def show_masks_tab(self) -> None:
         """Bring the Masks page forward (used when a mask action starts)."""
         tabs = getattr(self, "_panel_tabs", None)
