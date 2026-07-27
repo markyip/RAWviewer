@@ -34,20 +34,17 @@ def _page_of(panel, widget):
             return "masks"
         if node is panel._tab_page_global:
             return "global"
-        if node is panel._tab_page_generate:
-            return "generate"
         node = node.parentWidget()
     return "neither"
 
 
 def test_two_tabs_global_first():
     p = _panel()
-    assert [b.text() for b in p._panel_tabs._buttons] == ["GLOBAL", "MASKS", "GENERATE"]
+    assert [b.text() for b in p._panel_tabs._buttons] == ["GLOBAL", "MASKS"]
     assert p._panel_tabs.current() == GLOBAL
     assert p._tab_page_global.isVisible()
     assert not p._tab_page_masks.isVisible()
-    assert not p._tab_page_generate.isVisible()
-    print("  OK   three tabs, Global selected on open")
+    print("  OK   two tabs, Global selected on open")
 
 
 def test_masks_section_is_on_the_masks_page():
@@ -58,7 +55,6 @@ def test_masks_section_is_on_the_masks_page():
     for name in ("sect_light", "sect_color", "sect_detail", "sect_local", "sect_lut"):
         sect = getattr(p, name)
         assert _page_of(p, sect) == "global", f"{name} unexpectedly moved off Global"
-    assert _page_of(p, p.sect_generate) == "generate", "Generate section is not on its page"
     print("  OK   only the Masks section moved")
 
 

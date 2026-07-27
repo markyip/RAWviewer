@@ -851,21 +851,6 @@ class ImageAdjustPanelWidget(QWidget):
     # resolution and the RGB the model runs on), plus inference is slow
     # enough to need a worker thread and a busy state.
     mask_ai_requested = pyqtSignal(str)
-    # Generative tab. Emits the instruction text; the host owns consent,
-    # baking, the provider call, and derived-file creation.
-    generative_requested = pyqtSignal(str)
-    generative_cancel_requested = pyqtSignal()
-    # Panel wants the current render to show as the source thumbnail; the
-    # host replies by calling set_generative_source().
-    generative_source_requested = pyqtSignal()
-    # Staged-result lifecycle. Nothing reaches the user's folder until
-    # export; see generative_session.
-    generative_export_requested = pyqtSignal()
-    generative_undo_requested = pyqtSignal()
-    generative_discard_requested = pyqtSignal()
-    # True on arriving at Generate, False on leaving it. Global/Masks always
-    # edit the original, so the host restores the original render on False.
-    generative_page_active_changed = pyqtSignal(bool)
     # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
     mask_gradient_tool_changed = pyqtSignal(str)
     # Selected mask row changed -- the host moves the gradient handles to it.
@@ -1215,7 +1200,7 @@ class ImageAdjustPanelWidget(QWidget):
         # switching toggles visibility. Every section keeps its identity, so
         # per-section collapse persistence and all existing widget references
         # survive the move untouched.
-        self._panel_tabs = PanelTabBar(("Global", "Masks", "Generate"))
+        self._panel_tabs = PanelTabBar(("Global", "Masks"))
         self._panel_tabs.changed.connect(self._on_panel_tab_changed)
         tabs_wrap = QWidget()
         tabs_wrap.setObjectName("adjust_tabbar_wrap")
@@ -1249,17 +1234,6 @@ class ImageAdjustPanelWidget(QWidget):
         layout.addWidget(self._tab_page_masks)
         self._tab_page_masks.setVisible(False)
 
-        # Generate page. Every other tab changes how the current file is
-        # rendered; this one sends the image somewhere and writes a *new*
-        # file, so it gets its own page rather than a section that would sit
-        # in a stack of sliders and imply it behaves like them.
-        self._tab_page_generate = QWidget()
-        generate_layout = QVBoxLayout(self._tab_page_generate)
-        generate_layout.setContentsMargins(0, 0, 0, 0)
-        generate_layout.setSpacing(6)
-        generate_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(self._tab_page_generate)
-        self._tab_page_generate.setVisible(False)
 
         # The calibration banner reports a global colour shift, so it stays
         # with Global rather than following the mask workflow.
@@ -1299,7 +1273,6 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_masks = CollapsibleSection("Masks", settings_key="masks")
         if not _SHOW_DODGE_BURN_UI:
             self.sect_masks.hide()
-        self.sect_generate = CollapsibleSection("Generative Edit", settings_key="generate")
         self.sect_anamorphic = CollapsibleSection("Anamorphic", settings_key="anamorphic")
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
@@ -1329,11 +1302,6 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_masks.header.setVisible(False)
         self.sect_masks.set_expanded(True)
 
-        # Generate page -- same treatment as Masks: the tab already names it,
-        # so the accordion header would be the word twice.
-        generate_layout.addWidget(self.sect_generate)
-        self.sect_generate.header.setVisible(False)
-        self.sect_generate.set_expanded(True)
 
         # Build tone curve editor row inside the curve section first
         if _SHOW_TONE_CURVE_UI:
@@ -1911,7 +1879,6 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_local.add_widget(db_container)
 
         self._build_masks_section(self.sect_masks)
-        self._build_generate_section(self.sect_generate)
 
         self._build_anamorphic_section(self.sect_anamorphic)
         self._build_looks_section(self.sect_lut)
@@ -3134,46 +3101,23 @@ class ImageAdjustPanelWidget(QWidget):
         self.editing_finished.emit(self.get_adjustments())
 
     def _on_panel_tab_changed(self, index: int) -> None:
-        """Show the selected top-level page (0 = Global, 1 = Masks, 2 = Generate)."""
+        """Show the selected top-level page (0 = Global, 1 = Masks)."""
         masks = index == 1
-        generate = index == 2
-        self._tab_page_global.setVisible(not masks and not generate)
+        self._tab_page_global.setVisible(not masks)
         self._tab_page_masks.setVisible(masks)
-        self._tab_page_generate.setVisible(generate)
 
-        # Each page holds one section, so a user who had collapsed it while it
-        # lived at the bottom of Global would land on a page that looks
-        # broken. Opening it on arrival costs nothing -- there is nothing else
-        # on the page to scroll past.
+        # The Masks page holds one section, so a user who had collapsed it
+        # while it lived at the bottom of Global would land on a page that
+        # looks broken. Opening it on arrival costs nothing -- there is
+        # nothing else on the page to scroll past.
         if masks:
             self.sect_masks.set_expanded(True)
-        if generate:
-            self.sect_generate.set_expanded(True)
-            # The source is whatever the current render looks like now, so it
-            # is re-read on arrival rather than cached from the last visit.
-            self._refresh_generate_source()
-            self._refresh_generate_availability()
-        # Generative work and the parametric edit of the original are kept
-        # apart: Global and Masks always act on the original file, never on a
-        # staged result. Leaving Generate says so, so a user who exits mid-
-        # chain is not left wondering which image the sliders are moving.
-        self.generative_page_active_changed.emit(bool(generate))
 
         # Each page has its own natural scroll extent; carrying the other
         # page's offset over lands mid-content for no reason.
         scroll = getattr(self, "_scroll_area", None)
         if scroll is not None:
             scroll.verticalScrollBar().setValue(0)
-
-    def is_generative_page_active(self) -> bool:
-        """Whether Generate is the page currently showing.
-
-        Asked by the host on navigation. The host also tracks this from
-        generative_page_active_changed, but that cached flag goes stale if the
-        editor is closed and reopened, so the widget stays the authority.
-        """
-        tabs = getattr(self, "_panel_tabs", None)
-        return tabs is not None and tabs.current() == 2
 
     def show_masks_tab(self) -> None:
         """Bring the Masks page forward (used when a mask action starts)."""
@@ -3600,285 +3544,6 @@ class ImageAdjustPanelWidget(QWidget):
         ("Sharpness", "Sharpness", 0, 150, 1.0),
         ("Clarity2012", "Clarity", -100, 100, 1.0),
     )
-
-    # ------------------------------------------------------------------
-    # Generative Edit section (raw_generative_edit)
-    # ------------------------------------------------------------------
-
-    def _build_generate_section(self, sect: "CollapsibleSection") -> None:
-        """Source → instruction → generate, as a page rather than a section.
-
-        Unlike every other tab here, this one produces a NEW FILE rather than
-        changing the current render -- so it is a button and a wait, not a
-        slider you scrub. The wording says so plainly; a photographer who
-        thinks this is another adjustment will be surprised when a second file
-        shows up in the folder.
-
-        The source thumbnail is the reason this is a page. Generative editing
-        runs on the UNEDITED image, separate from the parametric flow, and
-        once something is staged it runs on that instead -- so "what is about
-        to be sent" is a real question with a changing answer. Showing the
-        exact pixels answers it in a way prose would not.
-        """
-        from PyQt6.QtWidgets import QPlainTextEdit
-
-        container = QWidget()
-        col = QVBoxLayout(container)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(10)
-
-        # -- Source ----------------------------------------------------
-        col.addWidget(self._mask_section_head("Source", "unedited — sent to the model"))
-
-        self._gen_source_thumb = QLabel()
-        self._gen_source_thumb.setMinimumHeight(104)
-        self._gen_source_thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._gen_source_thumb.setStyleSheet(
-            f"""
-            QLabel {{
-                background-color: {theme.VOID};
-                border: 1px solid {theme.LINE};
-                border-radius: 4px;
-                color: {theme.INK_FAINT};
-                font-size: 10px;
-            }}
-            """
-        )
-        self._gen_source_thumb.setText("Open an image in the editor")
-        col.addWidget(self._gen_source_thumb)
-
-        self._gen_source_caption = QLabel("")
-        self._gen_source_caption.setWordWrap(True)
-        self._gen_source_caption.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 9px;"
-        )
-        col.addWidget(self._gen_source_caption)
-
-        col.addWidget(self._mask_rule())
-
-        # -- Instruction -----------------------------------------------
-        col.addWidget(self._mask_section_head("Instruction"))
-
-        blurb = QLabel(
-            "Describe the change you want. This runs on the unedited image — "
-            "your Global and Masks edits are not applied here, and your RAW "
-            "is never altered."
-        )
-        blurb.setWordWrap(True)
-        blurb.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
-        col.addWidget(blurb)
-
-        self._gen_instruction = QPlainTextEdit()
-        self._gen_instruction.setPlaceholderText("e.g. remove the bin on the left")
-        self._gen_instruction.setMaximumHeight(64)
-        self._gen_instruction.setStyleSheet(
-            f"""
-            QPlainTextEdit {{
-                background-color: {theme.SURFACE};
-                border: 1px solid {theme.LINE};
-                border-radius: 4px;
-                color: {theme.INK};
-                font-size: 11px;
-                padding: 4px;
-            }}
-            """
-        )
-        self._gen_instruction.setMinimumHeight(72)
-        self._gen_instruction.setMaximumHeight(96)
-        col.addWidget(self._gen_instruction)
-
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        self._gen_run_btn = QPushButton("Generate")
-        self._gen_cancel_btn = QPushButton("Cancel")
-        self._gen_settings_btn = QPushButton("Setup…")
-        for btn in (self._gen_run_btn, self._gen_cancel_btn, self._gen_settings_btn):
-            btn.setObjectName("adjust_db_clear_btn")
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            row.addWidget(btn, 1)
-        self._gen_run_btn.setToolTip("Send this photo and your instruction to the configured model")
-        self._gen_cancel_btn.setToolTip("Stop the current generation")
-        self._gen_settings_btn.setToolTip("Configure the endpoint this feature sends to")
-        self._gen_cancel_btn.setEnabled(False)
-        self._gen_run_btn.clicked.connect(self._on_generate_clicked)
-        self._gen_cancel_btn.clicked.connect(self.generative_cancel_requested.emit)
-        self._gen_settings_btn.clicked.connect(self._on_generate_setup_clicked)
-        col.addLayout(row)
-
-        self._gen_status = QLabel("")
-        self._gen_status.setWordWrap(True)
-        self._gen_status.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
-        col.addWidget(self._gen_status)
-
-        # -- Staged versions -------------------------------------------
-        # Only present once something has been generated: an empty "Versions"
-        # heading on arrival would advertise a list that cannot exist yet.
-        self._gen_chain_wrap = QWidget()
-        chain_col = QVBoxLayout(self._gen_chain_wrap)
-        chain_col.setContentsMargins(0, 0, 0, 0)
-        chain_col.setSpacing(6)
-        chain_col.addWidget(self._mask_rule())
-        chain_col.addWidget(
-            self._mask_section_head("Versions", "not saved yet")
-        )
-
-        self._gen_chain_list = QLabel("")
-        self._gen_chain_list.setWordWrap(True)
-        self._gen_chain_list.setStyleSheet(
-            f"color: {theme.INK_MUTED}; font-size: 10px;"
-        )
-        chain_col.addWidget(self._gen_chain_list)
-
-        warn = QLabel(
-            "These live in a temporary folder and are deleted when you quit. "
-            "Export anything you want to keep."
-        )
-        warn.setWordWrap(True)
-        warn.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 9px;")
-        chain_col.addWidget(warn)
-
-        chain_row = QHBoxLayout()
-        chain_row.setSpacing(6)
-        self._gen_export_btn = QPushButton("Export…")
-        self._gen_undo_btn = QPushButton("Undo last")
-        self._gen_discard_btn = QPushButton("Discard all")
-        for btn in (
-            self._gen_export_btn,
-            self._gen_undo_btn,
-            self._gen_discard_btn,
-        ):
-            btn.setObjectName("adjust_db_clear_btn")
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            chain_row.addWidget(btn, 1)
-        self._gen_export_btn.setToolTip(
-            "Write the newest version to a file you choose"
-        )
-        self._gen_undo_btn.setToolTip("Throw away the newest version only")
-        self._gen_discard_btn.setToolTip(
-            "Throw away every version and go back to the original"
-        )
-        self._gen_export_btn.clicked.connect(self.generative_export_requested.emit)
-        self._gen_undo_btn.clicked.connect(self.generative_undo_requested.emit)
-        self._gen_discard_btn.clicked.connect(self.generative_discard_requested.emit)
-        chain_col.addLayout(chain_row)
-
-        col.addWidget(self._gen_chain_wrap)
-        self._gen_chain_wrap.setVisible(False)
-
-        sect.content_layout.addWidget(container)
-        self._refresh_generate_availability()
-
-    def set_generative_chain(self, steps, source_name: str = "") -> None:
-        """Show the staged chain, or hide the whole block when it is empty.
-
-        ``steps`` is a list of (label, instruction) oldest first.
-        """
-        wrap = getattr(self, "_gen_chain_wrap", None)
-        if wrap is None:
-            return
-        if not steps:
-            wrap.setVisible(False)
-            self._gen_chain_list.setText("")
-            return
-        lines = []
-        for i, (label, instruction) in enumerate(steps):
-            text = instruction or "(no instruction)"
-            mark = "→ " if i == len(steps) - 1 else "   "
-            lines.append(f"{mark}{label} — {text}")
-        # The newest is what Generate would build on and what Export writes;
-        # saying so beats making the arrow carry that meaning alone.
-        self._gen_chain_list.setText("\n".join(lines))
-        self._gen_chain_list.setToolTip(
-            "The newest version is the source for the next generation "
-            "and the one Export writes."
-        )
-        wrap.setVisible(True)
-
-    def _refresh_generate_availability(self) -> None:
-        """Reflect whether an endpoint is configured, without nagging."""
-        try:
-            from generative_settings import load_settings
-            from raw_generative_edit import make_provider
-
-            provider = make_provider(load_settings())
-            ready = provider.is_configured()
-            self._gen_run_btn.setEnabled(ready)
-            if not ready:
-                self._gen_status.setText("No endpoint configured — press Setup…")
-            elif not self._gen_status.text().strip():
-                self._gen_status.setText(provider.describe())
-        except Exception:
-            self._gen_run_btn.setEnabled(False)
-            self._gen_status.setText("Generative editing unavailable.")
-
-    def _refresh_generate_source(self) -> None:
-        """Ask the host for the pixels that would be sent right now."""
-        self.generative_source_requested.emit()
-
-    def set_generative_source(self, image, caption: str = "") -> None:
-        """Show the exact render that Generate would send.
-
-        ``image`` is a QImage (or None when no image is open). The host owns
-        the edit-base resolution, so it does the downscale; this only fits the
-        result to the label.
-        """
-        from PyQt6.QtGui import QPixmap
-
-        thumb = getattr(self, "_gen_source_thumb", None)
-        if thumb is None:
-            return
-        if image is None or image.isNull():
-            thumb.setPixmap(QPixmap())
-            thumb.setText("Open an image in the editor")
-            self._gen_source_caption.setText("")
-            return
-        pix = QPixmap.fromImage(image).scaled(
-            max(1, thumb.width() - 2),
-            160,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        thumb.setText("")
-        thumb.setPixmap(pix)
-        self._gen_source_caption.setText(caption or "")
-
-    def generative_instruction(self) -> str:
-        return self._gen_instruction.toPlainText().strip()
-
-    def set_generative_busy(self, busy: bool) -> None:
-        self._gen_run_btn.setEnabled(not busy and self._gen_endpoint_ready())
-        self._gen_cancel_btn.setEnabled(busy)
-        self._gen_instruction.setReadOnly(busy)
-        self._gen_settings_btn.setEnabled(not busy)
-
-    def set_generative_status(self, message: str) -> None:
-        self._gen_status.setText(message or "")
-
-    def _gen_endpoint_ready(self) -> bool:
-        try:
-            from generative_settings import load_settings
-            from raw_generative_edit import make_provider
-
-            return make_provider(load_settings()).is_configured()
-        except Exception:
-            return False
-
-    def _on_generate_clicked(self) -> None:
-        instruction = self.generative_instruction()
-        if not instruction:
-            self._gen_status.setText("Describe the edit you want first.")
-            return
-        self.generative_requested.emit(instruction)
-
-    def _on_generate_setup_clicked(self) -> None:
-        from rawviewer_ui.generative_setup_dialog import GenerativeSetupDialog
-
-        dialog = GenerativeSetupDialog(self)
-        if dialog.exec():
-            self._gen_status.setText("")
-            self._refresh_generate_availability()
 
     @staticmethod
     def _mask_section_head(title: str, note: str = "") -> QWidget:
