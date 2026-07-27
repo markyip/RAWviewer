@@ -330,6 +330,8 @@ class JustifiedGallery(QWidget):
         self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
         self._requested_thumbnail_paths = set()
+        # Paths showing a grey placeholder after repeated thumbnail failures.
+        self._placeholder_thumb_paths: set = set()
         self._pending_scroll_to_path = None
         self._pending_scroll_anchor_state = None
         # True once the user has jumped far from the entry-point image (see
@@ -395,6 +397,8 @@ class JustifiedGallery(QWidget):
         self._wheel_base_gain = wheel_base_gain()
         self._wheel_fast_gain = wheel_fast_gain()
         self._trackpad_gain = trackpad_gain()
+        # Sub-pixel remainder carried between trackpad wheel events.
+        self._trackpad_accum_px = 0.0
         self._wheel_last_notch_t = 0.0
 
         # Idle background thumbnail preloader
@@ -639,6 +643,7 @@ class JustifiedGallery(QWidget):
                 pass
         self._active_tasks.clear()
         self._requested_thumbnail_paths.clear()
+        self._placeholder_thumb_paths.clear()
 
     def prepare_gallery_display(self) -> None:
         """Ensure layout and widget geometry are valid when gallery becomes visible."""
@@ -662,6 +667,7 @@ class JustifiedGallery(QWidget):
         self._gallery_warmup_until = 0.0
         self._active_tasks.clear()
         self._requested_thumbnail_paths.clear()
+        self._placeholder_thumb_paths.clear()
         if hasattr(self, "_load_timer") and self._load_timer:
             self._load_timer.stop()
         self._idle_preload_timer.stop()
@@ -1410,6 +1416,7 @@ class JustifiedGallery(QWidget):
                         pass
             finally:
                 self._requested_thumbnail_paths.clear()
+                self._placeholder_thumb_paths.clear()
 
             if not self.images:
                 self._building = False
@@ -1691,12 +1698,20 @@ class JustifiedGallery(QWidget):
             return
         try:
             with cache.lock:
-                # Keys are the path plus a size-bucket suffix, so match on the
-                # path prefix rather than equality.
-                for key in [
+                # Keys are (file_path, size_bucket) tuples, so compare the
+                # PATH ELEMENT against the keep set.
+                #
+                # This was `any(str(k).startswith(p) for p in keep)`, which was
+                # wrong twice over: str() of a tuple yields "('/path', 512)",
+                # so it never matched any path and the whole thumbnail cache
+                # was wiped on every folder change -- and being O(keys x paths)
+                # it took ~27 SECONDS on the GUI thread for a 3000-file folder.
+                # A set lookup on the path element is ~4 ms for the same input.
+                stale = [
                     k for k in list(cache.cache.keys())
-                    if not any(str(k).startswith(p) for p in keep)
-                ]:
+                    if (k[0] if isinstance(k, tuple) and k else k) not in keep
+                ]
+                for key in stale:
                     cache.cache.pop(key, None)
         except Exception:
             pass
@@ -2424,16 +2439,25 @@ class JustifiedGallery(QWidget):
                     # Amplified trackpad: scale the pixel delta directly on the
                     # scrollbar. macOS momentum still applies (it arrives as
                     # more pixelDelta events), so the feel stays native.
-                    sb.setValue(
-                        max(
-                            sb.minimum(),
-                            min(
-                                sb.maximum(),
-                                sb.value()
-                                + int(-pixel.y() * self._trackpad_gain),
-                            ),
+                    #
+                    # Carry the fraction between events. int() per event threw
+                    # away everything below a whole pixel, and a trackpad sends
+                    # 1-3px deltas: at the default 1.6 gain a stream of
+                    # [1,1,2,1,3,...] scrolled 19px where it should have moved
+                    # 24, unevenly, and any delta whose product rounded to 0
+                    # vanished entirely. That is the choppiness against a mouse
+                    # wheel, which reaches the scrollbar through a smoothing
+                    # timer instead.
+                    self._trackpad_accum_px += -pixel.y() * self._trackpad_gain
+                    step = int(self._trackpad_accum_px)
+                    self._trackpad_accum_px -= step
+                    if step:
+                        sb.setValue(
+                            max(
+                                sb.minimum(),
+                                min(sb.maximum(), sb.value() + step),
+                            )
                         )
-                    )
                     self._last_scroll_event_t = time.time()
                     event.accept()
                     return True
@@ -3184,6 +3208,17 @@ class JustifiedGallery(QWidget):
             wanted_paths |= center_paths
 
         if not actively_scrolling:
+            # A tile that failed earlier is showing a grey placeholder. Now
+            # that scrolling has settled, give the visible ones another go --
+            # the failure was often transient (an EMFILE burst, IO pressure,
+            # a volume that briefly dropped) and without this the tile stayed
+            # grey until the folder was reopened.
+            if self._placeholder_thumb_paths:
+                try:
+                    self.retry_placeholder_thumbnails(visible_paths)
+                except Exception:
+                    pass
+
             # Cancel thumbnail work that is no longer near the scrollbar thumb.
             # Skip cancel for visible RAW/DNG tiles still decoding at CURRENT priority.
             to_cancel = self._requested_thumbnail_paths - wanted_paths
@@ -4107,6 +4142,39 @@ class JustifiedGallery(QWidget):
         self._max_retry_attempt = 1
         self._request_load_visible_images(40)
 
+    def retry_placeholder_thumbnails(self, paths=None) -> int:
+        """Let failed tiles try again instead of staying grey all session.
+
+        A thumbnail that failed its retries got a grey square written into the
+        normal cache, which then satisfied every later lookup -- so a
+        transient failure was indistinguishable from a permanent one and the
+        tile never recovered without reopening the folder.
+
+        Clears the placeholder, the fail count and the request record for the
+        given paths (default: all placeholders), so the next visibility pass
+        requests them for real. Returns how many were reset.
+        """
+        targets = set(paths) if paths is not None else set(self._placeholder_thumb_paths)
+        targets &= self._placeholder_thumb_paths
+        if not targets:
+            return 0
+        cache = getattr(self, "_thumbnail_cache", None)
+        for path in targets:
+            self._placeholder_thumb_paths.discard(path)
+            self._thumb_fail_counts.pop(path, None)
+            self._requested_thumbnail_paths.discard(path)
+            if cache is not None:
+                try:
+                    with cache.lock:
+                        for key in [
+                            k for k in list(cache.cache.keys())
+                            if (k[0] if isinstance(k, tuple) and k else k) == path
+                        ]:
+                            cache.cache.pop(key, None)
+                except Exception:
+                    pass
+        return len(targets)
+
     def on_thumbnail_error(self, file_path, error_msg):
         resolved = self._resolve_gallery_path(file_path)
         if resolved:
@@ -4161,6 +4229,14 @@ class JustifiedGallery(QWidget):
             null_pixmap = QPixmap(100, 100)
             null_pixmap.fill(Qt.GlobalColor.darkGray)
             self._thumbnail_cache.put((file_path, self._thumb_base_key), null_pixmap)
+            # Remember that this grey square is a PLACEHOLDER, not a
+            # thumbnail. Cached under the normal key it is indistinguishable
+            # from a real one, so every later lookup hit it and the tile
+            # stayed grey for the rest of the session -- even though the
+            # failure may have been transient (an EMFILE burst, IO pressure,
+            # a volume that briefly went away). retry_placeholder_thumbnails()
+            # clears these so a later pass can decode for real.
+            self._placeholder_thumb_paths.add(file_path)
             logger.warning(
                 "[GALLERY] Keeping %s after repeated thumbnail failures: %s",
                 os.path.basename(file_path),
@@ -4184,6 +4260,14 @@ class JustifiedGallery(QWidget):
             null_pixmap = QPixmap(100, 100)
             null_pixmap.fill(Qt.GlobalColor.darkGray)
             self._thumbnail_cache.put((file_path, self._thumb_base_key), null_pixmap)
+            # Remember that this grey square is a PLACEHOLDER, not a
+            # thumbnail. Cached under the normal key it is indistinguishable
+            # from a real one, so every later lookup hit it and the tile
+            # stayed grey for the rest of the session -- even though the
+            # failure may have been transient (an EMFILE burst, IO pressure,
+            # a volume that briefly went away). retry_placeholder_thumbnails()
+            # clears these so a later pass can decode for real.
+            self._placeholder_thumb_paths.add(file_path)
             logger.warning(
                 "[GALLERY] Keeping RAW %s after thumbnail failures: %s",
                 os.path.basename(file_path),
@@ -4704,6 +4788,7 @@ class JustifiedGallery(QWidget):
             pass
         self._active_tasks.clear()
         self._requested_thumbnail_paths.clear()
+        self._placeholder_thumb_paths.clear()
 
         for label in list(getattr(self, "_visible_widgets", {}).values()):
             try:
