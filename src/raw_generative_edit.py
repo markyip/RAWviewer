@@ -426,6 +426,22 @@ def make_provider(settings: Optional[dict] = None) -> GenerativeProvider:
     kind = str(settings.get("provider", "http") or "http").strip().lower()
     if kind == "stub":
         return StubProvider()
+    if kind in ("local_server", "mlx"):
+        # A model running on the user's own machine behind an
+        # OpenAI-compatible endpoint (mlx-serve and friends). Strictly better
+        # than anything this app could embed, and the photo still never
+        # leaves the machine.
+        from raw_generative_local_server import (
+            DEFAULT_ENDPOINT,
+            DEFAULT_MODEL,
+            LocalServerProvider,
+        )
+
+        return LocalServerProvider(
+            endpoint=str(settings.get("server_endpoint", "") or DEFAULT_ENDPOINT),
+            model_name=str(settings.get("server_model", "") or DEFAULT_MODEL),
+            api_key=str(settings.get("api_key", "") or ""),
+        )
     if kind == "local":
         # Imported lazily: it pulls in onnxruntime and the scheduler, which a
         # user who never touches generative editing should not pay for.
