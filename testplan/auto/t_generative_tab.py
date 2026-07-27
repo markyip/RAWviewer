@@ -153,6 +153,30 @@ def test_leaving_generate_signals_the_host():
     print("  OK   entering/leaving Generate is signalled to the host")
 
 
+def test_source_is_the_unedited_decode_not_the_grade():
+    """Generative editing is separate from the parametric flow.
+
+    _generative_source_rgb must read the decode base, not the graded render.
+    A comment in main.py once claimed the opposite ("the model gets the
+    CURRENT render, so the parametric edits are baked in") while the code did
+    the right thing, so this pins the behaviour rather than the prose.
+    """
+    import inspect
+
+    import main as mainmod
+
+    src = inspect.getsource(mainmod.RAWImageViewer._generative_source_rgb)
+    # The decode base is _adjust_preview_base_rgb, reached via
+    # _ai_mask_source_rgb; the graded output never appears in this path.
+    assert "_ai_mask_source_rgb" in src, src
+    for graded in ("_render_adjust", "get_adjustments", "apply_adjustments"):
+        assert graded not in src, f"grade leaked into the generative source: {graded}"
+
+    base_src = inspect.getsource(mainmod.RAWImageViewer._ai_mask_source_rgb)
+    assert "_adjust_preview_base_rgb" in base_src, base_src
+    print("  OK   generative source is the unedited decode base")
+
+
 def test_staged_lifecycle_buttons_emit():
     p = _panel()
     fired = []
@@ -172,6 +196,7 @@ def main():
         test_versions_block_hidden_until_something_is_staged,
         test_chain_marks_the_newest_version,
         test_leaving_generate_signals_the_host,
+        test_source_is_the_unedited_decode_not_the_grade,
         test_staged_lifecycle_buttons_emit,
         test_generate_is_a_third_page,
         test_arriving_asks_the_host_for_the_source,

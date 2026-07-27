@@ -22743,7 +22743,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Iterating builds on the newest staged result, not the original, so
         # instructions accumulate the way a person expects. With nothing
-        # staged the source is the CURRENT render, edits baked in.
+        # staged the source is the UNEDITED decode -- see
+        # _generative_source_rgb.
         rgb = self._generative_source_rgb()
         if rgb is None:
             panel.set_generative_status("Open an image in the editor first.")
@@ -22792,9 +22793,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _generative_source_rgb(self):
         """The pixels the next generation should start from.
 
-        The newest staged result if there is one -- so "generate again"
-        continues the chain rather than restarting from the original -- and
-        otherwise the current render with edits baked in.
+        Generative editing runs on the UNEDITED image, completely separate
+        from the parametric flow: the decoded edit base, before any slider,
+        curve, mask or LUT. Two reasons it is worth being strict about.
+
+        Same input, same result. If the source were the graded render, the
+        same instruction on the same file would give different output
+        depending on how the photo happened to be graded at that moment --
+        including changing under a user who tweaked exposure between two
+        attempts. That is a genuinely confusing thing to debug.
+
+        And it keeps the separation total. Global and Masks act on the
+        original and never see a generated result; Generate reads the
+        original's pixels and never sees a grade. Neither side can surprise
+        the other.
+
+        _adjust_preview_base_rgb is already exactly that buffer -- the
+        preview worker takes the base and the adjustments as separate
+        arguments and combines them downstream -- so this is a read of the
+        decode, not a re-decode.
+
+        The one exception is iteration: with something staged, the newest
+        staged version is the source, so instructions accumulate.
         """
         session = self._generative_session()
         source = str(getattr(self, "current_file_path", "") or "")
@@ -22855,7 +22875,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     f"{chain[-1].label} of {name} — {w} × {h}, staged (not saved)"
                 )
             else:
-                caption = f"{name} — {w} × {h}, your current edits baked in"
+                caption = f"{name} — {w} × {h}, unedited original"
             panel.set_generative_source(image, caption.strip(" —"))
             panel.set_generative_chain(
                 [(s.label, s.instruction) for s in chain], name

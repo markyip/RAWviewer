@@ -3604,10 +3604,11 @@ class ImageAdjustPanelWidget(QWidget):
         thinks this is another adjustment will be surprised when a second file
         shows up in the folder.
 
-        The source thumbnail is the reason this is a page. What gets sent is
-        the *current render*, edits baked in -- so the same instruction on the
-        same RAW gives different results depending on how it is graded. Naming
-        that in prose would be missed; showing the exact pixels cannot be.
+        The source thumbnail is the reason this is a page. Generative editing
+        runs on the UNEDITED image, separate from the parametric flow, and
+        once something is staged it runs on that instead -- so "what is about
+        to be sent" is a real question with a changing answer. Showing the
+        exact pixels answers it in a way prose would not.
         """
         from PyQt6.QtWidgets import QPlainTextEdit
 
@@ -3617,7 +3618,7 @@ class ImageAdjustPanelWidget(QWidget):
         col.setSpacing(10)
 
         # -- Source ----------------------------------------------------
-        col.addWidget(self._mask_section_head("Source", "sent to the model"))
+        col.addWidget(self._mask_section_head("Source", "unedited — sent to the model"))
 
         self._gen_source_thumb = QLabel()
         self._gen_source_thumb.setMinimumHeight(104)
@@ -3649,8 +3650,9 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_section_head("Instruction"))
 
         blurb = QLabel(
-            "Describe the change you want. This writes a new edited copy "
-            "next to the original — your RAW is never altered."
+            "Describe the change you want. This runs on the unedited image — "
+            "your Global and Masks edits are not applied here, and your RAW "
+            "is never altered."
         )
         blurb.setWordWrap(True)
         blurb.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
