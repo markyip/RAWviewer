@@ -3697,7 +3697,7 @@ class ImageAdjustPanelWidget(QWidget):
                 self._mask_erase_btn,
                 "Erase (hold X) — remove coverage from the selected mask under "
                 "the brush.\n\n"
-                "Use it to trim what Smart Object, Sky or AI Selection got wrong.",
+                "Use it to trim a mask back where it went too far.",
             ),
             (
                 self._mask_invert_btn,
@@ -3810,7 +3810,12 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_rule())
         col.addWidget(self._mask_section_head("Add a mask"))
 
-        col.addWidget(self._mask_family_label("you draw it"))
+        from raw_ai_masks import ai_masks_enabled as _ai_ok
+
+        # The label distinguishes this family from "it finds it". With that
+        # family gone there is nothing to distinguish, so it is dropped too.
+        if _ai_ok():
+            col.addWidget(self._mask_family_label("you draw it"))
         draw_row = QHBoxLayout()
         draw_row.setSpacing(5)
         draw_row.addWidget(self._mask_paint_btn, 1)
@@ -3822,8 +3827,29 @@ class ImageAdjustPanelWidget(QWidget):
                 draw_row.addWidget(w, 1)
         col.addLayout(draw_row)
 
-        col.addWidget(self._mask_family_label("it finds it"))
-        col.addLayout(ai_row)
+        # The "it finds it" family is Plus-only: every button in it downloads a
+        # model on first press (214 MB for Smart Object). Standard drops the
+        # row entirely rather than showing disabled buttons -- a control that
+        # can never be enabled is worse than no control, and an edition
+        # difference belongs in the marketing copy, not as dead UI in the
+        # panel. Everything above this line needs no model, so Standard keeps
+        # brush and both gradients.
+        from raw_ai_masks import ai_masks_enabled
+
+        if ai_masks_enabled():
+            col.addWidget(self._mask_family_label("it finds it"))
+            col.addLayout(ai_row)
+        else:
+            # The buttons still exist as attributes, so every reference to
+            # them (tool arming, set_ai_tool_used, tests) keeps working. They
+            # are simply never parented into the layout.
+            for _btn in (
+                self._mask_ai_subject_btn,
+                self._mask_ai_sky_btn,
+                self._mask_ai_click_btn,
+            ):
+                _btn.setVisible(False)
+                _btn.setEnabled(False)
 
         # ---- This mask: what you can do to the selected one -----------------
         col.addWidget(self._mask_rule())

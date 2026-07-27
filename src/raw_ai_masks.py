@@ -253,17 +253,53 @@ def ensure_model_downloaded(kind: str) -> bool:
     )
 
 
+def ai_masks_enabled() -> bool:
+    """False in the Standard edition, where AI masks are not offered.
+
+    No model is bundled in either edition -- they all download on first use
+    -- so this saves no installer size. What it guarantees is that a Standard
+    user never triggers a 214 MB download by clicking a mask button. The
+    edition line is drawn at "does pressing this fetch a large model", not at
+    install footprint.
+
+    Unaffected, because they need no model at all: brush, linear and radial
+    gradients, and dodge/burn Edge Assist (a guided filter, not a
+    segmentation net).
+    """
+    if os.environ.get("RAWVIEWER_FORCE_AI_MASKS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    try:
+        from rawviewer_profile import is_lite_build
+
+        return not is_lite_build()
+    except Exception:
+        # Unknown profile (dev checkout, tests): behave like Plus rather than
+        # silently removing working features.
+        return True
+
+
 def ensure_op_available(op: str) -> bool:
     """Download every model the given operation needs. True if all present."""
+    if not ai_masks_enabled():
+        return False
     return all(ensure_model_downloaded(k) for k in _OP_REQUIREMENTS.get(op, ()))
 
 
 def op_is_ready(op: str) -> bool:
     """True if the operation's models are already on disk (no download)."""
+    if not ai_masks_enabled():
+        return False
     return all(os.path.exists(model_path(k)) for k in _OP_REQUIREMENTS.get(op, ()))
 
 
 def available_ops() -> dict:
+    if not ai_masks_enabled():
+        return {op: False for op in _OP_REQUIREMENTS}
     return {op: op_is_ready(op) for op in _OP_REQUIREMENTS}
 
 
