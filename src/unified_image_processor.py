@@ -64,6 +64,12 @@ _EDIT_BASE_INFLIGHT_LOCK = _ebt.Lock()
 _EDIT_BASE_LRU: OrderedDict = OrderedDict()
 _EDIT_BASE_LRU_LOCK = _ebt.Lock()
 _EDIT_BASE_LRU_MAX = 2
+# Unpacked-RAW stash. Module-level for the same reason the in-flight registry
+# above is: workers build their own UnifiedImageProcessor, so instance state
+# is thrown away with the worker.
+_UNPACKED_RAW_LOCK = _ebt.Lock()
+_UNPACKED_RAW_SLOTS: OrderedDict = OrderedDict()
+
 _LIBRAW_UNSUPPORTED_MAX = 2048
 
 
@@ -145,8 +151,15 @@ class UnifiedImageProcessor:
         # Consumed by the full decode via _take_unpacked_raw.
         import threading as _threading
 
-        self._unpacked_raw_lock = _threading.Lock()
-        self._unpacked_raw_slots: OrderedDict = OrderedDict()
+        #
+        # MODULE-level, not per instance. ImageLoadWorker is a one-shot
+        # QRunnable that builds its own UnifiedImageProcessor, so an instance
+        # stash was thrown away with the worker and every task re-unpacked
+        # through LibRaw -- the LRU never once served a hit across tasks,
+        # which is the only thing it exists for. Shared here, with the same
+        # lock discipline.
+        self._unpacked_raw_lock = _UNPACKED_RAW_LOCK
+        self._unpacked_raw_slots = _UNPACKED_RAW_SLOTS
         # Sidecar-adjusted full-buffer memo: applying XMP adjustments to a
         # sensor-resolution buffer costs ~1.8-2.1s at 45MP even with the
         # row-band threading in raw_edit_pipeline.py, and _apply_sidecar_if_

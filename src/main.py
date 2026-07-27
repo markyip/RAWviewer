@@ -14824,6 +14824,120 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         start = max(0, end - limit)
         return files[start:end]
 
+    def register_new_file(self, path: str, *, select: bool = False) -> bool:
+        """Bring a file this app just wrote into the open folder, live.
+
+        Exports, HDR merges, panoramas and focus stacks all land beside the
+        originals, but nothing told the gallery: there is no filesystem
+        watcher anywhere in the app, and image_files is only ever built by a
+        folder scan. So a new file stayed invisible until the folder was
+        reopened -- and the merge paths that DID call _update_gallery_view()
+        were rebuilding from an image_files that never gained the new path,
+        then switching to single view where that call returns early anyway.
+
+        Insertion rather than a rescan: the app knows exactly what it wrote,
+        so re-listing the directory would be strictly more work for strictly
+        less certainty. Files written by other applications are still not
+        noticed; that would need a watcher, which costs a descriptor per
+        directory and behaves badly on network volumes.
+
+        Returns whether the file was added.
+        """
+        try:
+            if not path or not os.path.isfile(path):
+                return False
+            norm = _norm_path(path)
+            files = list(getattr(self, "image_files", []) or [])
+            if any(_norm_path(p) == norm for p in files):
+                return False
+            folder = os.path.dirname(os.path.abspath(path))
+            current_folder = getattr(self, "current_folder", "") or ""
+            if current_folder and os.path.abspath(current_folder) != folder:
+                # Written somewhere else; nothing on screen to update.
+                return False
+
+            # Place it where the current sort would have put it, so the tile
+            # does not jump on the next real scan.
+            insert_at = self._sorted_insert_index(files, path)
+            files.insert(insert_at, path)
+            self.image_files = files
+            current = getattr(self, "current_file_path", None)
+            if current:
+                try:
+                    self.current_file_index = self.image_files.index(current)
+                except ValueError:
+                    pass
+
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None and hasattr(gj, "set_images"):
+                gj.set_images(list(self.image_files), force_rebuild=True)
+            self._sync_filmstrip_files()
+            if select:
+                self._show_created_file(path)
+            return True
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[GALLERY] could not register new file %s", path, exc_info=True
+            )
+            return False
+
+    def _show_created_file(self, path: str) -> None:
+        """Open a file this app just created, in single view."""
+        try:
+            self.load_folder_images(
+                os.path.dirname(os.path.abspath(path)),
+                start_file=os.path.basename(path),
+                start_view="single",
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "[GALLERY] could not open %s", path, exc_info=True
+            )
+
+    def _sorted_insert_index(self, files: list, path: str) -> int:
+        """Where ``path`` belongs in ``files`` under the active sort.
+
+        Falls back to the end rather than guessing when the order in use is
+        not one this can reproduce -- an appended tile is mildly out of place;
+        a wrongly-placed one looks like corruption.
+        """
+        try:
+            newest_first = bool(getattr(self, "sort_newest_first", False))
+            key = os.path.getmtime(path)
+            times = []
+            for p in files:
+                try:
+                    times.append(os.path.getmtime(p))
+                except OSError:
+                    times.append(None)
+            if any(t is None for t in times):
+                return len(files)
+            ordered = times == sorted(times, reverse=newest_first)
+            if not ordered:
+                return len(files)
+            for i, t in enumerate(times):
+                if (key > t) if newest_first else (key < t):
+                    return i
+            return len(files)
+        except Exception:
+            return len(files)
+
+    def _sync_filmstrip_files(self) -> None:
+        """Push the current image_files into the filmstrip, if one is up."""
+        try:
+            bar = self._filmstrip_bar()
+            if bar is not None and hasattr(bar, "set_files"):
+                bar.set_files(
+                    list(getattr(self, "image_files", []) or []),
+                    select_index=getattr(self, "current_file_index", None),
+                )
+        except Exception:
+            pass
+
     def _update_gallery_view(self):
             """Update gallery view - using JustifiedGallery"""
             import logging
@@ -25689,6 +25803,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         " (while viewing another image)",
                         7000,
                     )
+                    self.register_new_file(output_path)
             return
         if err is not None:
             if type(err).__name__ == "ExportCancelled":
@@ -25738,6 +25853,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.status_bar.showMessage(
                     f"Exported {label}: {os.path.basename(output_path)}", 5000
                 )
+        # Show it now if it landed in the folder being browsed, rather than
+        # leaving it invisible until the folder is reopened.
+        self.register_new_file(output_path)
 
     def _sync_adjust_panel(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -26342,8 +26460,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     + " was created, with:\n\n• "
                     + "\n• ".join(warnings),
                 )
+            # register_new_file puts the result into image_files (which
+            # _update_gallery_view rebuilds from and could not have contained
+            # it) and refreshes the grid; _open_file then shows it.
+            # _open_file() was called here and does not exist anywhere in the
+            # codebase -- every successful merge raised AttributeError in this
+            # slot, right after writing the file. load_folder_images is what
+            # the real open path uses.
+            if not self.register_new_file(msg, select=True):
+                self._show_created_file(msg)
             self._update_gallery_view()
-            self._open_file(msg)
         else:
             if hasattr(self, "status_bar") and self.status_bar:
                 self.status_bar.showMessage(f"Stitching Error: {msg}", 6000)
