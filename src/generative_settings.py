@@ -26,6 +26,8 @@ _K_API_KEY = "generative/api_key"
 _K_MODEL = "generative/model_name"
 _K_INSECURE = "generative/allow_insecure"
 _K_CONSENT_FOR = "generative/consent_endpoint"
+_K_SERVER_ENDPOINT = "generative/server_endpoint"
+_K_SERVER_MODEL = "generative/server_model"
 _K_LOCAL_STEPS = "generative/local_steps"
 _K_LOCAL_TEXT_G = "generative/local_text_guidance"
 _K_LOCAL_IMAGE_G = "generative/local_image_guidance"
@@ -60,7 +62,28 @@ def load_settings() -> dict:
         "local_steps": int(s.value(_K_LOCAL_STEPS, 10) or 10),
         "local_text_guidance": float(s.value(_K_LOCAL_TEXT_G, 7.5) or 7.5),
         "local_image_guidance": float(s.value(_K_LOCAL_IMAGE_G, 1.5) or 1.5),
+        # Local-server provider (raw_generative_local_server).
+        "server_endpoint": str(s.value(_K_SERVER_ENDPOINT, "") or ""),
+        "server_model": str(s.value(_K_SERVER_MODEL, "") or ""),
     }
+
+
+def save_server_settings(
+    *, endpoint: str, model_name: str = "", api_key: str = ""
+) -> None:
+    """Select the local-server provider and remember where it listens.
+
+    Kept apart from save_settings deliberately. That one revokes upload
+    consent whenever the endpoint changes, which is right for a remote
+    destination and meaningless here -- a loopback server uploads nothing.
+    LocalServerProvider derives requires_consent from the URL itself, so a
+    user who later points this at a remote host is still asked.
+    """
+    s = _settings()
+    s.setValue(_K_PROVIDER, "local_server")
+    s.setValue(_K_SERVER_ENDPOINT, endpoint or "")
+    s.setValue(_K_SERVER_MODEL, model_name or "")
+    s.setValue(_K_API_KEY, api_key or "")
 
 
 def save_local_settings(
