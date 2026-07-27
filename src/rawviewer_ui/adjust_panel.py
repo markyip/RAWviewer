@@ -3165,6 +3165,16 @@ class ImageAdjustPanelWidget(QWidget):
         if scroll is not None:
             scroll.verticalScrollBar().setValue(0)
 
+    def is_generative_page_active(self) -> bool:
+        """Whether Generate is the page currently showing.
+
+        Asked by the host on navigation. The host also tracks this from
+        generative_page_active_changed, but that cached flag goes stale if the
+        editor is closed and reopened, so the widget stays the authority.
+        """
+        tabs = getattr(self, "_panel_tabs", None)
+        return tabs is not None and tabs.current() == 2
+
     def show_masks_tab(self) -> None:
         """Bring the Masks page forward (used when a mask action starts)."""
         tabs = getattr(self, "_panel_tabs", None)

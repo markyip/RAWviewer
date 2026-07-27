@@ -21817,6 +21817,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._pending_adjust_preview = dict(panel.get_adjustments())
             self._dodge_burn_luma_guide = None
 
+            # Generate is per-image: a different photo means a different
+            # source and a different staged chain. Refreshed here as well as
+            # on edit-base arrival, because navigating to a file whose base is
+            # already cached never re-enters that path.
+            if self._generative_page_is_showing():
+                self._on_generative_source_requested()
+
             db_serial = str(loaded_adj.get(MASK_KEY, "") or "")
             heal_serial = str(loaded_adj.get(HEAL_MASK_KEY, "") or "")
 
@@ -22366,6 +22373,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
         self._adjust_preview_base_rgb_fast = _make_fast_preview_base(base)
+
+        # Navigating with the Generate tab open changes which photo would be
+        # sent, so the source thumbnail and the staged chain both have to
+        # follow. This is the point where the new image's pixels exist -- the
+        # tab-change hook alone left a stale thumbnail from the previous file,
+        # which on a page whose whole job is showing what gets uploaded is the
+        # one thing it must never do.
+        if self._generative_page_is_showing():
+            self._on_generative_source_requested()
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
             # See _sync_adjust_panel_for_current_file: skip while the mask
@@ -22779,6 +22795,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 instruction,
             )
         )
+
+    def _generative_page_is_showing(self) -> bool:
+        """Whether the Generate page is the one on screen right now.
+
+        The panel is asked rather than the cached _generative_page_active
+        flag, which survives the editor being closed and reopened.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or not hasattr(panel, "is_generative_page_active"):
+            return False
+        try:
+            return bool(panel.isVisible() and panel.is_generative_page_active())
+        except Exception:
+            return False
 
     def _generative_session(self):
         """Lazily-made staging area for this app run (generative_session)."""

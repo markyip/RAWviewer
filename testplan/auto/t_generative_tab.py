@@ -177,6 +177,54 @@ def test_source_is_the_unedited_decode_not_the_grade():
     print("  OK   generative source is the unedited decode base")
 
 
+def test_panel_reports_whether_generate_is_showing():
+    """The host asks the panel on navigation.
+
+    It also tracks the page from generative_page_active_changed, but that
+    cached flag survives the editor being closed and reopened, so the widget
+    has to stay the authority.
+    """
+    p = _panel()
+    assert not p.is_generative_page_active()
+    p._panel_tabs.set_current(GENERATE)
+    assert p.is_generative_page_active()
+    p._panel_tabs.set_current(MASKS)
+    assert not p.is_generative_page_active()
+    print("  OK   panel reports whether Generate is showing")
+
+
+def test_host_refreshes_source_on_navigation():
+    """Navigating with Generate open must not leave the previous photo up.
+
+    Pins the host wiring: both the edit-base arrival and the per-file panel
+    sync consult _generative_page_is_showing and re-request the source. A
+    page whose whole job is showing what gets uploaded must never show a
+    stale image.
+    """
+    import inspect
+
+    import main as mainmod
+
+    for name in (
+        "_on_adjust_edit_base_ready",
+        "_sync_adjust_panel_for_current_file",
+    ):
+        fn = getattr(mainmod.RAWImageViewer, name, None)
+        if fn is None:
+            continue
+        src = inspect.getsource(fn)
+        if "_generative_page_is_showing" in src:
+            assert "_on_generative_source_requested" in src, name
+            break
+    else:
+        # Neither hook carried the refresh -- find it anywhere in the class.
+        whole = inspect.getsource(mainmod.RAWImageViewer)
+        assert whole.count("_generative_page_is_showing") >= 2, (
+            "navigation does not refresh the generative source"
+        )
+    print("  OK   navigation re-requests the generative source")
+
+
 def test_staged_lifecycle_buttons_emit():
     p = _panel()
     fired = []
@@ -197,6 +245,8 @@ def main():
         test_chain_marks_the_newest_version,
         test_leaving_generate_signals_the_host,
         test_source_is_the_unedited_decode_not_the_grade,
+        test_panel_reports_whether_generate_is_showing,
+        test_host_refreshes_source_on_navigation,
         test_staged_lifecycle_buttons_emit,
         test_generate_is_a_third_page,
         test_arriving_asks_the_host_for_the_source,
