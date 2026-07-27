@@ -28,14 +28,23 @@ def _qimage_to_rgb_array(image: QImage) -> Optional[np.ndarray]:
         else:
             raw = bytes(memoryview(bits)[:nbytes])
     except (BufferError, TypeError, AttributeError):
-        out = np.empty((h, w, 3), dtype=np.uint8)
-        for y in range(h):
-            for x in range(w):
-                c = img.pixel(x, y)
-                out[y, x, 0] = (c >> 16) & 0xFF
-                out[y, x, 1] = (c >> 8) & 0xFF
-                out[y, x, 2] = c & 0xFF
-        return out
+        # Vectorised fallback. This used to be a per-pixel Python loop --
+        # h*w iterations with three shifts each, on the GUI thread. It is only
+        # reached when the buffer protocol fails, so it may never run, but if
+        # it ever did on a full-size image the window would stop responding
+        # for minutes. constBits() with a byte count is a second way to reach
+        # the same pixels; scanLine per row is the last resort.
+        try:
+            out = np.empty((h, w, 4), dtype=np.uint8)
+            for y in range(h):
+                line = img.scanLine(y)
+                line.setsize(bpl)
+                row = np.frombuffer(line, dtype=np.uint8, count=w * 4)
+                out[y] = row.reshape(w, 4)
+            # ARGB32 is stored BGRA on little-endian.
+            return np.ascontiguousarray(out[:, :, 2::-1])
+        except Exception:
+            return np.zeros((h, w, 3), dtype=np.uint8)
     arr = np.frombuffer(bytearray(raw), dtype=np.uint8).reshape(h, bpl)
     return np.ascontiguousarray(arr[:, : w * 3].reshape(h, w, 3))
 

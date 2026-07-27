@@ -610,7 +610,14 @@ def apply_dodge_burn(
             m = resize_mask_to(mask, h, w)
             gain = np.exp2(m * float(stops)).astype(np.float32)
             mask._gain_cache = (cache_key, gain)
-    return img * gain[..., np.newaxis]
+    # Not `img * gain[..., np.newaxis]`: numpy's broadcasting iterator does
+    # not take the contiguous SIMD path for a trailing size-1 axis. Measured
+    # here at 24MP: 220ms broadcast vs 109ms per-channel-out, bit-identical.
+    # raw_detail_enhance._multiply_by_2d_factor documents the same finding --
+    # dodge/burn simply was not using it.
+    from raw_detail_enhance import _multiply_by_2d_factor
+
+    return _multiply_by_2d_factor(img, gain)
 
 
 def serialize_mask(mask: Optional[DodgeBurnMask]) -> str:

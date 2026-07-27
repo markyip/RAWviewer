@@ -67,6 +67,26 @@ _EDIT_BASE_LRU_MAX = 2
 # Unpacked-RAW stash. Module-level for the same reason the in-flight registry
 # above is: workers build their own UnifiedImageProcessor, so instance state
 # is thrown away with the worker.
+def release_edit_base_cache() -> int:
+    """Drop the half-size edit-base LRU. Returns bytes freed (approx).
+
+    Called by the image cache's aggressive purge. This LRU holds up to two
+    float32 half-size bases -- on a 45MP file that is ~135 MB each -- and was
+    the one heavy cache the purge could not see, so a critical-pressure purge
+    cleared everything else and left ~270 MB sitting here.
+    """
+    freed = 0
+    with _EDIT_BASE_LRU_LOCK:
+        for value in _EDIT_BASE_LRU.values():
+            try:
+                arr = value[0] if isinstance(value, tuple) else value
+                freed += int(getattr(arr, "nbytes", 0) or 0)
+            except Exception:
+                pass
+        _EDIT_BASE_LRU.clear()
+    return freed
+
+
 def _on_gui_thread() -> bool:
     """True when running on Qt's GUI thread.
 

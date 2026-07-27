@@ -2011,6 +2011,22 @@ class ImageCache(QObject):
         # Clear heavy caches entirely
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
+        # The edit-base LRU lives in unified_image_processor and is the one
+        # heavy cache this purge could not previously reach, so a
+        # critical-pressure purge freed everything except a couple of
+        # hundred MB of float32 bases.
+        try:
+            from unified_image_processor import release_edit_base_cache
+
+            freed = release_edit_base_cache()
+            if freed:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[MEMORY] released %.0f MB of edit bases", freed / 1e6
+                )
+        except Exception:
+            pass
         
         # Aggressively drop capacities to 3 thread-safely
         self.full_image_cache.shrink_to_size(3)
@@ -2988,6 +3004,22 @@ class ImageCache(QObject):
         self.preview_cache.clear()
         self.full_image_cache.clear()
         self.pixmap_cache.clear()
+        # The edit-base LRU lives in unified_image_processor and is the one
+        # heavy cache this purge could not previously reach, so a
+        # critical-pressure purge freed everything except a couple of
+        # hundred MB of float32 bases.
+        try:
+            from unified_image_processor import release_edit_base_cache
+
+            freed = release_edit_base_cache()
+            if freed:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[MEMORY] released %.0f MB of edit bases", freed / 1e6
+                )
+        except Exception:
+            pass
         self.libraw_preview_paths.clear()
         if self._libraw_preview_paths_file and os.path.isfile(self._libraw_preview_paths_file):
             try:

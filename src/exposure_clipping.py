@@ -90,11 +90,13 @@ def clipping_overlay_rgba(
     from PIL import Image
 
     resample = getattr(getattr(Image, "Resampling", Image), "NEAREST", Image.NEAREST)
-    out = np.zeros((h, w, 4), dtype=np.uint8)
-    for ch in range(4):
-        plane = Image.fromarray(small_rgba[:, :, ch]).resize((w, h), resample)
-        out[:, :, ch] = np.asarray(plane)
-    return np.ascontiguousarray(out)
+    # One RGBA resize, not four single-channel ones: PIL handles the 4-channel
+    # image in a single pass, and the per-plane version paid four
+    # fromarray/resize/asarray round trips for the same result.
+    rgba = Image.fromarray(np.ascontiguousarray(small_rgba), mode="RGBA")
+    return np.ascontiguousarray(
+        np.asarray(rgba.resize((w, h), resample), dtype=np.uint8)
+    )
 
 
 def rgba_array_to_qpixmap(rgba: np.ndarray) -> QPixmap:
