@@ -98,7 +98,7 @@ Open any folder of photos (drag it onto the window, or double-click a photo). Th
 | **← / →** | Previous / next photo |
 | **Space** or double-click | Fit ↔ 100% zoom |
 | **0–5** | Star rating (0 clears; bottom stars work too) |
-| **↓** | Move to Discard folder |
+| **↓** | Move to Discard folder (single view; not while editing) |
 | **C** | Compare selected photos side by side |
 | **E** | Open the Adjust (develop) panel |
 | **Esc** | Back to gallery |
@@ -117,8 +117,9 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **←** / **→** | Previous / next image |
 | **Scroll wheel** | Previous / next (single view, fit mode) |
 | **0–5** | Star rating (**0** clears; bottom stars in single view too) |
-| **↓** | Move to Discard folder |
-| **Delete** | Delete image(s) |
+| **↓** | Single view: move to Discard folder (not while the Adjust panel is open) · Gallery: scroll down |
+| **Shift+↓** | Gallery: move the selection to Discard |
+| **Delete** | Delete image(s) · Masks tab with a mask selected: delete that mask |
 | **Esc** | Gallery: clear selection → exit filters · Single view: back to gallery |
 | **Ctrl/Cmd+click** | Gallery: toggle selection |
 | **Shift+click** | Gallery: select range (visible order) |
@@ -340,7 +341,8 @@ Project directions and remaining work that are **not** tied to a particular rele
 | **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN x2 as the final export stage, so every earlier stage still runs at native resolution — ~65s for a 32MP frame. Being a GAN it *invents* plausible detail rather than reconstructing it, and reads over-sharpened on already-clean RAW output, so its strength is dialable toward a plain resize (`src/onnx_realesrgan.py`) |
 | **Local masks** (brush, linear, radial, AI) | **Landed, stabilising** | Stacked mask layers with per-layer adjustments. Brush with Size / Flow / Feather; linear and radial gradients placed by dragging on the photo, with handles to reshape them; **Smart Object** and **Sky** find a mask in one press; **AI Selection** masks whatever you click. One colour overlay covers every kind (`src/raw_mask_layers.py`, `src/raw_mask_shapes.py`, `src/raw_ai_masks.py`) |
 | **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Regression-covered against a real RAW (`src/color_calibration.py`) |
-| **Generative Editing** (instruction-based) | **In Progress** (`generative-editing` branch) | Provider layer, derived-file lifecycle, and Adjust-panel wiring. Remote provider uploads the photo to a third party — opt-in and clearly flagged; a local Windows+NVIDIA provider is the follow-up (`src/raw_generative_edit.py`) |
+| **Generative Editing** (instruction-based) | **Shelved** (parked on `generative-editing`) | Backend complete and tested — provider layer, staging, derived-file lifecycle — but the UI is removed and nothing in the app reaches it. Parked because no generative editor that is *good* is small enough to embed, and the ones small enough are not good: every current model pairs a diffusion transformer with a multi-billion-parameter LLM/VLM text encoder that is roughly half its weight, putting the floor around 6–7 GB resident. Measurements and the revival plan are in `docs/GENERATIVE_BACKLOG.md` on that branch |
+| **Mask grouping** (Lightroom-style) | **Landed, stabilising** | Drag one mask onto another to combine them into a single mask: components hold coverage and combine by add/subtract, the group holds one set of adjustments. Drag a component out to separate it again; <kbd>Ctrl</kbd>+<kbd>Z</kbd> restores adjustments a group discarded. Grouping is *cheaper* to render than separate layers — one adjustment pass through the combined alpha (`src/raw_mask_layers.py`, `src/mask_layers_xmp.py`) |
 | **Lens distortion** (barrel / pincushion) | **Landed, stabilising** | Automatic correction from a matched lens profile, plus a manual **Distortion** slider for lenses with none — positive corrects pincushion, negative barrel. Runs before straighten, since distortion is a property of the capture (`src/raw_lens_correction.py`, `src/raw_transform.py`) |
 | **Anamorphic Lens Desqueeze** | **Landed, stabilising** | Preset selector for fixed desqueeze ratios (1.33× / 1.5× / 1.6× / 2.0×) to restore squeezed anamorphic imagery |
 | **HDR Merge** | **Landed, stabilising** | Align exposures, de-ghost, and merge highlights/shadows via Exposure Fusion |
@@ -355,10 +357,9 @@ Project directions and remaining work that are **not** tied to a particular rele
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until next Adjust visit |
-| 2 | **Mask add / subtract** | **High** | M | `MaskLayer.blend` exists and the compositor ignores it. Decide first whether it composes across layers or within one mask, as Lightroom does |
 | 3 | **User-facing upscale strength control** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants to be a slider with a gentler default |
 | 3b | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts "not this" points; only positive ones are sent, so an over-reaching selection can be trimmed by brush but not re-solved |
-| 4 | **Local generative provider** (Windows + NVIDIA) | **Medium** | L | Keeps generative edits on-device, removing the third-party upload the remote provider requires |
+| 4 | **Generative editing via a local server** | **High** | S | Superseded "embed a local provider". A model running on the user's own machine behind an OpenAI-compatible `/v1/images/edits` endpoint (mlx-serve, ComfyUI) keeps the photo on-device with **zero** bytes shipped and never goes stale as models change. `LocalServerProvider` is written and tested on `generative-editing`; only the UI to select it was removed with the rest |
 | 5 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
 | 6 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
 | 7 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
