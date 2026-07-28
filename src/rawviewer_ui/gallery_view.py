@@ -330,6 +330,7 @@ class JustifiedGallery(QWidget):
         self._path_to_indices = {}
         # Track what thumbnails we've recently requested so we can cancel far-away work
         self._requested_thumbnail_paths = set()
+        self._last_reaim_t = 0.0
         # Paths showing a grey placeholder after repeated thumbnail failures.
         self._placeholder_thumb_paths: set = set()
         self._pending_scroll_to_path = None
@@ -2606,6 +2607,17 @@ class JustifiedGallery(QWidget):
                 pass
             return
 
+        # Re-aim the queue at where the user is NOW, and drop work for tiles
+        # they have scrolled well past. Both hang off this throttle rather
+        # than the wheel event: a trackpad emits 60-120 of those a second and
+        # re-scoring costs ~2 ms for a few hundred tasks.
+        #
+        # The gallery's own cancel diff only runs once scrolling has settled,
+        # which is precisely when the queue is no longer flooded. During a
+        # fast scroll -- when it is -- nothing was being dropped, so the tile
+        # arriving on screen queued behind everything already left behind.
+        self._reaim_queue_at_viewport()
+
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
         # The settle timer below guarantees a final update when scrolling stops.
         interval = 50 if not self._is_scrolling_fast else 150
@@ -2627,6 +2639,54 @@ class JustifiedGallery(QWidget):
             if self._scroll_settle_timer.isActive():
                 self._scroll_settle_timer.stop()
             self._scroll_settle_timer.start(120)
+
+    _REAIM_MIN_INTERVAL_S = 0.10
+    # Rows past the viewport beyond which queued (not running) work is dropped.
+    # Generous enough that a normal scroll keeps its read-ahead.
+    _REAIM_CANCEL_DISTANCE = 24
+
+    def _viewport_row_distance(self, file_path: str) -> int:
+        """Rows between ``file_path`` and the visible band. 0 = on screen."""
+        try:
+            indices = self._path_to_indices.get(file_path)
+            if not indices:
+                return self._REAIM_CANCEL_DISTANCE + 1
+            first, last = self._visible_index_range()
+            idx = min(indices)
+            if idx < first:
+                return first - idx
+            if idx > last:
+                return idx - last
+            return 0
+        except Exception:
+            return 0
+
+    def _visible_index_range(self) -> tuple:
+        """(first, last) image index currently on screen; widest known guess."""
+        visible = getattr(self, "_visible_widgets", None)
+        if visible:
+            keys = [k for k in visible.keys() if isinstance(k, int)]
+            if keys:
+                return min(keys), max(keys)
+        return 0, 0
+
+    def _reaim_queue_at_viewport(self) -> None:
+        """Re-score queued work against the current viewport, and prune it."""
+        now = time.time()
+        if now - getattr(self, "_last_reaim_t", 0.0) < self._REAIM_MIN_INTERVAL_S:
+            return
+        self._last_reaim_t = now
+        manager = getattr(self, "load_manager", None)
+        if manager is None or not hasattr(manager, "reprioritise"):
+            return
+        try:
+            manager.reprioritise(self._viewport_row_distance)
+            if self._is_scrolling_fast:
+                manager.cancel_distant_queued_tasks(
+                    self._viewport_row_distance, self._REAIM_CANCEL_DISTANCE
+                )
+        except Exception:
+            pass
 
     def _on_scroll_settled(self):
         """Called after scroll events stop; load thumbnails around thumb position."""

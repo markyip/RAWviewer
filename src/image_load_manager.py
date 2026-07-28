@@ -223,6 +223,11 @@ class ImageLoadTask:
         # Stages: {'thumbnail', 'exif', 'full'}.
         # Gallery should typically request only {'thumbnail'} (and optionally 'exif').
         self.stages = stages if stages is not None else {'thumbnail', 'exif', 'full'}
+        # Rows between this file and the visible viewport, as of the last
+        # reprioritise() call. Priority used to be fixed at enqueue: a tile
+        # kept the urgency it had when requested, so after a scroll or a jump
+        # the queue was ordered by where the user USED to be. 0 = on screen.
+        self.viewport_distance = 0
         # If provided, the thumbnail will be scaled/cropped in worker thread to this size.
         # This keeps UI thread light for smooth pixel-level scrolling.
         self.thumbnail_target_size = thumbnail_target_size
@@ -248,6 +253,10 @@ class ImageLoadTask:
             return NotImplemented
         if self.priority.value != other.priority.value:
             return self.priority.value < other.priority.value
+        # Distance before stage weight: a thumbnail two screens away is worth
+        # less than the full decode of what is on screen right now.
+        if self.viewport_distance != other.viewport_distance:
+            return self.viewport_distance < other.viewport_distance
         return _task_queue_weight(self) < _task_queue_weight(other)
 
 
@@ -1809,6 +1818,77 @@ class ImageLoadManager(QObject):
             # exists to prevent. Releasing happens per task above.
             self._reconcile_raw_slots_locked()
             self._compact_work_queue()
+
+    def reprioritise(self, distance_for) -> int:
+        """Re-score queued work against the CURRENT viewport.
+
+        ``distance_for(file_path)`` returns rows from the viewport; 0 means
+        visible. A PriorityQueue cannot re-key in place, so the queue is
+        drained, re-scored and rebuilt -- the same pattern _compact_work_queue
+        and the scheduler's preempt block already use. Measured at ~2 ms for a
+        few hundred tasks, which is nothing beside a decode, but it must be
+        driven from the scroll THROTTLE and never per wheel event: a trackpad
+        emits 60-120 of those a second.
+
+        Returns the number of tasks re-scored.
+        """
+        rescored = 0
+        with self._queue_lock:
+            drained = []
+            try:
+                while True:
+                    drained.append(self._work_queue.get_nowait())
+            except queue.Empty:
+                pass
+            for task in drained:
+                if task.is_cancelled():
+                    continue
+                try:
+                    task.viewport_distance = int(distance_for(task.file_path))
+                except Exception:
+                    task.viewport_distance = 0
+                rescored += 1
+                self._work_queue.put(task)
+        if rescored:
+            self._schedule_next_task()
+        return rescored
+
+    def cancel_distant_queued_tasks(self, distance_for, max_distance: int) -> int:
+        """Drop QUEUED work further than ``max_distance`` rows from view.
+
+        Only queued tasks: running ones hold a slot and a decode that cannot
+        be interrupted. The gallery's existing cancel diff runs only once
+        scrolling settles, which is exactly when the queue is no longer
+        flooded -- this is for during the scroll, when it is.
+        """
+        cancelled = 0
+        with self._queue_lock:
+            drained = []
+            try:
+                while True:
+                    drained.append(self._work_queue.get_nowait())
+            except queue.Empty:
+                pass
+            for task in drained:
+                if task.is_cancelled():
+                    continue
+                try:
+                    far = int(distance_for(task.file_path)) > max_distance
+                except Exception:
+                    far = False
+                if far and task.priority != Priority.CURRENT:
+                    task.cancel()
+                    self._release_raw_slot_locked(task)
+                    key = getattr(task, "task_key", None)
+                    if key in self._active_tasks and self._active_tasks[key] is task:
+                        del self._active_tasks[key]
+                        self._task_keys_by_path[task.file_path].discard(key)
+                        if not self._task_keys_by_path[task.file_path]:
+                            self._task_keys_by_path.pop(task.file_path, None)
+                    cancelled += 1
+                    continue
+                self._work_queue.put(task)
+        return cancelled
 
     def _compact_work_queue(self) -> None:
         """Re-enqueue only non-cancelled tasks still waiting in the priority queue."""
