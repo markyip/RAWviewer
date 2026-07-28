@@ -2316,12 +2316,30 @@ _AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
 
 # How long to wait for a model that is already on disk before giving up.
 #
+# 15s was tried first and was wrong: measured on this machine, warm, with the
+# weights already loaded --
+#
+#     Smart Object (BiRefNet)   18.5s at 1650x1100,  20.3s at 3300x2200
+#     Sky                        2.5s
+#     AI Selection: encode       1.9s,  each later click  0.5s
+#
+# -- so a 15s limit aborted every Smart Object run, turning "slow" into
+# "broken". The budget has to clear the slowest operation with room for a
+# slower machine or a larger frame, not sit inside it.
+#
+# Smart Object is the outlier because its session runs on CPU: _make_session
+# in raw_ai_masks only requests a GPU provider on Windows, so CoreML is never
+# asked for on macOS. Whether CoreML actually helps this graph is a separate
+# question -- onnx_scunet documents it partitioning 200+ segments and ending
+# up slower for attention-heavy models -- so the number below reflects what
+# the app does today, and should come down if that changes.
+#
 # Applied to INFERENCE ONLY. First use downloads 214 MB, which cannot fit in
 # any sane timeout, so the wait is left open when the weights are not yet
 # there -- a timeout that made first use impossible would be worse than the
 # hang it was meant to fix. The download reports itself in the dialog, so an
 # open-ended wait there is at least an explained one.
-_AI_MASK_TIMEOUT_MS = 15_000
+_AI_MASK_TIMEOUT_MS = 90_000
 
 _AI_MASK_BUSY_TEXT = {
     "subject": "Finding the subject…",
