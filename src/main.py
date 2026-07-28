@@ -22766,6 +22766,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # (dodge/burn/heal and mask-layer paint/erase) -- disarming one
             # must not kill an armed tool of the other.
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
+            # A dodge/burn tool is always a brush, so this clears any
+            # crosshair AI Selection left behind.
+            if mode is not None and hasattr(gv, "set_click_tool_mode"):
+                gv.set_click_tool_mode(False)
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
             elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
@@ -23586,6 +23590,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_dodge_burn_mode(self._any_brush_tool_armed())
+            # AI Selection routes its click through the same stroke path a
+            # brush uses, so the mode above has to stay on -- but it takes a
+            # point, not an area, and a brush circle sized by Brush Size
+            # invites aiming something the tool cannot read.
+            if hasattr(gv, "set_click_tool_mode"):
+                gv.set_click_tool_mode(mode == "ai_click")
             if mode is not None:
                 self._sync_dodge_burn_brush_cursor()
             elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):

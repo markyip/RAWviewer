@@ -220,25 +220,30 @@ def test_paint_creates_its_own_mask_like_every_other_tool():
     print("  OK   Paint asks for a mask instead of silently doing nothing")
 
 
-def test_create_menu_is_the_one_way_to_start_a_mask():
-    """One control starts a mask, and it names the tool up front.
+def test_create_section_shows_every_way_to_start_a_mask():
+    """Six buttons, one press each, all visible.
 
-    It replaced "New empty mask" sitting above six tool buttons. That button
-    was load-bearing for the brush alone -- the gradients and the AI tools
-    each create their own mask, while the brush paints into the selected one
-    -- so it was inert next to five of the six things beside it.
+    This was briefly a "Create new mask" menu. The idea was right -- one
+    place that starts a mask, naming the tool up front -- but it charged two
+    clicks and hid the choices behind a word.
 
-    Unlike the button it replaced, Create is available with no masks yet: it
-    is the only way to get the first one.
+    What it must not go back to is a "New empty mask" button above these six.
+    The gradients and the AI tools each create their own mask while the brush
+    paints into the selected one, so that button was load-bearing for the
+    brush alone and inert beside everything else.
     """
     p = _panel()
-    assert p._mask_create_btn.text() == "Create new mask", p._mask_create_btn.text()
+    btns = p._mask_create_buttons
+    assert [b.text() for b in btns.values()] == [
+        "Brush", "Linear Gradient", "Radial Gradient",
+        "Smart Object", "Sky", "AI Selection",
+    ], [b.text() for b in btns.values()]
+    assert getattr(p, "_mask_add_btn", None) is None, "New empty mask came back"
 
-    menu = p._mask_create_btn.menu()
-    assert menu is not None, "Create new mask has no menu"
-    items = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert items == ["Brush", "Linear Gradient", "Radial Gradient",
-                     "Smart Object", "Sky", "AI Selection"], items
+    # Only the tools that wait for something on the photo stay lit.
+    assert {k for k, b in btns.items() if b.isCheckable()} == {
+        "linear", "radial", "ai_click"
+    }
 
     # Brush is the only entry that needs a layer made for it up front.
     fired = []
@@ -253,7 +258,89 @@ def test_create_menu_is_the_one_way_to_start_a_mask():
             f"{kind} pre-created a mask -- it makes its own, so arming and "
             "then changing your mind would leave an empty one behind"
         )
-    print("  OK   one control starts a mask, and it names the tool")
+    print("  OK   six buttons, one press each")
+
+
+def test_create_button_lights_while_its_tool_is_armed():
+    p = _panel()
+    btns = p._mask_create_buttons
+
+    p._on_mask_create_clicked("linear")
+    assert p._mask_linear_btn.isChecked(), "Linear did not arm"
+    assert btns["linear"].isChecked(), "the armed tool's button is not lit"
+
+    p._on_mask_create_clicked("radial")
+    assert not btns["linear"].isChecked(), "two tools lit at once"
+    assert btns["radial"].isChecked()
+
+    p._on_mask_create_clicked("radial")
+    assert not p._mask_radial_btn.isChecked(), "clicking a lit tool did not disarm"
+    assert not btns["radial"].isChecked()
+
+    # Driven from the arming buttons, so a hotkey/navigation disarm shows too.
+    p._on_mask_create_clicked("linear")
+    p.disarm_gradient_tools()
+    p._sync_mask_create_buttons()
+    assert not btns["linear"].isChecked(), "button stayed lit after disarm"
+    print("  OK   the armed tool's button stays lit")
+
+
+def test_ai_selection_is_not_a_brush():
+    """It takes a point, so it must not present a brush.
+
+    Stroke routing has to stay on -- the click reaches the host the same way
+    a stamp does -- but a brush circle sized by Brush Size is a lie for a
+    tool that has no radius and cannot act on one.
+    """
+    from rawviewer_ui.gpu_image_view import GpuImageView
+
+    v = GpuImageView()
+    v.set_dodge_burn_mode(True)
+    assert v._brush_cursor_item.isVisible(), "no brush circle for a brush"
+
+    v.set_click_tool_mode(True)
+    assert not v._brush_cursor_item.isVisible(), "AI Selection drew a brush circle"
+    assert v.viewport().cursor().shape() == Qt.CursorShape.CrossCursor
+    assert v._dodge_burn_mode, "the click must still reach the host"
+
+    v.set_click_tool_mode(False)
+    assert v._brush_cursor_item.isVisible(), "the brush circle did not come back"
+    v.set_dodge_burn_mode(False)
+    assert not v._brush_cursor_item.isVisible()
+
+    # And the Brush sliders are not offered for it either.
+    p = _panel()
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
+    p._mask_ai_click_btn.setChecked(True)
+    assert p.mask_layer_mode() == "ai_click"
+    assert not p._mask_brush_wrap.isVisible(), "Brush sliders shown for a click tool"
+    print("  OK   AI Selection is a click tool, not a brush")
+
+
+def test_ai_selection_survives_a_click_that_finds_nothing():
+    """A miss is the case where you most want to click again.
+
+    With no mask yet, the empty-state disarm put the tool away whenever a
+    click added no layer -- so every retry needed re-arming first.
+    """
+    p = _panel()
+    p.set_mask_layer_stack(None)
+    p._mask_ai_click_btn.setChecked(True)
+    assert p.mask_layer_mode() == "ai_click", "AI Selection did not arm"
+
+    # What a click finding nothing leaves behind: still no masks.
+    p._sync_mask_controls_enabled()
+    assert p.mask_layer_mode() == "ai_click", (
+        "AI Selection disarmed itself after a click that found nothing"
+    )
+
+    # A paint brush with no mask genuinely has nothing to act on, so that
+    # one must still be put away.
+    p._mask_ai_click_btn.setChecked(False)
+    p._mask_paint_btn.setChecked(True)
+    p._sync_mask_controls_enabled()
+    assert p.mask_layer_mode() is None, "Paint stayed armed with no mask"
+    print("  OK   a miss leaves AI Selection armed to try again")
 
 
 def test_armed_creation_tool_says_what_it_wants():
@@ -699,7 +786,10 @@ def main() -> int:
     test_select_button_is_named_for_what_it_does()
     test_empty_ai_mask_is_rejected()
     test_paint_creates_its_own_mask_like_every_other_tool()
-    test_create_menu_is_the_one_way_to_start_a_mask()
+    test_create_section_shows_every_way_to_start_a_mask()
+    test_create_button_lights_while_its_tool_is_armed()
+    test_ai_selection_is_not_a_brush()
+    test_ai_selection_survives_a_click_that_finds_nothing()
     test_armed_creation_tool_says_what_it_wants()
     test_masks_tab_is_grouped_by_what_a_control_acts_on()
     test_brush_section_appears_only_with_a_brush_in_hand()

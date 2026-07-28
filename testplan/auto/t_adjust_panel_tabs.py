@@ -90,7 +90,7 @@ def test_mask_controls_survived_the_move():
     p = _panel()
     for attr in (
         "_mask_list",
-        "_mask_create_btn",
+        "_mask_create_buttons",
         "_mask_del_btn",
         "_mask_dup_btn",
         "_mask_paint_btn",

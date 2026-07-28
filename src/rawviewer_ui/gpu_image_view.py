@@ -686,6 +686,9 @@ class GpuImageView(QGraphicsView):
             Qt.TransformationMode.SmoothTransformation
         )
         self._brush_cursor_item.hide()
+        # Set by set_click_tool_mode: AI Selection routes strokes like a brush
+        # but is aimed at a point, so it must not draw a brush circle.
+        self._click_tool_mode = False
         self._dodge_burn_brush_radius = 40.0
         self._dodge_burn_brush_flow = 0.55
         self._brush_cursor_pixmap_r = -1.0
@@ -1957,18 +1960,40 @@ class GpuImageView(QGraphicsView):
         if self._dodge_burn_mode:
             self._dodge_burn_confirmed_on_image = False
             self.set_crop_mode(False)
-            # Hide OS cursor — the circular brush preview is the hit target.
-            self.viewport().setCursor(Qt.CursorShape.BlankCursor)
             self.setAttribute(Qt.WidgetAttribute.WA_TabletTracking, True)
             self.setMouseTracking(True)
-            self._brush_cursor_item.show()
-            self._sync_brush_cursor_at_view_center()
         else:
             # Exiting the context also closes any in-progress hold-stroke.
             self.end_key_paint()
+            self.setMouseTracking(False)
+        self._apply_pointer_cursor()
+
+    def set_click_tool_mode(self, on: bool) -> None:
+        """The armed tool selects by clicking rather than painting.
+
+        Stroke routing stays on -- AI Selection needs the press to reach the
+        host the same way a brush does -- but the pointer must not be a brush
+        circle. That circle is sized by Brush Size, which the tool does not
+        read and cannot act on, so it invites aiming an area at something
+        that only takes a point.
+        """
+        self._click_tool_mode = bool(on)
+        self._apply_pointer_cursor()
+
+    def _apply_pointer_cursor(self) -> None:
+        """Cursor for the armed tool: brush circle, crosshair, or normal."""
+        if not self._dodge_burn_mode:
             self._brush_cursor_item.hide()
             self.viewport().unsetCursor()
-            self.setMouseTracking(False)
+            return
+        if getattr(self, "_click_tool_mode", False):
+            self._brush_cursor_item.hide()
+            self.viewport().setCursor(Qt.CursorShape.CrossCursor)
+            return
+        # Hide OS cursor — the circular brush preview is the hit target.
+        self.viewport().setCursor(Qt.CursorShape.BlankCursor)
+        self._brush_cursor_item.show()
+        self._sync_brush_cursor_at_view_center()
 
     def begin_key_paint(self) -> None:
         """Hold-to-paint: a brush hotkey went down.

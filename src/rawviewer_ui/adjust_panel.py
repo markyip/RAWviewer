@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QAbstractItemView,
+    QGridLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
@@ -4068,28 +4069,42 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
 
-        # One way to start a mask, listing every tool that can start one.
+        # Every way to start a mask, all visible, one press each.
         #
-        # This replaces a "New empty mask" button sitting above six tool
-        # buttons. That arrangement asked the user to know something the app
-        # knows perfectly well: the gradients and the AI tools each create
-        # their own mask, but the brush paints into the selected one, so
-        # "New empty mask" was load-bearing for the brush alone and inert
-        # next to everything else. Naming the tool up front makes "new mask"
-        # one decision instead of two, and the brush stops being a special
-        # case -- picking Brush here is exactly what pressing New empty mask
-        # and then Paint used to do.
-        self._mask_create_btn = QPushButton("Create new mask")
-        self._mask_create_btn.setObjectName("adjust_db_clear_btn")
-        self._mask_create_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._mask_create_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._mask_create_btn.setToolTip("Start a new mask with the tool you pick.")
-        self._mask_create_btn.setMenu(self._build_mask_create_menu())
-        col.addWidget(self._mask_create_btn)
+        # This was briefly a "Create new mask ▾" menu. The menu carried the
+        # right idea -- one place that starts a mask, naming the tool up front
+        # -- but charged two clicks and hid the choices behind a word, and six
+        # buttons fit the panel width perfectly well. The section heading now
+        # does the naming the menu label was doing.
+        #
+        # What it must NOT go back to is the arrangement before that: a "New
+        # empty mask" button above these six. The gradients and the AI tools
+        # each create their own mask while the brush paints into the selected
+        # one, so that button was load-bearing for the brush alone and inert
+        # beside everything else. Brush here starts a NEW mask; growing the
+        # selected one is Add, under "This mask".
+        col.addWidget(self._mask_rule())
+        self._mask_create_head = self._mask_section_head("Create new mask")
+        col.addWidget(self._mask_create_head)
 
-        # What the picked tool is waiting for. A menu item cannot stay lit the
-        # way an armed button did, and "drag on the photo" is not guessable
-        # from a menu that has already closed.
+        self._mask_create_buttons: dict = {}
+        from raw_ai_masks import ai_masks_enabled as _ai_ok_now
+
+        ai_available = _ai_ok_now()
+        create_grid = QGridLayout()
+        create_grid.setSpacing(5)
+        slot = 0
+        for kind, label, _hint, is_ai in self._MASK_CREATE_ITEMS:
+            if is_ai and not ai_available:
+                continue
+            btn = self._make_mask_create_button(kind, label)
+            create_grid.addWidget(btn, slot // 3, slot % 3)
+            self._mask_create_buttons[kind] = btn
+            slot += 1
+        col.addLayout(create_grid)
+
+        # What the picked tool is waiting for. The armed button lights, but
+        # "drag on the photo" is not something a lit button can say.
         self._mask_armed_hint = QLabel("")
         self._mask_armed_hint.setWordWrap(True)
         self._mask_armed_hint.setStyleSheet(
@@ -4312,6 +4327,7 @@ class ImageAdjustPanelWidget(QWidget):
         for _btn in (self._mask_linear_btn, self._mask_radial_btn,
                      self._mask_ai_click_btn):
             _btn.toggled.connect(lambda _on: self._sync_mask_armed_hint())
+            _btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
 
         # ---- This mask: what you can do to the selected one -----------------
         col.addWidget(self._mask_rule())
@@ -4459,7 +4475,16 @@ class ImageAdjustPanelWidget(QWidget):
     def set_mask_layer_stack(self, stack) -> None:
         """Point the section at the host's live MaskLayerStack (or None)."""
         self._mask_stack = stack
+        # Unbinding is a file change or a reset -- put every tool away,
+        # including AI Selection. Distinct from merely having no masks, which
+        # is also what a click that found nothing leaves behind: that must NOT
+        # disarm AI Selection, because trying again is the obvious next move
+        # (see _sync_mask_controls_enabled).
+        if stack is None:
+            self.disarm_mask_layer_tools()
+            self.disarm_gradient_tools()
         self._rebuild_mask_list()
+        self._sync_mask_create_buttons()
 
     def mask_layer_stack(self):
         return self._mask_stack
@@ -4786,30 +4811,81 @@ class ImageAdjustPanelWidget(QWidget):
         ("ai_click", "AI Selection", "Click what you want masked.", True),
     )
 
-    def _build_mask_create_menu(self) -> QMenu:
-        """The create menu, minus anything this edition cannot do.
+    # Longer form for the buttons, which have room for a tooltip.
+    _MASK_CREATE_TIPS = {
+        "brush": "Brush — start a NEW mask and paint its coverage by hand.\n\n"
+                 "To grow the mask you already have, use Add under This mask.",
+        "linear": "Linear gradient — drag across the photo to set the direction "
+                  "and how far the fade runs.\nDrag down from the top for a sky.",
+        "radial": "Radial gradient — drag a box; the ellipse is inscribed in it.\n"
+                  "Full strength at the centre, fading to the edge.",
+        "subject": "Smart Object — one press, no aiming.\n\n"
+                   "Finds whatever stands out and masks it. It returns ONE mask: "
+                   "if two people\nstand together they come back in the same one. "
+                   "To mask just one of them,\nuse AI Selection.",
+        "sky": "Sky — one press.\n\nMasks the sky. If the photo has none, "
+               "nothing is added and it says so.",
+        "ai_click": "AI Selection — click what you want masked.\n\n"
+                    "Not a brush: each click is a point, and more clicks add to "
+                    "the SAME mask.\nUse it when Smart Object picks the wrong "
+                    "thing, or for part of something.\n\n"
+                    "The first click pauses briefly while the photo is analysed.",
+    }
 
-        The AI entries are Plus-only because each downloads a model on first
-        press. Standard omits them rather than greying them out -- the tool
-        buttons behind them are already hidden in Standard for that reason,
-        and a menu item that can never be picked is worse than no item.
+    # The three that stay armed waiting for you to do something on the photo.
+    _MASK_ARMED_KINDS = ("linear", "radial", "ai_click")
+
+    def _make_mask_create_button(self, kind: str, label: str) -> QPushButton:
+        """One creation tool as a button.
+
+        The armed kinds are checkable so the button stays lit while the tool
+        waits for a drag or a click -- the same feedback the tool buttons gave
+        before they moved behind a menu. Clicking a lit one puts it away.
         """
-        from raw_ai_masks import ai_masks_enabled
+        btn = QPushButton(label)
+        btn.setObjectName("adjust_db_btn")
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setToolTip(self._MASK_CREATE_TIPS.get(kind, ""))
+        if kind in self._MASK_ARMED_KINDS:
+            btn.setCheckable(True)
+        btn.clicked.connect(lambda _c=False, k=kind: self._on_mask_create_clicked(k))
+        return btn
 
-        menu = QMenu(self)
-        ai_ok = ai_masks_enabled()
-        added_separator = False
-        self._mask_create_actions = {}
-        for kind, label, _hint, is_ai in self._MASK_CREATE_ITEMS:
-            if is_ai and not ai_ok:
+    def _mask_create_kind_armed(self, kind: str) -> bool:
+        btn = {
+            "linear": getattr(self, "_mask_linear_btn", None),
+            "radial": getattr(self, "_mask_radial_btn", None),
+            "ai_click": getattr(self, "_mask_ai_click_btn", None),
+        }.get(kind)
+        return bool(btn is not None and btn.isChecked())
+
+    def _on_mask_create_clicked(self, kind: str) -> None:
+        """Arm the tool, or put it away if it was already armed."""
+        if kind in self._MASK_ARMED_KINDS and self._mask_create_kind_armed(kind):
+            self.disarm_gradient_tools()
+            self.disarm_mask_layer_tools()
+        else:
+            self._on_mask_create(kind)
+        self._sync_mask_create_buttons()
+
+    def _sync_mask_create_buttons(self) -> None:
+        """Light the button whose tool is armed.
+
+        Driven FROM the arming buttons, not the other way round: those are
+        still the state machine (mutual exclusion, disarm_*, the canvas
+        cursor), so a tool armed by a hotkey or disarmed on navigation lights
+        and unlights these correctly without a second source of truth.
+        """
+        for kind in self._MASK_ARMED_KINDS:
+            btn = getattr(self, "_mask_create_buttons", {}).get(kind)
+            if btn is None:
                 continue
-            if is_ai and not added_separator:
-                menu.addSeparator()
-                added_separator = True
-            action = menu.addAction(label)
-            action.triggered.connect(lambda _c=False, k=kind: self._on_mask_create(k))
-            self._mask_create_actions[kind] = action
-        return menu
+            want = self._mask_create_kind_armed(kind)
+            if btn.isChecked() != want:
+                blocked = btn.blockSignals(True)
+                btn.setChecked(want)
+                btn.blockSignals(blocked)
 
     def _on_mask_create(self, kind: str) -> None:
         """Start a new mask with ``kind``.
@@ -4884,7 +4960,12 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setEnabled(has_layer)
         for slider in self._mask_sliders.values():
             slider.setEnabled(has_layer)
-        if not has_layer and self.mask_layer_mode() is not None:
+        # A paint or erase brush with no mask has nothing to act on. AI
+        # Selection does: it creates its own mask from the click. Disarming it
+        # here meant that a click which found nothing -- which adds no layer --
+        # put the tool away, so the user had to re-arm it before every retry,
+        # and retrying is exactly what "nothing there" calls for.
+        if not has_layer and self.mask_layer_mode() in ("paint", "erase"):
             self.disarm_mask_layer_tools()
 
     def _sync_mask_sliders_from_active(self) -> None:

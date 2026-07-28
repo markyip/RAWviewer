@@ -41,9 +41,10 @@ Masks:   E closes · hold P to paint, X to erase · M shows the mask · scroll =
 
 ## 2. Create a mask
 
-One control starts a mask: **Create new mask ▾**. It names the tool up front.
+The **Create new mask** section holds every way to start one, as six buttons
+— one press each.
 
-| Menu entry | What happens | Needs a model |
+| Button | What happens | Needs a model |
 |---|---|---|
 | **Brush** | Makes an empty mask, arms Add. You paint the coverage | no |
 | **Linear Gradient** | Arms the tool; drag across the photo to place it | no |
@@ -56,14 +57,19 @@ Only **Brush** creates a layer up front. The gradients and the AI tools each
 create their own on completion, so arming one and changing your mind leaves
 nothing behind (`adjust_panel.py:_on_mask_create`).
 
-The three AI entries are **Plus only**. Standard omits them from the menu
-entirely rather than greying them out, because each downloads a model on
-first press (`t_mask_edition_gating.py`).
+The three AI buttons are **Plus only**. Standard omits them entirely rather
+than greying them out, because each downloads a model on first press
+(`t_mask_edition_gating.py`).
 
-**While a tool is armed**, a line under the button says what it is waiting
-for — "Drag across the photo to place the gradient." It clears when the tool
-disarms. This exists because a menu item cannot stay lit the way an armed
-button could.
+**Linear, Radial and AI Selection stay lit while armed** — they wait for you
+to do something on the photo. Clicking a lit one puts it away. A line under
+the buttons also says what the armed tool is waiting for ("Drag across the
+photo to place the gradient"), which a lit button cannot say.
+
+**AI Selection is not a brush.** It takes a point, so the pointer is a
+crosshair rather than a brush circle, and the Brush sliders are not offered
+for it. A click that finds nothing leaves it armed — trying again is the
+obvious next move.
 
 **Smart Object / Sky / AI Selection** put up a progress dialog with a Cancel
 and a 15-second timeout (`main.py:_begin_ai_mask_busy`). The timeout applies

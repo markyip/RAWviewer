@@ -39,11 +39,10 @@ p = P(); p.show(); p._panel_tabs.set_current(1)
 def shown(attr):
     b = getattr(p, attr, None)
     return bool(b is not None and b.parent() is not None and b.isVisible())
-# The creation tools are offered through the Create new mask menu now, so
-# that is where the edition gate has to hold. The buttons behind it stay as
+# The creation tools are the six buttons in the Create new mask section,
+# so that is where the edition gate has to hold. The buttons behind it stay as
 # the arming state machine and are deliberately unparented.
-_menu = p._mask_create_btn.menu()
-_items = [a.text() for a in _menu.actions() if not a.isSeparator()]
+_items = [b.text() for b in p._mask_create_buttons.values()]
 def offered(label):
     return label in _items
 print("@@" + json.dumps({
