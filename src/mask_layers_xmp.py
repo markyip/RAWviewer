@@ -112,11 +112,19 @@ def _all_keys() -> tuple:
 
 def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     """Encode as a JSON list; "" for None/empty (matches serialize_mask's contract)."""
-    if stack is None or stack.is_empty():
+    # Not stack.is_empty(): that reports empty when every layer is merely
+    # HIDDEN, which threw the whole stack away on save. The per-layer loop
+    # below decides what is worth recording, and the `if not entries` at the
+    # end still returns "" when nothing is.
+    if stack is None or not stack.layers:
         return ""
     entries = []
     for layer in stack.layers:
-        if layer.is_empty and not layer.adjustments:
+        # `layer.enabled and` matters: is_empty reports True for a HIDDEN
+        # layer, so testing it alone discarded the mask -- and the coverage
+        # the user had painted into it -- the moment they hid one and saved.
+        # Visibility is a display state, not a reason to throw a mask away.
+        if layer.enabled and layer.is_empty and not layer.adjustments:
             continue
         # A parametric mask stores its geometry, not its pixels: a few dozen
         # bytes instead of a frame-sized PNG, exact at any resolution, and

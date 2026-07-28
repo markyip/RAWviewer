@@ -8,6 +8,7 @@ from typing import Callable, Dict, Sequence
 from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QCursor,
     QDragEnterEvent,
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QAbstractItemView,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -393,6 +395,23 @@ class _LooksRowWidget(QWidget):
         self.remove_clicked.emit()
 
 
+# Width of the mask visibility column. Wide enough to be an easy click
+# target without eating the room the mask's name needs.
+_MASK_EYE_COL_W = 24
+
+
+def _mask_eye_icon(visible: bool) -> QIcon:
+    """The visibility eye for a mask row.
+
+    A hidden mask reads as struck through rather than merely dimmer: dimmer
+    alone is how a *deselected* row already looks, and the two states have to
+    be told apart across a stack of rows at a glance.
+    """
+    if visible:
+        return _qta_icon_safe("fa5.eye", color=theme.INK_MUTED)
+    return _qta_icon_safe("fa5.eye-slash", color=theme.INK_FAINT)
+
+
 class MaskTreeWidget(QTreeWidget):
     """Mask rows, two levels deep: masks, and the components inside a group.
 
@@ -415,13 +434,23 @@ class MaskTreeWidget(QTreeWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHeaderHidden(True)
-        self.setColumnCount(1)
+        # Column 1 is the visibility eye. A second column rather than a check
+        # box on the label: the check box used to double as the enable toggle
+        # and made a single click ambiguous -- "did I select this row or turn
+        # it off?". Giving the toggle its own narrow column keeps the two
+        # actions in two places, so neither can be mistaken for the other.
+        self.setColumnCount(2)
         self.setRootIsDecorated(True)
         self.setIndentation(14)
         self.setExpandsOnDoubleClick(False)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        header = self.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(1, _MASK_EYE_COL_W)
 
     def _top_index(self, item) -> int:
         """Index of item's top-level ancestor, or -1."""
@@ -3747,16 +3776,51 @@ class ImageAdjustPanelWidget(QWidget):
     # (key, label, slider min, slider max, divisor). Temperature/Tint are
     # RELATIVE here (±100 → _apply_wb_tint's ≤1000 relative-scale branch),
     # unlike the global absolute-Kelvin Temperature slider.
-    _MASK_SLIDER_SPECS = (
-        ("Exposure2012", "Exposure", -300, 300, 100.0),
-        ("Contrast2012", "Contrast", -100, 100, 1.0),
-        ("Temperature", "Temp (rel)", -100, 100, 1.0),
-        ("Tint", "Tint", -100, 100, 1.0),
-        ("Saturation", "Saturation", -100, 100, 1.0),
-        ("Vibrance", "Vibrance", -100, 100, 1.0),
-        ("Dehaze", "Dehaze", -100, 100, 1.0),
-        ("Sharpness", "Sharpness", 0, 150, 1.0),
-        ("Clarity2012", "Clarity", -100, 100, 1.0),
+    # Grouped the way the Global tab groups the same controls, and in the
+    # same order, so "the exposure slider" is in the same place in both.
+    # Names match Global exactly (Light / Color / Detail) -- a mask applies
+    # the same adjustment to a region, so calling it something else here
+    # would imply it does something else.
+    #
+    # This is every adjustment raw_mask_layers can actually apply: the list
+    # is SUPPORTED_ADJUSTMENT_KEYS. Highlights/Shadows/Whites/Blacks are
+    # absent because they live in the global PV2012 tone LUT and have no
+    # per-region implementation, and Tone Curve is excluded on cost (see
+    # the raw_mask_layers docstring).
+    _MASK_SLIDER_GROUPS = (
+        (
+            "Light",
+            (
+                ("Exposure2012", "Exposure", -300, 300, 100.0),
+                ("Contrast2012", "Contrast", -100, 100, 1.0),
+            ),
+        ),
+        (
+            "Color",
+            (
+                ("Temperature", "Temp (rel)", -100, 100, 1.0),
+                ("Tint", "Tint", -100, 100, 1.0),
+                ("Saturation", "Saturation", -100, 100, 1.0),
+                ("Vibrance", "Vibrance", -100, 100, 1.0),
+            ),
+        ),
+        (
+            "Detail",
+            (
+                ("Sharpness", "Sharpness", 0, 150, 1.0),
+                ("Clarity2012", "Clarity", -100, 100, 1.0),
+                ("Dehaze", "Dehaze", -100, 100, 1.0),
+                # Already applied per layer by _apply_layer_adjustments and
+                # already padded as a spatial op -- it only ever lacked a
+                # slider. Fringing is a local defect, so a local fix for it
+                # is arguably more use here than globally.
+                ("Defringe", "Defringe", 0, 100, 1.0),
+            ),
+        ),
+    )
+
+    _MASK_SLIDER_SPECS = tuple(
+        spec for _title, specs in _MASK_SLIDER_GROUPS for spec in specs
     )
 
     @staticmethod
@@ -3820,6 +3884,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_block = False
         self._mask_sliders: Dict[str, AdjustSlider] = {}
         self._mask_value_labels: Dict[str, QLabel] = {}
+        self._mask_group_labels: list[QLabel] = []
 
         container = QWidget()
         col = QVBoxLayout(container)
@@ -3860,6 +3925,7 @@ class ImageAdjustPanelWidget(QWidget):
             lambda *_: self._on_mask_row_changed(self.active_mask_index() or -1)
         )
         self._mask_list.itemChanged.connect(self._on_mask_item_changed)
+        self._mask_list.itemClicked.connect(self._on_mask_row_clicked)
         self._mask_list.group_requested.connect(self.mask_group_requested.emit)
         self._mask_list.reorder_requested.connect(self.mask_reorder_requested.emit)
         self._mask_list.ungroup_requested.connect(self.mask_ungroup_requested.emit)
@@ -4154,32 +4220,44 @@ class ImageAdjustPanelWidget(QWidget):
         params_col.addWidget(self._mask_rule())
         params_col.addWidget(self._mask_section_head("Adjust", "inside the mask"))
 
-        for key, label, lo, hi, div in self._MASK_SLIDER_SPECS:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            lbl = QLabel(label)
-            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
-            lbl.setMinimumWidth(78)
-            row.addWidget(lbl)
-            slider = AdjustSlider(Qt.Orientation.Horizontal)
-            slider.setRange(lo, hi)
-            slider.setValue(0)
-            slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            slider.valueChanged.connect(
-                lambda _v, k=key: self._on_mask_slider_changed(k)
+        for group_i, (group_title, specs) in enumerate(self._MASK_SLIDER_GROUPS):
+            group_lbl = QLabel(group_title.upper())
+            group_lbl.setStyleSheet(
+                f"color: {theme.INK_MUTED}; font-size: 9px; font-weight: 700; "
+                "letter-spacing: 1.2px;"
             )
-            slider.sliderReleased.connect(self._on_slider_released)
-            row.addWidget(slider, 1)
-            val = AdjustValueLabel()
-            val.setProperty("class", "adjust_slider_value")
-            val.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
-            val.setFixedWidth(52)
-            val.setText("0")
-            val.clicked.connect(lambda k=key: self._reset_mask_slider(k))
-            row.addWidget(val)
-            self._mask_sliders[key] = slider
-            self._mask_value_labels[key] = val
-            params_col.addLayout(row)
+            # A little air above each heading except the first, which already
+            # sits under the "Adjust" rule.
+            group_lbl.setContentsMargins(0, 0 if group_i == 0 else 6, 0, 0)
+            params_col.addWidget(group_lbl)
+            self._mask_group_labels.append(group_lbl)
+
+            for key, label, lo, hi, div in specs:
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                lbl = QLabel(label)
+                lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+                lbl.setMinimumWidth(78)
+                row.addWidget(lbl)
+                slider = AdjustSlider(Qt.Orientation.Horizontal)
+                slider.setRange(lo, hi)
+                slider.setValue(0)
+                slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                slider.valueChanged.connect(
+                    lambda _v, k=key: self._on_mask_slider_changed(k)
+                )
+                slider.sliderReleased.connect(self._on_slider_released)
+                row.addWidget(slider, 1)
+                val = AdjustValueLabel()
+                val.setProperty("class", "adjust_slider_value")
+                val.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+                val.setFixedWidth(52)
+                val.setText("0")
+                val.clicked.connect(lambda k=key: self._reset_mask_slider(k))
+                row.addWidget(val)
+                self._mask_sliders[key] = slider
+                self._mask_value_labels[key] = val
+                params_col.addLayout(row)
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "
@@ -4313,6 +4391,7 @@ class ImageAdjustPanelWidget(QWidget):
                     & ~Qt.ItemFlag.ItemIsDropEnabled
                     | Qt.ItemFlag.ItemIsDragEnabled
                 )
+                self._apply_mask_row_visibility(item, layer)
                 if getattr(layer, "is_group", False):
                     # Drops land ON a mask to group with it, so a group must
                     # accept them; a component row must not, since two-level
@@ -4331,6 +4410,7 @@ class ImageAdjustPanelWidget(QWidget):
                             & ~Qt.ItemFlag.ItemIsUserCheckable
                             & ~Qt.ItemFlag.ItemIsDropEnabled
                         )
+                        self._apply_mask_row_visibility(child, comp)
                         item.addChild(child)
                 else:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
@@ -4393,6 +4473,55 @@ class ImageAdjustPanelWidget(QWidget):
         target.sliderReleased.emit()
 
     _MASK_ICON_BOX = 34
+
+    @staticmethod
+    def _apply_mask_row_visibility(item, layer) -> None:
+        """Draw one row in its visible/hidden state."""
+        visible = bool(getattr(layer, "enabled", True))
+        item.setIcon(1, _mask_eye_icon(visible))
+        item.setToolTip(
+            1,
+            "Hide this mask — its adjustments stop applying"
+            if visible
+            else "Show this mask again",
+        )
+        # The name greys out too, so the state is readable without hunting
+        # for which of a dozen small icons is the crossed-out one.
+        item.setForeground(0, QBrush(QColor(theme.INK if visible else theme.INK_FAINT)))
+
+    def _on_mask_row_clicked(self, item, column: int) -> None:
+        """A click in the eye column toggles that row; column 0 selects."""
+        if self._mask_block or column != 1 or item is None:
+            return
+        stack = self._mask_stack
+        if stack is None:
+            return
+        row = self._mask_list._top_index(item)
+        if not (0 <= row < len(stack.layers)):
+            return
+        layer = stack.layers[row]
+        if item.parent() is not None:
+            # A component row: hide the part, not the whole group.
+            idx = item.parent().indexOfChild(item)
+            if not (0 <= idx < len(layer.components)):
+                return
+            target = layer.components[idx]
+        else:
+            target = layer
+        target.enabled = not bool(getattr(target, "enabled", True))
+        target.touch()
+        if target is not layer:
+            # A group's own version gates its composite cache, and a
+            # component edit does not move it on its own.
+            layer.touch()
+        self._mask_block = True
+        try:
+            self._apply_mask_row_visibility(item, target)
+        finally:
+            self._mask_block = False
+        self._emit_preview_and_save()
+        # Hiding a mask removes its overlay tint as well as its effect.
+        self.mask_coverage_changed.emit()
 
     def _mask_row_icon(self, layer):
         """The mask's actual shape, white on black, for its row.
@@ -4528,8 +4657,8 @@ class ImageAdjustPanelWidget(QWidget):
         self.mask_selection_changed.emit()
 
     def _on_mask_item_changed(self, item, column: int = 0) -> None:
-        """Rename in place. Enable/disable went away with the check box."""
-        if self._mask_block:
+        """Rename in place. Visibility lives in column 1, not a check box."""
+        if self._mask_block or column != 0:
             return
         stack = self._mask_stack
         if stack is None or item is None:
