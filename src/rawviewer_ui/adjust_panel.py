@@ -436,14 +436,23 @@ def _mask_eye_icon(visible: bool, box: int) -> QIcon:
         else _qta_icon_safe("fa5.eye-slash", color=theme.INK_FAINT)
     )
     box = max(int(box), _MASK_EYE_PX)
-    canvas = QPixmap(box, box)
-    canvas.fill(Qt.GlobalColor.transparent)
     glyph = icon.pixmap(_MASK_EYE_PX, _MASK_EYE_PX)
+    # Device pixel ratio, or the eye lands high and left of centre on every
+    # retina screen: pixmap(15, 15) hands back a 30x30 buffer with dpr 2, so
+    # width() is 30 while the space it occupies is still 15. Centring on the
+    # raw width offsets by half the difference and the glyph creeps toward
+    # the top-left corner of its cell.
+    dpr = float(glyph.devicePixelRatio() or 1.0) if not glyph.isNull() else 1.0
+    canvas = QPixmap(int(round(box * dpr)), int(round(box * dpr)))
+    canvas.setDevicePixelRatio(dpr)
+    canvas.fill(Qt.GlobalColor.transparent)
     if not glyph.isNull():
+        # The canvas carries the ratio, so the painter works in logical units
+        # and these are the sizes the glyph actually occupies.
+        gw = glyph.width() / dpr
+        gh = glyph.height() / dpr
         painter = QPainter(canvas)
-        painter.drawPixmap(
-            (box - glyph.width()) // 2, (box - glyph.height()) // 2, glyph
-        )
+        painter.drawPixmap(int(round((box - gw) / 2.0)), int(round((box - gh) / 2.0)), glyph)
         painter.end()
     return QIcon(canvas)
 
@@ -4729,8 +4738,14 @@ class ImageAdjustPanelWidget(QWidget):
 
         A row that says "Mask 3" tells you nothing about which region it
         covers; the shape is recognisable at a glance, the way a layer
-        thumbnail is in any editor. Rendered from the layer's own alpha (or
-        generated, for a gradient) so it is the mask, not an illustration.
+        thumbnail is in any editor. Rendered from the layer's own coverage
+        (or generated, for a gradient) so it is the mask, not an illustration.
+
+        That means the INVERTED coverage for an inverted layer. Drawing the
+        raw alpha showed the painted region -- which is precisely the part an
+        inverted mask does not cover -- so the thumbnail claimed the opposite
+        of what the mask did, and the two rows of a mask and its inverted
+        copy were indistinguishable.
 
         Aspect is preserved inside a square box: a portrait mask drawn as a
         square would misreport where its coverage sits.
@@ -4750,12 +4765,18 @@ class ImageAdjustPanelWidget(QWidget):
             cache = getattr(self, "_mask_icon_cache", None)
             if cache is None:
                 cache = self._mask_icon_cache = {}
-            key = (id(layer), int(getattr(layer, "version", 0)), th, tw)
+            key = (
+                id(layer),
+                int(getattr(layer, "version", 0)),
+                bool(getattr(layer, "invert", False)),
+                th,
+                tw,
+            )
             hit = cache.get(key)
             if hit is not None:
                 return hit
 
-            alpha = layer.alpha_at(th, tw)
+            alpha = layer.effective_alpha_at(th, tw)
             grey = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
             buf = np.ascontiguousarray((grey * 255.0).astype(np.uint8))
             img = QImage(buf.data, tw, th, buf.strides[0], QImage.Format.Format_Grayscale8)
@@ -5125,6 +5146,11 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_block = True
             try:
                 item.setText(0, self._mask_row_label(layer, idx))
+                # And the thumbnail, which now draws the effective coverage:
+                # leaving it would show the old shape beside the new name.
+                icon = self._mask_row_icon(layer)
+                if icon is not None:
+                    item.setIcon(0, icon)
             finally:
                 self._mask_block = False
         self._emit_preview_and_save()

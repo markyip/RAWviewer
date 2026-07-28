@@ -189,6 +189,81 @@ def main() -> int:
         f"{tree.columnWidth(0)} vs {_MASK_EYE_COL_W}",
     )
 
+    # --- the eye sits in the middle of its cell, on any screen ---
+    from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap
+
+    import rawviewer_ui.adjust_panel as _ap
+
+    def _centres(dpr):
+        """Where the drawn glyph lands inside the returned canvas."""
+        def fake(_name, color):
+            side = int(15 * dpr)
+            pm = QPixmap(side, side)
+            pm.setDevicePixelRatio(float(dpr))
+            pm.fill(Qt.GlobalColor.transparent)
+            pnt = QPainter(pm)
+            pnt.fillRect(0, 0, side, side, QColor("white"))
+            pnt.end()
+            return QIcon(pm)
+
+        real = _ap._qta_icon_safe
+        _ap._qta_icon_safe = fake
+        try:
+            img = _ap._mask_eye_icon(True, 34).pixmap(34, 34).toImage()
+        finally:
+            _ap._qta_icon_safe = real
+        pts = [
+            (x, y)
+            for y in range(img.height())
+            for x in range(img.width())
+            if img.pixelColor(x, y).alpha() > 0
+        ]
+        xs = [q[0] for q in pts]
+        ys = [q[1] for q in pts]
+        return (min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0, img.width()
+
+    for dpr in (1, 2):
+        cx, cy, side = _centres(dpr)
+        mid = side / 2.0
+        check(
+            f"the eye is centred at dpr {dpr}",
+            abs(cx - mid) <= 1.0 and abs(cy - mid) <= 1.0,
+            f"glyph centre ({cx:.1f}, {cy:.1f}) vs box centre {mid:.1f} -- at "
+            "dpr 2 a retina icon reports twice its logical size, so centring "
+            "on the raw width pushes it toward the top-left corner",
+        )
+
+    # --- an inverted mask's thumbnail shows what it actually covers ---
+    inv = _layer(adj={})
+    plain_icon = p._mask_row_icon(inv)
+    inv.invert = True
+    inv.touch()
+    inverted_icon = p._mask_row_icon(inv)
+
+    def _shape(icon):
+        im = icon.pixmap(34, 34).toImage()
+        return [
+            im.pixelColor(x, y).value()
+            for y in range(0, im.height(), 4)
+            for x in range(0, im.width(), 4)
+        ]
+
+    check(
+        "inverting redraws the row thumbnail",
+        _shape(plain_icon) != _shape(inverted_icon),
+        "drawing the raw alpha showed the painted region -- exactly the part "
+        "an inverted mask does NOT cover -- so a mask and its inverted copy "
+        "were indistinguishable in the list",
+    )
+    lit_plain = sum(1 for v in _shape(plain_icon) if v > 127)
+    lit_inv = sum(1 for v in _shape(inverted_icon) if v > 127)
+    check(
+        "and shows the complement of it",
+        lit_plain + lit_inv > 0 and abs((lit_plain + lit_inv) - len(_shape(plain_icon))) <= 2,
+        f"{lit_plain} lit normally, {lit_inv} inverted, of "
+        f"{len(_shape(plain_icon))} sampled",
+    )
+
     # --- the overlay follows the tool, and does not follow you off the page ---
     p.set_mask_layer_stack(MaskLayerStack(layers=[_layer()]))
     p._set_mask_overlay_visible(False)
