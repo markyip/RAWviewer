@@ -23598,7 +23598,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # overlay's dodge tint).
         self._sync_mask_layer_overlay()
 
-    def _sync_mask_layer_overlay(self) -> None:
+    # Overlay buffer cap while a stroke is in flight. Full mask resolution is
+    # ~186ms at a 2200x3300 base and cannot keep up with a brush; 1280 is
+    # ~25ms and is around display resolution, so the difference only shows
+    # when zoomed in -- which is not what you are doing mid-stroke.
+    _MASK_OVERLAY_STROKE_MAX_DIM = 1280
+
+    def _sync_mask_layer_overlay(self, *, max_dim: int | None = None) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
         gv = getattr(self, "gpu_view", None)
         if panel is None or gv is None or not hasattr(gv, "update_dodge_burn_mask"):
@@ -23617,7 +23623,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # was there and invisible.
         try:
             if hasattr(gv, "update_mask_layer_overlay"):
-                gv.update_mask_layer_overlay(layers, panel.active_mask_index())
+                gv.update_mask_layer_overlay(
+                    layers, panel.active_mask_index(), max_dim=max_dim
+                )
         except Exception:
             pass
 
@@ -23657,10 +23665,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _on_mask_layer_stroke(self, pt, pressure: float, is_end: bool) -> None:
         """Brush stroke routed to the active mask layer (paint or erase).
 
-        Simpler than the dodge/burn stroke path (no per-stamp display patch
-        blit): stamps mutate the layer alpha, and the normal preview worker
-        re-renders on a ~120ms throttle -- acceptable for v1, revisit if
-        painting feels laggy on large bases.
+        Stamps mutate the layer alpha and refresh the coverage overlay; the
+        photo itself is re-rendered once, when the stroke ends. Mid-stroke
+        the user is aiming coverage, and the overlay is what shows coverage
+        -- rendering the adjustment underneath it eight times a second was
+        answering a question nobody was asking yet, at roughly a second and
+        a half a go.
+
+        Consequence worth knowing: with the overlay switched off (M), a
+        stroke shows nothing until you release. Arming Add or Erase turns
+        the overlay on for exactly this reason.
         """
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
@@ -23722,17 +23736,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 last = float(getattr(self, "_mask_layer_overlay_last", 0.0) or 0.0)
                 if is_end or (now - last) >= 0.05:
                     self._mask_layer_overlay_last = now
-                    self._sync_mask_layer_overlay()
+                    # Capped while the brush is down; the stroke-end sync
+                    # rebuilds it at full resolution so what you are left
+                    # looking at is sharp.
+                    self._sync_mask_layer_overlay(
+                        max_dim=None if is_end
+                        else self._MASK_OVERLAY_STROKE_MAX_DIM
+                    )
 
-            # Throttled pipeline preview; settle + persist when the stroke ends.
+            # Nothing else mid-stroke. What you are doing while the brush is
+            # down is aiming coverage, and the overlay above already shows
+            # that -- at mask resolution, which is cheap.
+            #
+            # This used to fire a full pipeline preview every 120ms. Masks
+            # composite inside the pre_tone cache stage and denoise sits after
+            # them, so every stamp invalidated WB, exposure, dodge/burn, heal
+            # and denoise together: ~1.36s of work at a 2200x3300 base, 454ms
+            # of it chroma denoise alone, requested eight times a second. The
+            # renders could not keep up with the brush, which is what made
+            # painting lag on large images.
+            #
+            # The edit still renders, once, when the stroke ends.
             if is_end:
                 self._on_adjust_panel_editing_finished(panel.get_adjustments())
-            else:
-                now = time.perf_counter()
-                last = float(getattr(self, "_mask_layer_preview_last", 0.0) or 0.0)
-                if (now - last) >= 0.12:
-                    self._mask_layer_preview_last = now
-                    self._apply_adjust_panel_preview()
         except Exception:
             import logging
 

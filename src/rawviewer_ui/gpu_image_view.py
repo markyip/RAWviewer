@@ -923,7 +923,7 @@ class GpuImageView(QGraphicsView):
         self._mask_item.setPixmap(QPixmap())
         self._mask_overlay_shape = None
 
-    def update_mask_layer_overlay(self, layers, active_index) -> None:
+    def update_mask_layer_overlay(self, layers, active_index, max_dim=None) -> None:
         """Colour overlay for the mask stack, whatever tool made each mask.
 
         One overlay for every kind of mask -- brush, linear, radial, subject,
@@ -974,6 +974,19 @@ class GpuImageView(QGraphicsView):
             lh, lw = layer.alpha.shape[:2]
             if lh * lw > h * w:
                 h, w = lh, lw
+
+        # ``max_dim`` caps the buffer while a stroke is in flight. Building it
+        # at the full mask resolution costs ~186ms at a 2200x3300 base, which
+        # no longer keeps up with a brush once it is the only per-stamp work
+        # left; at 1280 it is ~25ms. Only during a stroke, because a capped
+        # overlay is visibly soft when scaled up at 100% zoom -- and that is
+        # exactly when the pointer is still and the edges are worth seeing.
+        if max_dim:
+            longest = max(h, w)
+            if longest > int(max_dim):
+                scale = float(max_dim) / float(longest)
+                h = max(1, int(round(h * scale)))
+                w = max(1, int(round(w * scale)))
 
         rgba = np.zeros((h, w, 4), dtype=np.uint8)
         # Selected last so it wins where masks overlap -- you are looking at
