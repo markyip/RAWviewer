@@ -977,8 +977,24 @@ class ExportProgressDialog(QDialog):
 
     def set_progress(self, percent: int) -> None:
         percent = max(0, min(100, int(percent)))
+        self._bar.setRange(0, 100)
         self._bar.setValue(percent)
         self._percent_label.setText(f"{percent}%")
+        self._percent_label.setVisible(True)
+
+    def set_indeterminate(self, on: bool = True) -> None:
+        """Marquee instead of a percentage.
+
+        For work whose length is not knowable in advance -- a segmentation
+        model on an image of unknown size. A determinate bar would have to
+        invent the number, and an invented percentage that stalls at 80% is
+        worse than an honest one that only says "still working".
+        """
+        if on:
+            self._bar.setRange(0, 0)
+            self._percent_label.setVisible(False)
+        else:
+            self.set_progress(0)
 
     def showEvent(self, event):
         super().showEvent(event)

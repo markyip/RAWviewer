@@ -121,11 +121,24 @@ def test_export_button_is_not_on_the_masks_tab():
     print("  OK   Export lives on Global only")
 
 
-def test_duplicate_button_is_gone():
+def test_duplicate_sits_with_the_other_per_mask_actions():
+    """Duplicate is back: re-aiming a copy beats painting a second from scratch.
+
+    It was removed on the grounds that copying coverage AND adjustments
+    together is rarely wanted -- true of the copy, but not of the reason to
+    make one, since both useful cases start from it either way.
+    """
     p = _panel()
-    assert getattr(p, "_mask_dup_btn", None) is None, "Duplicate button came back"
+    assert getattr(p, "_mask_dup_btn", None) is not None, "Duplicate button missing"
     assert getattr(p, "_mask_del_btn", None) is not None, "Delete button missing"
-    print("  OK   Duplicate removed, Delete kept")
+    assert not p._mask_dup_btn.isEnabled(), "Duplicate live with no mask selected"
+    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
+    assert p._mask_dup_btn.isEnabled(), "Duplicate dead with a mask selected"
+    fired = []
+    p.mask_duplicate_requested.connect(fired.append)
+    p._mask_dup_btn.click()
+    assert fired == [0], f"Duplicate did not ask the host: {fired}"
+    print("  OK   Duplicate acts on the selected mask")
 
 
 def test_rows_are_selectable_not_checkable():
@@ -640,7 +653,7 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
         p._mask_paint_btn, p._mask_linear_btn, p._mask_radial_btn,
         p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
     )}
-    assert labels == {"Paint (P)", "Linear", "Radial", "Smart Object", "Sky",
+    assert labels == {"Add (P)", "Linear", "Radial", "Smart Object", "Sky",
                       "AI Selection"}, labels
     print("  OK   the tab is grouped by what each control acts on")
 
@@ -681,7 +694,7 @@ def main() -> int:
     test_disabled_inverted_layer_applies_nothing()
     test_parameters_hidden_until_a_mask_exists()
     test_export_button_is_not_on_the_masks_tab()
-    test_duplicate_button_is_gone()
+    test_duplicate_sits_with_the_other_per_mask_actions()
     test_rows_are_selectable_not_checkable()
     test_select_button_is_named_for_what_it_does()
     test_empty_ai_mask_is_rejected()

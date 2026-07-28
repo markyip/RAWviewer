@@ -2084,7 +2084,14 @@ class _AdjustMaskLoadWorker(QRunnable):
 
 
 class _AIMaskSignals(QObject):
-    # generation, file_path, kind, alpha|None
+    # token, file_path, kind, alpha|None
+    #
+    # The first field used to be _adjust_preview_gen and was never read: the
+    # handler documents that staleness is keyed on the FILE, because that
+    # counter bumps on every slider tick and would have thrown away a good
+    # mask for an unrelated nudge. It now carries the request token, which
+    # cancel and the timeout move, so an abandoned run's late result can be
+    # told apart from the current one's.
     finished = pyqtSignal(int, str, str, object)
 
 
@@ -2097,9 +2104,9 @@ class _AIMaskWorker(QRunnable):
     feel immediate (see MainWindow._on_mask_ai_click).
     """
 
-    def __init__(self, generation: int, file_path: str, kind: str, rgb, target_hw, signals):
+    def __init__(self, token: int, file_path: str, kind: str, rgb, target_hw, signals):
         super().__init__()
-        self.generation = generation
+        self.token = token
         self.file_path = file_path
         self.kind = kind
         self.rgb = rgb
@@ -2126,7 +2133,7 @@ class _AIMaskWorker(QRunnable):
                 "[AIMASK] %s worker failed", self.kind, exc_info=True
             )
             alpha = None
-        self.signals.finished.emit(self.generation, self.file_path, self.kind, alpha)
+        self.signals.finished.emit(self.token, self.file_path, self.kind, alpha)
 
 
 class _AdjustPreviewSignals(QObject):
@@ -2306,6 +2313,21 @@ _AI_MASK_MIN_COVERAGE = 0.002
 # Layer names match the buttons that make them -- a row called "AI Subject"
 # under a button called "Smart Object" is a puzzle the user has to solve.
 _AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
+
+# How long to wait for a model that is already on disk before giving up.
+#
+# Applied to INFERENCE ONLY. First use downloads 214 MB, which cannot fit in
+# any sane timeout, so the wait is left open when the weights are not yet
+# there -- a timeout that made first use impossible would be worse than the
+# hang it was meant to fix. The download reports itself in the dialog, so an
+# open-ended wait there is at least an explained one.
+_AI_MASK_TIMEOUT_MS = 15_000
+
+_AI_MASK_BUSY_TEXT = {
+    "subject": "Finding the subject…",
+    "sky": "Finding the sky…",
+    "sam_encode": "Analysing the photo for click-to-select…",
+}
 
 # Mean absolute alpha difference below which two masks are "the same mask".
 # Generous enough to survive the sidecar's 8-bit round trip (1/255 = 0.004),
@@ -23006,6 +23028,32 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             invert=src.invert,
             blend=src.blend,
         )
+        # kind/params carry a gradient's geometry, which is its source of
+        # truth -- without them a duplicated Linear came back as a plain
+        # brush holding one baked alpha, no longer re-draggable and no longer
+        # resolution-independent. components does the same for a group: the
+        # copy would flatten to the group's own (unused) alpha, which is
+        # empty, so duplicating a group produced a mask covering nothing.
+        copy.kind = src.kind
+        copy.params = dict(src.params or {})
+        copy.source = src.source
+        if getattr(src, "is_group", False):
+            copy.components = [
+                MaskLayer(
+                    c.alpha.copy(),
+                    name=c.name,
+                    enabled=c.enabled,
+                    invert=c.invert,
+                    blend=c.blend,
+                )
+                for c in src.components
+            ]
+            for dst_c, src_c in zip(copy.components, src.components):
+                dst_c.kind = src_c.kind
+                dst_c.params = dict(src_c.params or {})
+                dst_c.source = src_c.source
+                dst_c.touch()
+        copy.touch()
         stack.layers.insert(index + 1, copy)
         panel.set_mask_layer_stack(stack)
         panel.select_mask_index(index + 1)
@@ -23169,7 +23217,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._show_status("AI masks unavailable (onnxruntime missing).", 4000)
             return
 
-        if not raw_ai_masks.op_is_ready(kind):
+        ready = bool(raw_ai_masks.op_is_ready(kind))
+        if not ready:
             # First use on macOS: the weights download on demand, exactly
             # like the denoise models. Say so rather than looking hung.
             self._show_status(f"Downloading {kind} model (first use)...", 0)
@@ -23177,12 +23226,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._ai_mask_busy = True
         self._set_ai_mask_buttons_enabled(False)
         self._show_status(f"Finding {kind}...", 0)
+        self._begin_ai_mask_busy(kind, downloading=not ready)
 
         signals = _AIMaskSignals()
         signals.finished.connect(self._on_ai_mask_finished)
         self._ai_mask_signals = signals  # keep alive
         worker = _AIMaskWorker(
-            int(getattr(self, "_adjust_preview_gen", 0) or 0),
+            self._ai_mask_token,
             str(getattr(self, "current_file_path", "") or ""),
             kind,
             rgb,
@@ -23190,6 +23240,80 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             signals,
         )
         _get_bg_thread_pool().start(worker)
+
+    def _begin_ai_mask_busy(self, kind: str, *, downloading: bool) -> None:
+        """Put a dialog up for the wait, and arm the timeout.
+
+        These runs take long enough that the status-bar line alone read as a
+        hang: nothing moves, the button is disabled, and there is no way to
+        tell a slow model from a stuck one. The dialog says what is happening,
+        can be cancelled, and gives up on its own.
+
+        ``_ai_mask_token`` is what makes cancel and timeout real. A QRunnable
+        already inside the model cannot be stopped, so abandoning a request
+        means agreeing to ignore its result: the token moves, and the late
+        result finds it has been superseded.
+        """
+        self._ai_mask_token = int(getattr(self, "_ai_mask_token", 0)) + 1
+        self._end_ai_mask_busy()  # never stack two
+
+        try:
+            from rawviewer_app.widgets import ExportProgressDialog
+        except Exception:
+            return
+
+        message = _AI_MASK_BUSY_TEXT.get(kind, "Working…")
+        if downloading:
+            message = (
+                f"Downloading the {kind} model (first use, about 214 MB).\n"
+                "This happens once."
+            )
+        dlg = ExportProgressDialog(self, title="AI mask", message=message)
+        dlg.set_indeterminate(True)
+        dlg.canceled.connect(self._on_ai_mask_cancelled)
+        self._ai_mask_dialog = dlg
+        dlg.show()
+
+        if not downloading:
+            token = self._ai_mask_token
+            QTimer.singleShot(
+                _AI_MASK_TIMEOUT_MS, lambda: self._on_ai_mask_timeout(token, kind)
+            )
+
+    def _end_ai_mask_busy(self) -> None:
+        dlg = getattr(self, "_ai_mask_dialog", None)
+        self._ai_mask_dialog = None
+        if dlg is not None:
+            try:
+                dlg.close()
+                dlg.deleteLater()
+            except Exception:
+                pass
+
+    def _on_ai_mask_cancelled(self) -> None:
+        self._ai_mask_token = int(getattr(self, "_ai_mask_token", 0)) + 1
+        self._ai_mask_busy = False
+        self._set_ai_mask_buttons_enabled(True)
+        self._end_ai_mask_busy()
+        self._show_status("AI mask cancelled.", 3000)
+
+    def _on_ai_mask_timeout(self, token: int, kind: str) -> None:
+        # Fires unconditionally 15s later; only the run it was armed for is
+        # still interesting, and only if that run has not already finished.
+        if token != int(getattr(self, "_ai_mask_token", 0)):
+            return
+        if not getattr(self, "_ai_mask_busy", False):
+            return
+        self._ai_mask_token = token + 1
+        self._ai_mask_busy = False
+        self._set_ai_mask_buttons_enabled(True)
+        self._end_ai_mask_busy()
+        self._show_status(
+            f"Gave up waiting for the {kind} model after "
+            f"{_AI_MASK_TIMEOUT_MS // 1000}s. Try again, or use a smaller "
+            "preview size.",
+            6000,
+        )
 
     def _set_ai_mask_buttons_enabled(self, enabled: bool) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -23200,9 +23324,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if btn is not None:
                 btn.setEnabled(enabled)
 
-    def _on_ai_mask_finished(self, generation: int, file_path: str, kind: str, result) -> None:
+    def _on_ai_mask_finished(self, token: int, file_path: str, kind: str, result) -> None:
+        # Cancelled or timed out: the run was abandoned and its dialog is
+        # already gone. Taking the result now would drop a mask on the user
+        # long after they told the app to stop.
+        if token != int(getattr(self, "_ai_mask_token", 0)):
+            return
         self._ai_mask_busy = False
         self._set_ai_mask_buttons_enabled(True)
+        self._end_ai_mask_busy()
 
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
@@ -23372,12 +23502,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._ai_mask_busy = True
             self._set_ai_mask_buttons_enabled(False)
             self._show_status("Analysing image for click-to-select...", 0)
+            try:
+                import raw_ai_masks as _ram
+
+                encoder_ready = bool(_ram.op_is_ready("click"))
+            except Exception:
+                encoder_ready = True
+            self._begin_ai_mask_busy("sam_encode", downloading=not encoder_ready)
             signals = _AIMaskSignals()
             signals.finished.connect(self._on_ai_mask_finished)
             self._ai_mask_signals = signals
             _get_bg_thread_pool().start(
                 _AIMaskWorker(
-                    int(getattr(self, "_adjust_preview_gen", 0) or 0),
+                    self._ai_mask_token,
                     current,
                     "sam_encode",
                     rgb,

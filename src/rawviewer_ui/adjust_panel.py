@@ -3938,6 +3938,25 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(hint)
         return wrap
 
+    # Shown after a mask's name when it is inverted. An inverted mask covers
+    # everything OUTSIDE what its thumbnail shows, so the row and the
+    # thumbnail otherwise contradict each other with nothing to say which is
+    # right -- and the overlay only settles it while it happens to be on.
+    _INVERTED_SUFFIX = " (inverted)"
+
+    @classmethod
+    def _mask_row_label(cls, layer, index: int) -> str:
+        base = layer.name or f"Mask {index + 1}"
+        return base + (cls._INVERTED_SUFFIX if getattr(layer, "invert", False) else "")
+
+    @classmethod
+    def _strip_inverted_suffix(cls, text: str) -> str:
+        """Renaming edits the row text, suffix and all -- do not store it."""
+        out = str(text)
+        while out.endswith(cls._INVERTED_SUFFIX):
+            out = out[: -len(cls._INVERTED_SUFFIX)]
+        return out.strip()
+
     @staticmethod
     def _component_label(comp) -> str:
         """Row text for a component: its name, and how it combines.
@@ -4045,12 +4064,25 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_armed_hint.setVisible(False)
         col.addWidget(self._mask_armed_hint)
 
-        # Delete is created here but belongs to "This mask" below -- it acts on
-        # the selected mask, not on the set of them.
-        # Duplicate removed: duplicating a mask copies coverage AND its
-        # adjustments, which is almost never what is wanted -- the two useful
-        # cases (same region, different adjustment / same adjustment, different
-        # region) both need editing afterwards anyway.
+        # Duplicate and Delete are created here but belong to "This mask"
+        # below -- they act on the selected mask, not on the set of them.
+        #
+        # Duplicate was dropped once, on the grounds that copying coverage AND
+        # adjustments together is rarely what is wanted. That is true of the
+        # copy but not of the reason to make one: re-aiming a mask you already
+        # have is much less work than painting a second one from nothing, and
+        # both useful cases start from the copy either way.
+        self._mask_dup_btn = QPushButton("⧉")
+        self._mask_dup_btn.setObjectName("adjust_mask_delete_btn")  # same quiet chrome
+        self._mask_dup_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_dup_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_dup_btn.setFixedWidth(34)
+        self._mask_dup_btn.setToolTip(
+            "Duplicate this mask — same coverage and the same adjustments,\n"
+            "as a separate mask you can then re-aim or re-tune."
+        )
+        self._mask_dup_btn.clicked.connect(self._on_mask_duplicate_clicked)
+
         self._mask_del_btn = QPushButton("✕")
         self._mask_del_btn.setObjectName("adjust_mask_delete_btn")
         self._mask_del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -4088,13 +4120,18 @@ class ImageAdjustPanelWidget(QWidget):
         # Keys in the label, as the dodge/burn buttons do it ("Dodge (D)").
         # Invert has no key, so it carries no parenthetical rather than an
         # empty one.
-        self._mask_paint_btn = QPushButton("Paint (P)")
+        #
+        # "Add", not "Paint": this brush's job on this page is to grow the
+        # SELECTED mask, and it sits beside Erase, which shrinks it. Called
+        # Paint it read as a way to start a mask -- which is what it used to
+        # be, before Create new mask took that over.
+        self._mask_paint_btn = QPushButton("Add (P)")
         self._mask_erase_btn = QPushButton("Erase (X)")
         self._mask_invert_btn = QPushButton("Invert")
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Paint (hold P) — brush more coverage into the selected mask.\n\n"
+                "Add (hold P) — brush more coverage into the SELECTED mask.\n\n"
                 "Repeated strokes build toward full coverage.\n"
                 "To start a separate mask instead, use Create new mask → Brush.\n"
                 "Size, Flow, Feather and Edge Assist come from the Local section.",
@@ -4253,6 +4290,7 @@ class ImageAdjustPanelWidget(QWidget):
         tools_row.addWidget(self._mask_paint_btn, 1)
         tools_row.addWidget(self._mask_erase_btn, 1)
         tools_row.addWidget(self._mask_invert_btn, 1)
+        tools_row.addWidget(self._mask_dup_btn)
         tools_row.addWidget(self._mask_del_btn)
         col.addLayout(tools_row)
 
@@ -4472,7 +4510,7 @@ class ImageAdjustPanelWidget(QWidget):
             stack = self._mask_stack
             layers = stack.layers if stack is not None else []
             for i, layer in enumerate(layers):
-                item = QTreeWidgetItem([layer.name or f"Mask {i + 1}"])
+                item = QTreeWidgetItem([self._mask_row_label(layer, i)])
                 icon = self._mask_row_icon(layer)
                 if icon is not None:
                     item.setIcon(0, icon)
@@ -4801,7 +4839,7 @@ class ImageAdjustPanelWidget(QWidget):
             self._sync_mask_brush_visible()
         # Create stays available with no masks yet -- it is the only way to
         # get the first one, and the empty hint points at it.
-        for btn in (self._mask_del_btn, self._mask_paint_btn,
+        for btn in (self._mask_del_btn, self._mask_dup_btn, self._mask_paint_btn,
                     self._mask_erase_btn, self._mask_invert_btn):
             btn.setEnabled(has_layer)
         for slider in self._mask_sliders.values():
@@ -4848,7 +4886,7 @@ class ImageAdjustPanelWidget(QWidget):
             return
         layer = stack.layers[row]
         if item.parent() is None:
-            layer.name = item.text(0)
+            layer.name = self._strip_inverted_suffix(item.text(0))
             return
         # A component row: rename the component, not its group.
         idx = item.parent().indexOfChild(item)
@@ -4957,6 +4995,17 @@ class ImageAdjustPanelWidget(QWidget):
             return
         layer.invert = bool(checked)
         layer.touch()
+        # The row has to say so. The thumbnail still shows the painted region,
+        # which is now the part NOT covered, so without this the list is
+        # actively misleading about a mask whose whole behaviour just flipped.
+        idx = self.active_mask_index()
+        item = self._mask_list.topLevelItem(idx) if idx is not None else None
+        if item is not None:
+            self._mask_block = True
+            try:
+                item.setText(0, self._mask_row_label(layer, idx))
+            finally:
+                self._mask_block = False
         self._emit_preview_and_save()
         # Invert changes coverage, not just the render, so the overlay has to
         # be rebuilt too -- _emit_preview_and_save only re-renders the photo.

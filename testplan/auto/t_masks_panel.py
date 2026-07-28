@@ -106,10 +106,7 @@ def main() -> int:
     # no longer exists.
     panel._on_mask_duplicate_clicked()
     check("Duplicate emits with active index", fired["dup"] == [1])
-    check(
-        "Duplicate has no UI affordance (redesign left the handler orphaned)",
-        not hasattr(panel, "_mask_dup_btn"),
-    )
+    check("Duplicate has a button again", hasattr(panel, "_mask_dup_btn"))
 
     # --- tool arming + dodge/burn mutual exclusion ---
     panel._mask_paint_btn.setChecked(True)

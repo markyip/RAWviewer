@@ -92,8 +92,7 @@ def test_mask_controls_survived_the_move():
         "_mask_list",
         "_mask_create_btn",
         "_mask_del_btn",
-        # No _mask_dup_btn: Duplicate was removed deliberately -- it copied
-        # coverage and adjustments together, which is never the useful case.
+        "_mask_dup_btn",
         "_mask_paint_btn",
         "_mask_erase_btn",
         "_mask_invert_btn",
