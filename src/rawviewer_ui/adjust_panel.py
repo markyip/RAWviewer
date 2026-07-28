@@ -17,6 +17,7 @@ from PyQt6.QtGui import (
     QLinearGradient,
     QPainter,
     QPalette,
+    QPixmap,
     QPen,
 )
 from PyQt6.QtWidgets import (
@@ -395,21 +396,47 @@ class _LooksRowWidget(QWidget):
         self.remove_clicked.emit()
 
 
-# Width of the mask visibility column. Wide enough to be an easy click
-# target without eating the room the mask's name needs.
-_MASK_EYE_COL_W = 24
+# The eye as drawn, and the column it sits in. The column has to clear the
+# tree's icon size, not the eye's: setIconSize is per widget, not per column,
+# so column 1 is handed the same 34px box the mask thumbnails use. At 24 the
+# eye was drawn at 34 into 24 and came out oversized and clipped at the panel
+# edge.
+_MASK_EYE_PX = 15
+# 34 (the icon box Qt hands every column) + 11 (the item padding in the tree's
+# stylesheet, 7 left + 4 right). Anything less clips the canvas at the panel
+# edge. The eye itself is only _MASK_EYE_PX; the rest is transparent, so this
+# reads as a small eye with room around it rather than a 34px one.
+_MASK_EYE_COL_W = 45
 
 
-def _mask_eye_icon(visible: bool) -> QIcon:
-    """The visibility eye for a mask row.
+def _mask_eye_icon(visible: bool, box: int) -> QIcon:
+    """The visibility eye for a mask row, centred in a ``box``-sized canvas.
+
+    Composited onto a transparent square rather than returned as-is because
+    the row's icon size is set for the mask thumbnail beside it. Handing back
+    a bare icon would draw the eye at thumbnail size, which is far too heavy
+    for a toggle and does not fit the column.
 
     A hidden mask reads as struck through rather than merely dimmer: dimmer
     alone is how a *deselected* row already looks, and the two states have to
     be told apart across a stack of rows at a glance.
     """
-    if visible:
-        return _qta_icon_safe("fa5.eye", color=theme.INK_MUTED)
-    return _qta_icon_safe("fa5.eye-slash", color=theme.INK_FAINT)
+    icon = (
+        _qta_icon_safe("fa5.eye", color=theme.INK_MUTED)
+        if visible
+        else _qta_icon_safe("fa5.eye-slash", color=theme.INK_FAINT)
+    )
+    box = max(int(box), _MASK_EYE_PX)
+    canvas = QPixmap(box, box)
+    canvas.fill(Qt.GlobalColor.transparent)
+    glyph = icon.pixmap(_MASK_EYE_PX, _MASK_EYE_PX)
+    if not glyph.isNull():
+        painter = QPainter(canvas)
+        painter.drawPixmap(
+            (box - glyph.width()) // 2, (box - glyph.height()) // 2, glyph
+        )
+        painter.end()
+    return QIcon(canvas)
 
 
 class MaskTreeWidget(QTreeWidget):
@@ -1335,7 +1362,11 @@ class ImageAdjustPanelWidget(QWidget):
         header.addWidget(reset_btn)
         layout.addLayout(header)
 
-        hint = QLabel("E closes · hold D B X H P to paint · scroll = size")
+        # Set per page below: D/B/H are dodge, burn and heal, none of which
+        # the Masks page has, and it was listing them at someone painting a
+        # mask. Same header, so it has to follow the page.
+        hint = QLabel(self._HEADER_HINTS[0])
+        self._header_hint = hint
         # 9px and faint on purpose: it is discoverability for shortcuts, not
         # content. At 10px across two wrapped lines it was the largest text
         # block in the header and outweighed the controls underneath. The full
@@ -1345,18 +1376,7 @@ class ImageAdjustPanelWidget(QWidget):
             f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.2px;"
         )
         hint.setWordWrap(True)
-        hint.setToolTip(
-            "While Adjust is open:\n"
-            "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-            "• Hold D / B / X / H and sweep the pointer over the photo to paint — "
-            "no mouse button needed. Releasing the key stops the stroke and puts "
-            "the tool away. Click a tool button instead if you want it to stay armed\n"
-            "• Eraser removes painted mask and the dodge/burn inside it, "
-            "and unlike the paint brushes it is not held back by Edge Assist\n"
-            "• With a brush tool armed, two-finger scroll changes Brush Size "
-            "(Ctrl+scroll still zooms)\n"
-            "• Brush Flow changes how opaque the brush preview looks"
-        )
+        hint.setToolTip(self._HEADER_HINT_TIPS[0])
         layout.addWidget(hint)
 
         # Camera calibration profile banner. A saved profile is applied
@@ -3330,11 +3350,60 @@ class ImageAdjustPanelWidget(QWidget):
         self.lens_correction_toggled.emit(bool(checked))
         self.editing_finished.emit(self.get_adjustments())
 
+    # Indexed by page: 0 = Global, 1 = Masks. The Masks page has no dodge,
+    # burn or heal, so listing D / B / H there was telling someone painting a
+    # mask about three tools that page does not have.
+    _HEADER_HINTS = (
+        "E closes · hold D B X H to paint · scroll = size",
+        "E closes · hold P to paint, X to erase · M shows the mask · scroll = size",
+    )
+
+    _HEADER_HINT_TIPS = (
+        "While Adjust is open:\n"
+        "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
+        "• Hold D / B / X / H and sweep the pointer over the photo to paint — "
+        "no mouse button needed. Releasing the key stops the stroke and puts "
+        "the tool away. Click a tool button instead if you want it to stay armed\n"
+        "• Eraser removes painted mask and the dodge/burn inside it, "
+        "and unlike the paint brushes it is not held back by Edge Assist\n"
+        "• With a brush tool armed, two-finger scroll changes Brush Size "
+        "(Ctrl+scroll still zooms)\n"
+        "• Brush Flow changes how opaque the brush preview looks",
+        "While the Masks page is open:\n"
+        "• E or Esc closes the editor\n"
+        "• Hold P and sweep the pointer over the photo to paint into the "
+        "SELECTED mask — no mouse button needed. Releasing the key stops the "
+        "stroke. Click Paint instead if you want it to stay armed\n"
+        "• Hold X to erase coverage from that same mask. X means erase in "
+        "whichever brush system is forward, so on this page it trims the mask "
+        "rather than the dodge/burn\n"
+        "• M shows or hides the coloured overlay of what is masked\n"
+        "• Delete removes the selected mask\n"
+        "• With a brush armed, two-finger scroll changes Brush Size "
+        "(Ctrl+scroll still zooms)\n"
+        "• To start a SEPARATE mask rather than adding to this one, "
+        "use Create new mask",
+    )
+
     def _on_panel_tab_changed(self, index: int) -> None:
         """Show the selected top-level page (0 = Global, 1 = Masks)."""
         masks = index == 1
         self._tab_page_global.setVisible(not masks)
         self._tab_page_masks.setVisible(masks)
+
+        hint = getattr(self, "_header_hint", None)
+        if hint is not None:
+            page = 1 if masks else 0
+            hint.setText(self._HEADER_HINTS[page])
+            hint.setToolTip(self._HEADER_HINT_TIPS[page])
+
+        # Leaving a page puts its overlay away. The coloured tint answers
+        # "where does this apply", which is a question you are only asking
+        # while you are on the page that applies it -- carried onto the other
+        # page it just sits over the photo obscuring the change you switched
+        # over to judge. Turned off both ways, so Global's dodge/burn mask
+        # does not follow you into Masks either.
+        self._set_mask_overlay_visible(False)
 
         # The Masks page holds one section, so a user who had collapsed it
         # while it lived at the bottom of Global would land on a page that
@@ -3769,6 +3838,27 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._db_show_mask_btn.toggle()
 
+    def _set_mask_overlay_visible(self, visible: bool) -> None:
+        """Force the overlay on or off, without recording it as a user choice.
+
+        _mask_user_hidden exists so arming a brush cannot override someone who
+        deliberately switched the overlay off. These are not that: they are
+        the app following the tool, so they leave that flag alone -- otherwise
+        every tab switch would look like the user hiding it and Paint would
+        stop turning it back on.
+        """
+        btn = getattr(self, "_db_show_mask_btn", None)
+        if btn is None or btn.isChecked() == bool(visible):
+            return
+        # _block_emit suppresses only the _mask_user_hidden bookkeeping in
+        # _on_mask_btn_toggled; it still emits dodgeBurnMaskToggled, which is
+        # what the host needs, so this must not emit again.
+        self._block_emit = True
+        try:
+            btn.setChecked(bool(visible))
+        finally:
+            self._block_emit = False
+
     # ------------------------------------------------------------------
     # Masks section (layered local adjustments — raw_mask_layers)
     # ------------------------------------------------------------------
@@ -3966,7 +4056,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._mask_del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._mask_del_btn.setFixedWidth(34)
-        self._mask_del_btn.setToolTip("Delete this mask")
+        # The button is a glyph with no room for "(Delete)", so the key goes
+        # in the tooltip -- the only one of these four where it has to.
+        self._mask_del_btn.setToolTip("Delete this mask (Delete)")
         # Weight follows consequence: Erase and Invert are reversible and read
         # as ordinary buttons; deleting throws work away, so it stays neutral
         # until you reach for it and only then turns the palette's one red.
@@ -3993,8 +4085,11 @@ class ImageAdjustPanelWidget(QWidget):
 
         tools_row = QHBoxLayout()   # "This mask": Erase, Invert, and delete
         tools_row.setSpacing(5)
-        self._mask_paint_btn = QPushButton("Paint")
-        self._mask_erase_btn = QPushButton("Erase")
+        # Keys in the label, as the dodge/burn buttons do it ("Dodge (D)").
+        # Invert has no key, so it carries no parenthetical rather than an
+        # empty one.
+        self._mask_paint_btn = QPushButton("Paint (P)")
+        self._mask_erase_btn = QPushButton("Erase (X)")
         self._mask_invert_btn = QPushButton("Invert")
         for btn, tip in (
             (
@@ -4479,16 +4574,16 @@ class ImageAdjustPanelWidget(QWidget):
 
     _MASK_ICON_BOX = 34
 
-    @staticmethod
-    def _apply_mask_row_visibility(item, layer) -> None:
-        """Draw one row in its visible/hidden state."""
-        visible = bool(getattr(layer, "enabled", True))
-        item.setIcon(1, _mask_eye_icon(visible))
+    @classmethod
+    def _apply_mask_row_visibility(cls, item, layer) -> None:
+        """Draw one row in its overlay-shown/overlay-hidden state."""
+        visible = not bool(getattr(layer, "overlay_hidden", False))
+        item.setIcon(1, _mask_eye_icon(visible, cls._MASK_ICON_BOX))
         item.setToolTip(
             1,
-            "Hide this mask — its adjustments stop applying"
+            "Hide this mask's overlay — the adjustment still applies"
             if visible
-            else "Show this mask again",
+            else "Show this mask's overlay again",
         )
         # The name greys out too, so the state is readable without hunting
         # for which of a dozen small icons is the crossed-out one.
@@ -4513,19 +4608,17 @@ class ImageAdjustPanelWidget(QWidget):
             target = layer.components[idx]
         else:
             target = layer
-        target.enabled = not bool(getattr(target, "enabled", True))
-        target.touch()
-        if target is not layer:
-            # A group's own version gates its composite cache, and a
-            # component edit does not move it on its own.
-            layer.touch()
+        target.overlay_hidden = not bool(getattr(target, "overlay_hidden", False))
+        # No touch(), no _emit_preview_and_save(): this shows or hides a tint
+        # and changes nothing about the photo. Versioning the layer would
+        # throw away a correct composite and re-render the frame to produce
+        # identical pixels, and saving would write a sidecar for something
+        # that is not an edit.
         self._mask_block = True
         try:
             self._apply_mask_row_visibility(item, target)
         finally:
             self._mask_block = False
-        self._emit_preview_and_save()
-        # Hiding a mask removes its overlay tint as well as its effect.
         self.mask_coverage_changed.emit()
 
     def _mask_row_icon(self, layer):
@@ -4803,6 +4896,13 @@ class ImageAdjustPanelWidget(QWidget):
             # with a press on the photo.
             if self.gradient_tool() is not None:
                 self.disarm_gradient_tools()
+            # Picking up a brush shows what is masked. Painting coverage you
+            # cannot see is guesswork -- you are aiming at a region whose
+            # edges are the whole point. Unconditional, unlike
+            # request_mask_overlay_visible: reaching for the brush is a
+            # clearer statement of intent than an earlier click on Mask, and
+            # M still turns it straight back off.
+            self._set_mask_overlay_visible(True)
         self._sync_mask_brush_visible()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
 

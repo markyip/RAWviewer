@@ -195,6 +195,15 @@ class MaskLayer:
     name: str = ""
     enabled: bool = True
     invert: bool = False
+    # VIEW STATE ONLY: hides this layer's coloured overlay while leaving its
+    # adjustment fully applied. Distinct from ``enabled``, which turns the
+    # adjustment off.
+    #
+    # Deliberately outside fingerprint(), serialize_stack() and every
+    # is_empty/bbox path: showing or hiding a tint changes nothing about the
+    # rendered photo, so folding it into the cache key would discard a correct
+    # composite and re-render the frame to produce identical pixels.
+    overlay_hidden: bool = False
     blend: str = "add"  # "add" | "subtract" -- reserved for Phase 2 stack composability
     # Parametric shapes (see raw_mask_shapes). "brush" keeps ``alpha`` as the
     # source of truth; a gradient keeps ``params`` as the source of truth and

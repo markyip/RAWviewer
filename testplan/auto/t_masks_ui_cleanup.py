@@ -640,7 +640,7 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
         p._mask_paint_btn, p._mask_linear_btn, p._mask_radial_btn,
         p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
     )}
-    assert labels == {"Paint", "Linear", "Radial", "Smart Object", "Sky",
+    assert labels == {"Paint (P)", "Linear", "Radial", "Smart Object", "Sky",
                       "AI Selection"}, labels
     print("  OK   the tab is grouped by what each control acts on")
 

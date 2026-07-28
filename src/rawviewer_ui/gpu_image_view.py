@@ -954,6 +954,11 @@ class GpuImageView(QGraphicsView):
         for i, layer in enumerate(layers or []):
             if not getattr(layer, "enabled", True):
                 continue
+            # View state, not an edit: this layer's adjustment is still being
+            # applied to the photo underneath. Hiding the tint is how you see
+            # the result of a mask you have finished aiming.
+            if getattr(layer, "overlay_hidden", False):
+                continue
             entries.append((i, layer))
         if not entries:
             self._mask_item.hide()

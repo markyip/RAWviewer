@@ -1,18 +1,24 @@
-"""Per-mask visibility, and the adjustments grouped the way Global groups them.
+"""The per-mask eye hides the tint only, and the grouped adjustment list.
 
-MaskLayer.enabled was fully implemented and had no switch: the compositor
-skipped a disabled layer, the overlay skipped it, the fingerprint folded it
-in, and mask_layers_xmp persisted it. Only the UI was missing.
+The eye is a VIEW control. Hiding a mask's overlay must leave its adjustment
+fully applied -- you turn the tint off precisely so you can see the result of
+the mask you just aimed. That makes it distinct from MaskLayer.enabled, which
+turns the adjustment itself off, and the two must not be confused.
 
-It cannot come back as a check box on the row. That is how it used to work,
+Because it changes no pixels, overlay_hidden stays out of fingerprint() and
+out of the sidecar: keying a render cache on it would discard a correct
+composite and re-render the frame to produce identical output, and writing it
+would put view state in the user's XMP.
+
+It cannot be a check box on the row. That is how enable/disable used to work,
 and it was removed because the check box and the row selection shared one
 click -- "did I select this mask or turn it off?". The eye gets its own
-column so the two actions live in two places.
+column, sized to clear the icon box Qt hands every column.
 
-The adjustment list is also now grouped Light / Color / Detail, matching the
+The adjustment list is also grouped Light / Color / Detail, matching the
 Global tab's names and order, and Defringe is exposed. Defringe needed no
-backend work at all: it was already in SUPPORTED_ADJUSTMENT_KEYS, already
-applied by _apply_layer_adjustments, and already padded as a spatial op.
+backend work: it was already in SUPPORTED_ADJUSTMENT_KEYS, already applied by
+_apply_layer_adjustments, and already padded as a spatial op.
 """
 
 import os
@@ -67,81 +73,56 @@ def main() -> int:
     rng = np.random.default_rng(0)
     img = (rng.random((H, W, 3)).astype(np.float32) * 0.6) + 0.2
 
-    # --- hiding a mask is an exact no-op, not merely a faint one ---
+    # --- the eye hides the TINT, not the edit ---
     m = _layer(adj={"Exposure2012": 2.0})
     lit = apply_mask_layers(img.copy(), MaskLayerStack(layers=[m]))
-    check("an enabled mask changes the photo", not np.array_equal(lit, img))
+    check("a mask changes the photo", not np.array_equal(lit, img))
 
-    m.enabled = False
-    hidden = apply_mask_layers(img.copy(), MaskLayerStack(layers=[m]))
+    m.overlay_hidden = True
+    still = apply_mask_layers(img.copy(), MaskLayerStack(layers=[m]))
     check(
-        "a hidden mask leaves it untouched",
-        np.array_equal(hidden, img),
-        "a partial effect would make the toggle useless for judging the edit",
+        "hiding the overlay leaves the adjustment applied",
+        np.array_equal(still, lit),
+        "the eye is a view control -- it must not undo the edit",
     )
 
-    # --- and the fingerprint moves, so nothing serves a cached composite ---
+    # --- and it must not invalidate anything, or the frame re-renders ---
     a = _layer(adj={"Exposure2012": 2.0})
     before = a.fingerprint()
-    a.enabled = False
-    check("visibility is in the cache key", a.fingerprint() != before)
+    a.overlay_hidden = True
+    check(
+        "overlay state is not in the cache key",
+        a.fingerprint() == before,
+        "a tint is not a pixel -- keying on it re-renders to identical output",
+    )
 
-    # --- it survives a save/load round trip ---
+    # --- nor reach the sidecar: it is not an edit ---
     import mask_layers_xmp
 
-    st = MaskLayerStack(layers=[_layer("Visible"), _layer("Hidden")])
-    st.layers[1].enabled = False
+    st = MaskLayerStack(layers=[_layer("Shown"), _layer("Tint off")])
+    st.layers[1].overlay_hidden = True
     blob = mask_layers_xmp.serialize_stack(st)
+    check("overlay state is not written to XMP", "overlay_hidden" not in blob)
     back = mask_layers_xmp.deserialize_stack(blob)
     check(
-        "hidden survives a reload",
-        back is not None
-        and len(back.layers) == 2
-        and back.layers[0].enabled is True
-        and back.layers[1].enabled is False,
-        str([l.enabled for l in (back.layers if back else [])]),
-    )
-
-    # A hidden mask reports is_empty, and the serializer skipped empty
-    # layers -- so hiding a mask and saving used to delete it outright,
-    # taking the coverage the user painted with it. Unreachable until the
-    # eye existed, which is exactly why it has to be covered now.
-    painted = _layer("Hidden, no adjustments")
-    painted.enabled = False
-    back = mask_layers_xmp.deserialize_stack(
-        mask_layers_xmp.serialize_stack(MaskLayerStack(layers=[painted]))
-    )
-    check(
-        "a hidden mask with no adjustments is still saved",
-        back is not None and len(back.layers) == 1,
-        "hiding a mask must never destroy it",
-    )
-    check(
-        "and its coverage comes back",
-        back is not None
-        and back.layers
-        and float(back.layers[0].alpha.max()) > 0.5,
-        "the painted region is the part that cannot be recreated",
-    )
-
-    all_hidden = MaskLayerStack(layers=[_layer("A"), _layer("B")])
-    for lyr in all_hidden.layers:
-        lyr.enabled = False
-    back = mask_layers_xmp.deserialize_stack(
-        mask_layers_xmp.serialize_stack(all_hidden)
-    )
-    check(
-        "hiding every mask does not wipe the stack",
+        "both masks survive the round trip",
         back is not None and len(back.layers) == 2,
-        f"{0 if back is None else len(back.layers)} of 2 survived",
+        f"{0 if back is None else len(back.layers)} of 2",
+    )
+    check(
+        "and come back with their overlay shown",
+        back is not None and not any(l.overlay_hidden for l in back.layers),
+        "view state does not persist across a reload",
     )
 
-    # A stack that is genuinely empty must still serialize to "", or every
-    # untouched photo would start writing a mask blob into its sidecar.
-    blank = MaskLayer(np.zeros((H, W), np.float32), name="Untouched")
+    # --- enabled is a different thing, and still works ---
+    m2 = _layer(adj={"Exposure2012": 2.0})
+    m2.enabled = False
+    off = apply_mask_layers(img.copy(), MaskLayerStack(layers=[m2]))
     check(
-        "a genuinely empty stack still writes nothing",
-        mask_layers_xmp.serialize_stack(MaskLayerStack(layers=[blank])) == "",
+        "enabled=False still turns the adjustment off",
+        np.array_equal(off, img),
+        "the two flags must stay distinct",
     )
 
     # --- the eye is its own column, so a click cannot mean two things ---
@@ -162,7 +143,12 @@ def main() -> int:
     p.mask_coverage_changed.connect(lambda: seen.append(1))
 
     p._on_mask_row_clicked(item, 1)
-    check("clicking the eye hides the mask", stack.layers[0].enabled is False)
+    check("clicking the eye hides the tint", stack.layers[0].overlay_hidden is True)
+    check(
+        "and leaves the adjustment on",
+        stack.layers[0].enabled is True,
+        "the eye must never disable the mask",
+    )
     check(
         "and the overlay is told to rebuild",
         len(seen) == 1,
@@ -171,14 +157,63 @@ def main() -> int:
     check("the icon follows the state", not item.icon(1).isNull())
 
     p._on_mask_row_clicked(item, 1)
-    check("clicking again shows it", stack.layers[0].enabled is True)
+    check("clicking again shows it", stack.layers[0].overlay_hidden is False)
 
     p._on_mask_row_clicked(item, 0)
     check(
         "clicking the name does not toggle",
-        stack.layers[0].enabled is True,
+        stack.layers[0].overlay_hidden is False,
         "column 0 selects and renames; it must never change visibility",
     )
+
+    # --- the eye has to fit the column it is drawn in ---
+    from rawviewer_ui.adjust_panel import _MASK_EYE_COL_W, _MASK_EYE_PX
+
+    canvas = item.icon(1).availableSizes()[0].width()
+    check(
+        "the eye fits its column",
+        canvas + 11 <= _MASK_EYE_COL_W,  # 11 = the tree's item padding
+        f"a {canvas}px canvas in a {_MASK_EYE_COL_W}px column clips at the "
+        "panel edge -- setIconSize is per widget, so column 1 gets the same "
+        "box the mask thumbnails use",
+    )
+    check(
+        "and is drawn small inside it",
+        _MASK_EYE_PX < canvas,
+        f"{_MASK_EYE_PX}px glyph on a {canvas}px canvas -- a full-box eye "
+        "would carry as much weight as the mask thumbnail",
+    )
+    check(
+        "the name column still gets the room",
+        tree.columnWidth(0) > _MASK_EYE_COL_W * 3,
+        f"{tree.columnWidth(0)} vs {_MASK_EYE_COL_W}",
+    )
+
+    # --- the overlay follows the tool, and does not follow you off the page ---
+    p.set_mask_layer_stack(MaskLayerStack(layers=[_layer()]))
+    p._set_mask_overlay_visible(False)
+    p._mask_paint_btn.setChecked(True)
+    check(
+        "arming Paint shows what is masked",
+        p.dodge_burn_show_mask(),
+        "painting coverage you cannot see is guesswork",
+    )
+
+    p._panel_tabs.set_current(0)
+    check(
+        "leaving the Masks page puts the overlay away",
+        not p.dodge_burn_show_mask(),
+        "the tint would sit over the photo you switched to Global to judge",
+    )
+    p._panel_tabs.set_current(1)
+    check("and coming back does not bring it straight back", not p.dodge_burn_show_mask())
+
+    p._mask_erase_btn.setChecked(True)
+    check("arming Erase shows it too", p.dodge_burn_show_mask())
+
+    # M must still win: this follows the tool, it does not overrule the user.
+    p.toggle_dodge_burn_show_mask()
+    check("M still turns it off with a brush armed", not p.dodge_burn_show_mask())
 
     # --- a component inside a group hides on its own ---
     from raw_mask_layers import MaskLayer as ML
@@ -196,14 +231,14 @@ def main() -> int:
 
     p2._on_mask_row_clicked(parent.child(0), 1)
     check(
-        "hiding a component leaves the group visible",
-        stack.layers[0].components[0].enabled is False
-        and stack.layers[0].enabled is True,
+        "hiding a component's tint leaves the group's shown",
+        stack.layers[0].components[0].overlay_hidden is True
+        and stack.layers[0].overlay_hidden is False,
         "the eye must act on the row it is on, not the whole group",
     )
     check(
         "the other component is untouched",
-        stack.layers[0].components[1].enabled is True,
+        stack.layers[0].components[1].overlay_hidden is False,
     )
 
     # --- renaming still works, and does not disturb visibility ---
@@ -213,7 +248,7 @@ def main() -> int:
     it3.setText(0, "After")
     p3._on_mask_item_changed(it3, 0)
     check("column 0 still renames", st3.layers[0].name == "After", st3.layers[0].name)
-    check("and visibility is unchanged", st3.layers[0].enabled is True)
+    check("and visibility is unchanged", st3.layers[0].overlay_hidden is False)
 
     # --- grouped adjustments, named as Global names them ---
     p4 = _panel(MaskLayerStack(layers=[_layer()]))

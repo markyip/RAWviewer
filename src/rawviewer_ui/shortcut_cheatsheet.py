@@ -99,8 +99,9 @@ _EDITOR = [
     (
         "Masks",
         [
-            ("Click the eye", "Hide a mask without deleting it"),
+            ("Click the eye", "Hide a mask's overlay (the edit still applies)"),
             ("Click the value", "Reset that slider to 0"),
+            ("M", "Show or hide the mask overlay"),
             ("Delete", "Delete the selected mask"),
             ("Drag a mask onto another", "Combine them into one mask"),
             ("Drag a part out", "Separate it again"),
