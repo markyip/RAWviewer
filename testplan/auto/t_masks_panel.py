@@ -51,8 +51,10 @@ def main() -> int:
     panel.mask_duplicate_requested.connect(lambda i: fired["dup"].append(i))
     panel.mask_layer_mode_changed.connect(lambda m: fired["mode"].append(m))
 
-    panel._mask_add_btn.click()
-    check("Add Mask emits mask_add_requested", fired["add"] == 1)
+    # Create new mask -> Brush is the one path that needs a layer made for
+    # it; every other tool creates its own on completion.
+    panel._on_mask_create("brush")
+    check("Create new mask -> Brush emits mask_add_requested", fired["add"] == 1)
 
     # --- bind a stack (host side of the contract) ---
     layer_a = MaskLayer(np.zeros((40, 60), dtype=np.float32), name="Sky")

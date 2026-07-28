@@ -3862,14 +3862,6 @@ class ImageAdjustPanelWidget(QWidget):
         }.get(comp.kind, "Brush")
         return f"− {base}" if comp.blend == "subtract" else f"+ {base}"
 
-    @staticmethod
-    def _mask_family_label(text: str) -> QLabel:
-        """"you draw it" / "it finds it" -- the split is who chooses."""
-        label = QLabel(text)
-        label.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.6px;"
-        )
-        return label
 
     @staticmethod
     def _mask_rule() -> QFrame:
@@ -3933,17 +3925,35 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_stack_head)
         col.addWidget(self._mask_list)
 
-        # Adding an empty mask is a STACK operation, so it lives with the
-        # stack rather than among the tools that make a mask of some kind.
-        self._mask_add_btn = QPushButton("New empty mask")
-        self._mask_add_btn.setObjectName("adjust_db_clear_btn")
-        self._mask_add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._mask_add_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._mask_add_btn.setToolTip(
-            "Start another empty mask. Paint already makes the first one for you."
+        # One way to start a mask, listing every tool that can start one.
+        #
+        # This replaces a "New empty mask" button sitting above six tool
+        # buttons. That arrangement asked the user to know something the app
+        # knows perfectly well: the gradients and the AI tools each create
+        # their own mask, but the brush paints into the selected one, so
+        # "New empty mask" was load-bearing for the brush alone and inert
+        # next to everything else. Naming the tool up front makes "new mask"
+        # one decision instead of two, and the brush stops being a special
+        # case -- picking Brush here is exactly what pressing New empty mask
+        # and then Paint used to do.
+        self._mask_create_btn = QPushButton("Create new mask")
+        self._mask_create_btn.setObjectName("adjust_db_clear_btn")
+        self._mask_create_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_create_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_create_btn.setToolTip("Start a new mask with the tool you pick.")
+        self._mask_create_btn.setMenu(self._build_mask_create_menu())
+        col.addWidget(self._mask_create_btn)
+
+        # What the picked tool is waiting for. A menu item cannot stay lit the
+        # way an armed button did, and "drag on the photo" is not guessable
+        # from a menu that has already closed.
+        self._mask_armed_hint = QLabel("")
+        self._mask_armed_hint.setWordWrap(True)
+        self._mask_armed_hint.setStyleSheet(
+            f"color: {theme.EMBER}; font-size: 10px; padding: 1px 2px;"
         )
-        self._mask_add_btn.clicked.connect(self.mask_add_requested.emit)
-        col.addWidget(self._mask_add_btn)
+        self._mask_armed_hint.setVisible(False)
+        col.addWidget(self._mask_armed_hint)
 
         # Delete is created here but belongs to "This mask" below -- it acts on
         # the selected mask, not on the set of them.
@@ -3989,10 +3999,10 @@ class ImageAdjustPanelWidget(QWidget):
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Paint (hold P) — brush coverage into the selected mask.\n\n"
-                "Repeated strokes build toward full coverage. With no mask yet, "
-                "this makes one.\nSize, Flow, Feather and Edge Assist come from "
-                "the Local section.",
+                "Paint (hold P) — brush more coverage into the selected mask.\n\n"
+                "Repeated strokes build toward full coverage.\n"
+                "To start a separate mask instead, use Create new mask → Brush.\n"
+                "Size, Flow, Feather and Edge Assist come from the Local section.",
             ),
             (
                 self._mask_erase_btn,
@@ -4107,55 +4117,45 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_radial_btn.toggled.connect(
             lambda on: self._on_gradient_tool_toggled(self._mask_radial_btn, "radial", on)
         )
-        # ---- Add a mask: the six ways, split by who chooses ----------------
-        col.addWidget(self._mask_rule())
-        col.addWidget(self._mask_section_head("Add a mask"))
-
-        from raw_ai_masks import ai_masks_enabled as _ai_ok
-
-        # The label distinguishes this family from "it finds it". With that
-        # family gone there is nothing to distinguish, so it is dropped too.
-        if _ai_ok():
-            col.addWidget(self._mask_family_label("you draw it"))
-        draw_row = QHBoxLayout()
-        draw_row.setSpacing(5)
-        draw_row.addWidget(self._mask_paint_btn, 1)
-        grad_items = []
-        while grad_row.count():
-            grad_items.append(grad_row.takeAt(0).widget())
-        for w in grad_items:
-            if w is not None:
-                draw_row.addWidget(w, 1)
-        col.addLayout(draw_row)
-
-        # The "it finds it" family is Plus-only: every button in it downloads a
-        # model on first press (214 MB for Smart Object). Standard drops the
-        # row entirely rather than showing disabled buttons -- a control that
-        # can never be enabled is worse than no control, and an edition
-        # difference belongs in the marketing copy, not as dead UI in the
-        # panel. Everything above this line needs no model, so Standard keeps
-        # brush and both gradients.
+        # The creation tools are driven by the Create menu now, but the
+        # buttons stay as the arming state machine behind it: mutual
+        # exclusion, mask_layer_mode(), disarm_*, set_ai_tool_used and the
+        # canvas cursor all key off their checked state. Rebuilding that as
+        # menu state would be a second source of truth for no gain, so they
+        # are simply never parented into the layout.
+        #
+        # The AI ones are additionally disabled in Standard: each downloads a
+        # model on first press (214 MB for Smart Object), which is why the
+        # create menu omits those entries there too.
         from raw_ai_masks import ai_masks_enabled
 
-        if ai_masks_enabled():
-            col.addWidget(self._mask_family_label("it finds it"))
-            col.addLayout(ai_row)
-        else:
-            # The buttons still exist as attributes, so every reference to
-            # them (tool arming, set_ai_tool_used, tests) keeps working. They
-            # are simply never parented into the layout.
+        for _lay in (ai_row, grad_row):
+            while _lay.count():
+                item = _lay.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+                    w.setVisible(False)
+        if not ai_masks_enabled():
             for _btn in (
                 self._mask_ai_subject_btn,
                 self._mask_ai_sky_btn,
                 self._mask_ai_click_btn,
             ):
-                _btn.setVisible(False)
                 _btn.setEnabled(False)
+        for _btn in (self._mask_linear_btn, self._mask_radial_btn,
+                     self._mask_ai_click_btn):
+            _btn.toggled.connect(lambda _on: self._sync_mask_armed_hint())
 
         # ---- This mask: what you can do to the selected one -----------------
         col.addWidget(self._mask_rule())
         self._mask_this_head = self._mask_section_head("This mask")
         col.addWidget(self._mask_this_head)
+        # Paint lives here now, not among the ways to start a mask. It was
+        # the odd one out there: every other tool made a new mask, while
+        # Paint added to the selected one. Next to Erase, which removes
+        # coverage from the same mask, what it does is self-evident.
+        tools_row.addWidget(self._mask_paint_btn, 1)
         tools_row.addWidget(self._mask_erase_btn, 1)
         tools_row.addWidget(self._mask_invert_btn, 1)
         tools_row.addWidget(self._mask_del_btn)
@@ -4211,8 +4211,8 @@ class ImageAdjustPanelWidget(QWidget):
 
         # Per-mask parameters, hidden wholesale until a mask exists. Showing a
         # dozen greyed-out sliders reads as broken rather than as "nothing
-        # selected yet", and it buried Add Mask under controls that could not
-        # do anything.
+        # selected yet", and it buried the controls that could act under a
+        # wall of ones that could not.
         self._mask_params_wrap = QWidget()
         params_col = QVBoxLayout(self._mask_params_wrap)
         params_col.setContentsMargins(0, 0, 0, 0)
@@ -4269,8 +4269,8 @@ class ImageAdjustPanelWidget(QWidget):
         col.addWidget(self._mask_params_wrap)
 
         self._mask_empty_hint = QLabel(
-            "No masks yet. Paint one by hand, drag a Linear or Radial gradient, or "
-            "let Subject / Sky / Select find one for you."
+            "No masks yet. Use Create new mask above and pick how you want to "
+            "make it."
         )
         self._mask_empty_hint.setWordWrap(True)
         self._mask_empty_hint.setStyleSheet(
@@ -4346,7 +4346,7 @@ class ImageAdjustPanelWidget(QWidget):
         self.mask_layer_mode_changed.emit(None)
 
     def arm_mask_paint(self) -> None:
-        """Arm the mask Paint brush (used right after Add Mask)."""
+        """Arm the mask Paint brush (used right after a mask is created)."""
         self.set_mask_layer_mode("paint")
 
     def set_mask_layer_mode(self, mode: str | None) -> bool:
@@ -4598,6 +4598,91 @@ class ImageAdjustPanelWidget(QWidget):
             return None
         return self._mask_stack.layers[idx]
 
+    # How each creation tool behaves once picked, and what to tell the user
+    # it is waiting for. "" means the tool acts immediately and there is
+    # nothing to wait for.
+    _MASK_CREATE_ITEMS = (
+        ("brush", "Brush", "Paint the mask on the photo.", False),
+        ("linear", "Linear Gradient", "Drag across the photo to place the gradient.", False),
+        ("radial", "Radial Gradient", "Drag a box to place the ellipse.", False),
+        ("subject", "Smart Object", "", True),
+        ("sky", "Sky", "", True),
+        ("ai_click", "AI Selection", "Click what you want masked.", True),
+    )
+
+    def _build_mask_create_menu(self) -> QMenu:
+        """The create menu, minus anything this edition cannot do.
+
+        The AI entries are Plus-only because each downloads a model on first
+        press. Standard omits them rather than greying them out -- the tool
+        buttons behind them are already hidden in Standard for that reason,
+        and a menu item that can never be picked is worse than no item.
+        """
+        from raw_ai_masks import ai_masks_enabled
+
+        menu = QMenu(self)
+        ai_ok = ai_masks_enabled()
+        added_separator = False
+        self._mask_create_actions = {}
+        for kind, label, _hint, is_ai in self._MASK_CREATE_ITEMS:
+            if is_ai and not ai_ok:
+                continue
+            if is_ai and not added_separator:
+                menu.addSeparator()
+                added_separator = True
+            action = menu.addAction(label)
+            action.triggered.connect(lambda _c=False, k=kind: self._on_mask_create(k))
+            self._mask_create_actions[kind] = action
+        return menu
+
+    def _on_mask_create(self, kind: str) -> None:
+        """Start a new mask with ``kind``.
+
+        Only the brush needs a layer made for it here. Every other tool
+        creates its own on completion, so making one first would leave an
+        empty mask behind whenever the user armed a gradient and then
+        changed their mind.
+        """
+        self.disarm_mask_layer_tools()
+        self.disarm_gradient_tools()
+        if kind == "brush":
+            self.mask_add_requested.emit()
+            if self.active_mask_index() is None:
+                return  # host refused (no image open); nothing to arm
+            self._mask_paint_btn.setChecked(True)
+        elif kind in ("linear", "radial"):
+            btn = self._mask_linear_btn if kind == "linear" else self._mask_radial_btn
+            btn.setChecked(True)
+        elif kind == "ai_click":
+            self._mask_ai_click_btn.setChecked(True)
+        else:
+            self.mask_ai_requested.emit(kind)
+        self._sync_mask_armed_hint()
+
+    def _sync_mask_armed_hint(self) -> None:
+        """Say what the armed tool is waiting for, or nothing if none is."""
+        label = getattr(self, "_mask_armed_hint", None)
+        if label is None:
+            return
+        armed = None
+        for btn, kind in (
+            (getattr(self, "_mask_linear_btn", None), "linear"),
+            (getattr(self, "_mask_radial_btn", None), "radial"),
+            (getattr(self, "_mask_ai_click_btn", None), "ai_click"),
+        ):
+            if btn is not None and btn.isChecked():
+                armed = kind
+                break
+        if armed is None:
+            label.setVisible(False)
+            label.setText("")
+            return
+        hint = next(
+            (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == armed), ""
+        )
+        label.setText(hint)
+        label.setVisible(bool(hint))
+
     def _sync_mask_controls_enabled(self) -> None:
         has_layer = self.active_mask_index() is not None
         wrap = getattr(self, "_mask_params_wrap", None)
@@ -4616,11 +4701,8 @@ class ImageAdjustPanelWidget(QWidget):
                 widget.setVisible(has_layer)
         if not has_layer:
             self._sync_mask_brush_visible()
-        add_btn = getattr(self, "_mask_add_btn", None)
-        if add_btn is not None:
-            # Only meaningful once one mask exists: with none, every tool below
-            # already creates its own, so a "New Mask" button just adds a step.
-            add_btn.setVisible(has_layer)
+        # Create stays available with no masks yet -- it is the only way to
+        # get the first one, and the empty hint points at it.
         for btn in (self._mask_del_btn, self._mask_paint_btn,
                     self._mask_erase_btn, self._mask_invert_btn):
             btn.setEnabled(has_layer)
@@ -4689,9 +4771,9 @@ class ImageAdjustPanelWidget(QWidget):
         if self._mask_block:
             return
         if checked and btn is self._mask_paint_btn and self.active_mask_index() is None:
-            # Paint makes its own mask, like every other coverage tool. Without
-            # this it was the one tool that silently did nothing until you had
-            # pressed Add Mask first.
+            # Reached when Paint is armed with nothing selected -- via the
+            # P shortcut, say, rather than Create new mask. Without this it
+            # is the one tool that silently does nothing.
             self.mask_add_requested.emit()
             if self.active_mask_index() is None:
                 self._mask_block = True

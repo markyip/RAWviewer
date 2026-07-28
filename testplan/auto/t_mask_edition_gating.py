@@ -39,6 +39,13 @@ p = P(); p.show(); p._panel_tabs.set_current(1)
 def shown(attr):
     b = getattr(p, attr, None)
     return bool(b is not None and b.parent() is not None and b.isVisible())
+# The creation tools are offered through the Create new mask menu now, so
+# that is where the edition gate has to hold. The buttons behind it stay as
+# the arming state machine and are deliberately unparented.
+_menu = p._mask_create_btn.menu()
+_items = [a.text() for a in _menu.actions() if not a.isSeparator()]
+def offered(label):
+    return label in _items
 print("@@" + json.dumps({
     "edition": rp.edition_display_name(),
     "enabled": m.ai_masks_enabled(),
@@ -50,9 +57,13 @@ print("@@" + json.dumps({
     "radial": shown("_mask_radial_btn"),
     "erase": shown("_mask_erase_btn"),
     "invert": shown("_mask_invert_btn"),
-    "subject": shown("_mask_ai_subject_btn"),
-    "sky": shown("_mask_ai_sky_btn"),
-    "click": shown("_mask_ai_click_btn"),
+    "subject": offered("Smart Object"),
+    "sky": offered("Sky"),
+    "click": offered("AI Selection"),
+    "brush_item": offered("Brush"),
+    "linear_item": offered("Linear Gradient"),
+    "radial_item": offered("Radial Gradient"),
+    "ai_btns_enabled": bool(p._mask_ai_subject_btn.isEnabled()),
 }))
 """
 
@@ -105,8 +116,17 @@ def main() -> int:
         std["ensure_subject"] is False,
     )
 
+    check(
+        "Standard also disables the buttons behind the menu",
+        std["ai_btns_enabled"] is False,
+        "omitting the menu entry is not enough on its own -- the arming "
+        "buttons are still reachable from code paths like set_ai_tool_used",
+    )
+
     # --- Standard keeps every mask that needs no model ---
-    for name in ("brush", "linear", "radial", "erase", "invert"):
+    for name in ("brush_item", "linear_item", "radial_item"):
+        check(f"Standard offers {name}", std[name], "model-free mask must survive")
+    for name in ("brush", "erase", "invert"):
         check(f"Standard keeps {name}", std[name], "model-free mask must survive")
 
     # --- the override, for dev checkouts ---

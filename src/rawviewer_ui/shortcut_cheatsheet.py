@@ -99,6 +99,8 @@ _EDITOR = [
     (
         "Masks",
         [
+            ("Click the eye", "Hide a mask without deleting it"),
+            ("Click the value", "Reset that slider to 0"),
             ("Delete", "Delete the selected mask"),
             ("Drag a mask onto another", "Combine them into one mask"),
             ("Drag a part out", "Separate it again"),

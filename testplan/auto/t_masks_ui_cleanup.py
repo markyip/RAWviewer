@@ -207,14 +207,60 @@ def test_paint_creates_its_own_mask_like_every_other_tool():
     print("  OK   Paint asks for a mask instead of silently doing nothing")
 
 
-def test_new_mask_button_is_hidden_in_the_empty_state():
-    """With no masks, every tool creates one -- a New Mask button is a step."""
+def test_create_menu_is_the_one_way_to_start_a_mask():
+    """One control starts a mask, and it names the tool up front.
+
+    It replaced "New empty mask" sitting above six tool buttons. That button
+    was load-bearing for the brush alone -- the gradients and the AI tools
+    each create their own mask, while the brush paints into the selected one
+    -- so it was inert next to five of the six things beside it.
+
+    Unlike the button it replaced, Create is available with no masks yet: it
+    is the only way to get the first one.
+    """
     p = _panel()
-    assert not p._mask_add_btn.isVisible(), "New Mask shown before any mask exists"
-    p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="Mask 1")]))
-    assert p._mask_add_btn.isVisible(), "New Mask hidden when a second one is possible"
-    assert p._mask_add_btn.text() == "New empty mask", p._mask_add_btn.text()
-    print("  OK   New empty mask appears only once it means 'another one'")
+    assert p._mask_create_btn.text() == "Create new mask", p._mask_create_btn.text()
+
+    menu = p._mask_create_btn.menu()
+    assert menu is not None, "Create new mask has no menu"
+    items = [a.text() for a in menu.actions() if not a.isSeparator()]
+    assert items == ["Brush", "Linear Gradient", "Radial Gradient",
+                     "Smart Object", "Sky", "AI Selection"], items
+
+    # Brush is the only entry that needs a layer made for it up front.
+    fired = []
+    p.mask_add_requested.connect(lambda: fired.append(1))
+    p._on_mask_create("brush")
+    assert fired == [1], "Brush did not ask the host for a mask"
+
+    for kind in ("linear", "radial", "ai_click"):
+        fired.clear()
+        p._on_mask_create(kind)
+        assert fired == [], (
+            f"{kind} pre-created a mask -- it makes its own, so arming and "
+            "then changing your mind would leave an empty one behind"
+        )
+    print("  OK   one control starts a mask, and it names the tool")
+
+
+def test_armed_creation_tool_says_what_it_wants():
+    """A menu item cannot stay lit the way an armed button did."""
+    p = _panel()
+    assert not p._mask_armed_hint.isVisible(), "hint shown with nothing armed"
+
+    p._on_mask_create("linear")
+    assert p._mask_armed_hint.isVisible(), "no hint after arming Linear"
+    assert "Drag" in p._mask_armed_hint.text(), p._mask_armed_hint.text()
+
+    p._on_mask_create("radial")
+    assert "box" in p._mask_armed_hint.text(), (
+        "the hint did not follow the newly armed tool"
+    )
+
+    p.disarm_gradient_tools()
+    p._sync_mask_armed_hint()
+    assert not p._mask_armed_hint.isVisible(), "hint outlived the armed tool"
+    print("  OK   the armed tool says what it is waiting for")
 
 
 # --------------------------------------------------------------- mask overlay
@@ -588,7 +634,8 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
                  "_mask_params_wrap"):
         assert getattr(p, attr, None) is not None, f"{attr} missing"
 
-    # "Add a mask" holds all six ways to make one, and only those.
+    # The six creation tools keep their names: they are now menu entries
+    # driven by these buttons rather than buttons of their own.
     labels = {b.text() for b in (
         p._mask_paint_btn, p._mask_linear_btn, p._mask_radial_btn,
         p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
@@ -639,7 +686,8 @@ def main() -> int:
     test_select_button_is_named_for_what_it_does()
     test_empty_ai_mask_is_rejected()
     test_paint_creates_its_own_mask_like_every_other_tool()
-    test_new_mask_button_is_hidden_in_the_empty_state()
+    test_create_menu_is_the_one_way_to_start_a_mask()
+    test_armed_creation_tool_says_what_it_wants()
     test_masks_tab_is_grouped_by_what_a_control_acts_on()
     test_brush_section_appears_only_with_a_brush_in_hand()
     test_delete_does_not_look_like_its_neighbours()
