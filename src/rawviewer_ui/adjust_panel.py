@@ -3838,6 +3838,20 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._db_show_mask_btn.toggle()
 
+    def force_mask_overlay_visible(self) -> None:
+        """Show the overlay whatever the user last chose.
+
+        For an actual stroke, not for arming a tool. Since the photo is no
+        longer re-rendered per stamp, the overlay is the ONLY feedback a
+        stroke has -- with it off, painting shows nothing at all until you
+        release, which is worse than the lag the change removed.
+
+        It stays on afterwards rather than snapping back: the tint is what
+        you just painted, and hiding it the instant you let go would take
+        away the thing you were looking for.
+        """
+        self._set_mask_overlay_visible(True)
+
     def _set_mask_overlay_visible(self, visible: bool) -> None:
         """Force the overlay on or off, without recording it as a user choice.
 

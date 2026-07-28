@@ -23730,6 +23730,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     feather=feather,
                 )
 
+            # The overlay is the only feedback a stroke has now that the photo
+            # is not re-rendered per stamp, so a stroke turns it on rather than
+            # painting into nothing. Arming Add/Erase already does this; this
+            # covers the case where M switched it off again afterwards.
+            if not panel.dodge_burn_show_mask() and hasattr(
+                panel, "force_mask_overlay_visible"
+            ):
+                panel.force_mask_overlay_visible()
+
             # Live coverage overlay while painting (throttled with is_end flush).
             if panel.dodge_burn_show_mask():
                 now = time.perf_counter()

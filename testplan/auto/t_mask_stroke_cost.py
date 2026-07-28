@@ -139,6 +139,42 @@ def main() -> int:
         f"{cap_ms:.0f} ms -- the brush polls faster than this if it cannot",
     )
 
+    # --- a stroke must never paint into nothing ---
+    from raw_mask_layers import MaskLayerStack
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget
+
+    panel = ImageAdjustPanelWidget()
+    panel.show()
+    panel._panel_tabs.set_current(1)
+    layer = MaskLayer(np.zeros((40, 60), np.float32))
+    layer.alpha[5:15, 5:20] = 1.0
+    layer.touch()
+    panel.set_mask_layer_stack(MaskLayerStack(layers=[layer]))
+
+    panel._mask_paint_btn.setChecked(True)
+    check("arming Add shows the overlay", panel.dodge_burn_show_mask())
+
+    panel.toggle_dodge_burn_show_mask()
+    check("M can still switch it off", not panel.dodge_burn_show_mask())
+    check("and that is recorded as a user choice", panel._mask_user_hidden is True)
+
+    panel.force_mask_overlay_visible()
+    check(
+        "but a stroke turns it back on",
+        panel.dodge_burn_show_mask(),
+        "the overlay is the only feedback a stroke has now, so painting with "
+        "it off would show nothing at all until release",
+    )
+    check(
+        "without overwriting what the user chose",
+        panel._mask_user_hidden is True,
+        "M is still their setting; the stroke is a temporary override",
+    )
+    check(
+        "and the stroke path actually calls it",
+        "force_mask_overlay_visible" in src,
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
