@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 
+import cv2
 import numpy as np
 
 
@@ -36,8 +37,6 @@ def _ycbcr_to_rgb(y: np.ndarray, cb: np.ndarray, cr: np.ndarray) -> np.ndarray:
 
 
 def _bilateral_channel(channel: np.ndarray, sigma_color: float, *, preview: bool) -> np.ndarray:
-    import cv2
-
     d = 5 if preview else 7
     return cv2.bilateralFilter(
         np.ascontiguousarray(channel, dtype=np.float32),
@@ -51,22 +50,20 @@ def apply_guided_filter(guide: np.ndarray, src: np.ndarray, r: int, eps: float) 
     """
     Fast O(N) Guided Filter using float32 cv2.boxFilter.
     """
-    import cv2
-    
     r = int(round(r))
     if r < 1:
         return src
         
-    g_f32 = guide.astype(np.float32)
-    s_f32 = src.astype(np.float32)
+    g_f32 = guide.astype(np.float32, copy=False)
+    s_f32 = g_f32 if guide is src else src.astype(np.float32, copy=False)
     
     ksize = (2 * r + 1, 2 * r + 1)
     mean_I = cv2.boxFilter(g_f32, -1, ksize)
-    mean_p = cv2.boxFilter(s_f32, -1, ksize)
+    mean_p = mean_I if s_f32 is g_f32 else cv2.boxFilter(s_f32, -1, ksize)
     mean_Ip = cv2.boxFilter(g_f32 * s_f32, -1, ksize)
     cov_Ip = mean_Ip - mean_I * mean_p
     
-    mean_II = cv2.boxFilter(g_f32 * g_f32, -1, ksize)
+    mean_II = mean_Ip if s_f32 is g_f32 else cv2.boxFilter(g_f32 * g_f32, -1, ksize)
     var_I = mean_II - mean_I * mean_I
     
     a = cov_Ip / (var_I + eps)
@@ -105,8 +102,6 @@ def _downsample_blur_upsample(channel: np.ndarray, factor: int, blur_sigma: floa
     color at far lower spatial resolution than luminance (the same premise
     JPEG/video 4:2:0 chroma subsampling relies on).
     """
-    import cv2
-
     h, w = channel.shape
     sh, sw = max(1, h // factor), max(1, w // factor)
     small = cv2.resize(
@@ -119,9 +114,7 @@ def _downsample_blur_upsample(channel: np.ndarray, factor: int, blur_sigma: floa
 
 def _luma_edge_weight(y: np.ndarray, *, soft: float = 0.04) -> np.ndarray:
     """0 in flat regions, -> 1 near a real luminance edge (Sobel gradient, soft-knee)."""
-    import cv2
-
-    yf = np.ascontiguousarray(y, dtype=np.float32)
+    yf = y.astype(np.float32, copy=False)
     gx = cv2.Sobel(yf, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(yf, cv2.CV_32F, 0, 1, ksize=3)
     grad = np.sqrt(gx * gx + gy * gy)
@@ -135,7 +128,7 @@ def _shadow_weight(y: np.ndarray, *, mid: float = 0.12) -> np.ndarray:
     blotches that live in these dark regions, so the coarse chroma pass
     should lean harder there than on well-exposed flats.
     """
-    yf = np.maximum(y.astype(np.float32, copy=False), 0.0)
+    yf = y.astype(np.float32, copy=False)
     return mid / (mid + yf)
 
 
