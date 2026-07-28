@@ -120,14 +120,24 @@ def main() -> int:
             i
             for i, ln in enumerate(lines)
             if "mask_coverage_changed.connect" in ln
-            and "_sync_mask_layer_overlay" in "".join(lines[i : i + 3])
+            and "_on_mask_coverage_changed" in "".join(lines[i : i + 3])
         ),
         None,
     )
     check(
-        "main connects it to the overlay sync",
+        "main connects it to a handler",
         hit is not None,
         f"main.py:{hit + 1}" if hit is not None else "the signal is emitted but nobody listens",
+    )
+    handler = inspect.getsource(mainmod.RAWImageViewer._on_mask_coverage_changed)
+    check(
+        "and that handler redraws the overlay",
+        "_sync_mask_layer_overlay" in handler,
+    )
+    check(
+        "after ending any latched solo",
+        "_mask_overlay_forced_by_stroke = False" in handler,
+        "a stroke's solo would otherwise stop the eye showing any other mask",
     )
 
     # --- reset: the readout is wired, and it zeroes the LAYER, not just the UI ---

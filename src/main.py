@@ -9125,7 +9125,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._on_mask_selection_changed
             )
             self.single_image_adjust_panel.mask_coverage_changed.connect(
-                self._sync_mask_layer_overlay
+                self._on_mask_coverage_changed
             )
             self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
                 self._on_mask_gradient_tool_changed
@@ -23631,6 +23631,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     # ~25ms and is around display resolution, so the difference only shows
     # when zoomed in -- which is not what you are doing mid-stroke.
     _MASK_OVERLAY_STROKE_MAX_DIM = 1280
+
+    def _on_mask_coverage_changed(self) -> None:
+        """Coverage or per-mask visibility moved: redraw the whole stack.
+
+        Clearing the solo first is the point. A stroke solos so that turning
+        the overlay on to paint one mask does not drag every other mask back
+        into view -- but the eye is the user managing visibility by hand, and
+        while a solo was latched their clicks could not show anything except
+        the mask that happened to be selected.
+        """
+        self._mask_overlay_forced_by_stroke = False
+        self._sync_mask_layer_overlay()
 
     def _sync_mask_layer_overlay(self, *, max_dim: int | None = None) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)

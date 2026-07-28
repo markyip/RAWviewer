@@ -290,6 +290,72 @@ def main() -> int:
     p.toggle_dodge_burn_show_mask()
     check("M still turns it off with a brush armed", not p.dodge_burn_show_mask())
 
+    # --- clicking an eye has to produce something to look at ---
+    import main as _mainmod
+
+    two = MaskLayerStack(layers=[_layer("A"), _layer("B")])
+    p5 = _panel(two)
+    drawn = []
+
+    class _GV:
+        def update_mask_layer_overlay(self, *a, **k):
+            drawn.append(k.get("solo_index"))
+
+        def update_dodge_burn_mask(self, *a, **k):
+            pass
+
+        def hide_mask_overlay(self):
+            pass
+
+    class _H:
+        def __init__(self):
+            self.single_image_adjust_panel = p5
+            self._mask_layer_stack = two
+            self.gpu_view = _GV()
+            self._mask_overlay_forced_by_stroke = False
+
+        def _sync_dodge_burn_mask_overlay(self):
+            pass
+
+        def _sync_mask_layer_overlay(self, **k):
+            _mainmod.RAWImageViewer._sync_mask_layer_overlay(self, **k)
+
+        def _on_mask_coverage_changed(self):
+            _mainmod.RAWImageViewer._on_mask_coverage_changed(self)
+
+    host = _H()
+    p5.mask_coverage_changed.connect(host._on_mask_coverage_changed)
+    p5._set_mask_overlay_visible(False)
+    row_b = p5._mask_list.topLevelItem(1)
+
+    p5._on_mask_row_clicked(row_b, 1)  # hide B
+    check(
+        "hiding a mask does not switch the overlay on",
+        not p5.dodge_burn_show_mask(),
+        "you asked to hide something, not to see everything",
+    )
+
+    drawn.clear()
+    p5._on_mask_row_clicked(row_b, 1)  # show B again
+    check(
+        "showing a mask switches the overlay on",
+        p5.dodge_burn_show_mask(),
+        "with the overlay off, clicking an eye changed a flag nothing was "
+        "drawing and the control looked dead",
+    )
+    check("and actually redraws", len(drawn) >= 1, str(len(drawn)))
+
+    # A latched solo must not survive the user managing visibility by hand.
+    host._mask_overlay_forced_by_stroke = True
+    drawn.clear()
+    p5._on_mask_row_clicked(row_b, 1)
+    check(
+        "the eye ends a stroke's solo",
+        drawn and drawn[-1] is None,
+        f"solo_index {drawn[-1] if drawn else 'n/a'} -- while a solo was "
+        "latched, no eye click could show any mask but the selected one",
+    )
+
     # --- a component inside a group hides on its own ---
     from raw_mask_layers import MaskLayer as ML
 

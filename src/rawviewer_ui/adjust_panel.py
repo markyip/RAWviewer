@@ -4721,6 +4721,11 @@ class ImageAdjustPanelWidget(QWidget):
         else:
             target = layer
         target.overlay_hidden = not bool(getattr(target, "overlay_hidden", False))
+        if not target.overlay_hidden:
+            # Asking to see a mask has to produce something to see. With the
+            # overlay switched off, clicking an eye changed a flag nothing
+            # was drawing and the control looked dead.
+            self._set_mask_overlay_visible(True)
         # No touch(), no _emit_preview_and_save(): this shows or hides a tint
         # and changes nothing about the photo. Versioning the layer would
         # throw away a correct composite and re-render the frame to produce
