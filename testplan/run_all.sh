@@ -76,7 +76,7 @@ run "masks tab cleanup + invert scope" testplan/auto/t_masks_ui_cleanup.py testp
 run "mask gradients (linear/radial)" testplan/auto/t_mask_gradients.py
 run "HE/HE* NEF editing" testplan/auto/t_he_nef_editing.py
 run "mask layers drag-time throttling" testplan/auto/t_mask_layers_drag_throttle.py
-run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py testplan/auto/t_mask_groups.py testplan/auto/t_mask_delete_key.py testplan/auto/t_mask_group_ui.py testplan/auto/t_mask_invert_and_reset.py testplan/auto/t_mask_visibility_and_groups.py testplan/auto/t_mask_group_undo.py testplan/auto/t_down_key_discard.py testplan/auto/t_gallery_new_file.py testplan/auto/t_gallery_thumb_recovery.py testplan/auto/t_high_bit_raster_edit.py testplan/auto/t_visited_edit_bake.py testplan/auto/t_full_image_cache_budget.py testplan/auto/t_worker_no_qpixmap.py testplan/auto/t_raw_slot_accounting.py
+run "mask layers XMP persistence" testplan/auto/t_mask_layers_xmp.py testplan/auto/t_mask_groups.py testplan/auto/t_mask_delete_key.py testplan/auto/t_mask_group_ui.py testplan/auto/t_mask_invert_and_reset.py testplan/auto/t_mask_visibility_and_groups.py testplan/auto/t_mask_brush_mirror.py testplan/auto/t_mask_group_undo.py testplan/auto/t_down_key_discard.py testplan/auto/t_gallery_new_file.py testplan/auto/t_gallery_thumb_recovery.py testplan/auto/t_high_bit_raster_edit.py testplan/auto/t_visited_edit_bake.py testplan/auto/t_full_image_cache_budget.py testplan/auto/t_worker_no_qpixmap.py testplan/auto/t_raw_slot_accounting.py
 run "HDR per-image recovery weights" testplan/auto/t_hdr_per_image_weights.py
 run "masks panel (headless UI)" testplan/auto/t_masks_panel.py
 run "camera profile apply" testplan/auto/t_camera_profile_apply.py

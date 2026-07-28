@@ -4457,8 +4457,7 @@ class ImageAdjustPanelWidget(QWidget):
         else:
             btn.setToolTip(self._ai_tool_tips.get(kind, btn.toolTip()))
 
-    @staticmethod
-    def _mirror_brush_value(target, value: int) -> None:
+    def _mirror_brush_value(self, target, value: int) -> None:
         """Copy a brush value to its twin without triggering it back."""
         if target is None or target.value() == int(value):
             return
@@ -4467,10 +4466,16 @@ class ImageAdjustPanelWidget(QWidget):
             target.setValue(int(value))
         finally:
             target.blockSignals(False)
-        # The twin's own valueChanged is suppressed above, so emit the panel
-        # signal here -- otherwise dragging the mirror would move the value
-        # but never reach the brush cursor or the stamping code.
-        target.sliderReleased.emit()
+        # blockSignals above suppresses the twin's valueChanged, and for these
+        # three sliders valueChanged is the ONLY thing that emits
+        # dodge_burn_brush_changed. So setting Brush Size from the Masks tab
+        # moved the number everywhere and never told the cursor: the ring on
+        # screen stayed exactly as it was, which reads as a dead control.
+        #
+        # This used to emit target.sliderReleased instead. Nothing connects
+        # sliderReleased on _db_size/_db_strength/_db_feather, so it reached
+        # nothing at all.
+        self.dodge_burn_brush_changed.emit()
 
     _MASK_ICON_BOX = 34
 
