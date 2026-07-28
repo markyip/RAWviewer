@@ -926,9 +926,7 @@ class GpuImageView(QGraphicsView):
         self._mask_item.setPixmap(QPixmap())
         self._mask_overlay_shape = None
 
-    def update_mask_layer_overlay(
-        self, layers, active_index, max_dim=None, solo_index=None
-    ) -> None:
+    def update_mask_layer_overlay(self, layers, active_index, max_dim=None) -> None:
         """Colour overlay for the mask stack, whatever tool made each mask.
 
         One overlay for every kind of mask -- brush, linear, radial, subject,
@@ -963,12 +961,6 @@ class GpuImageView(QGraphicsView):
             # applied to the photo underneath. Hiding the tint is how you see
             # the result of a mask you have finished aiming.
             if getattr(layer, "overlay_hidden", False):
-                continue
-            # Solo: the stroke had to switch the overlay on to have anything
-            # to show, so it shows the mask being edited and nothing else.
-            # Bringing every other mask back at the same time would undo, in
-            # one brush stroke, whichever ones the user had put away.
-            if solo_index is not None and i != solo_index:
                 continue
             entries.append((i, layer))
         if not entries:

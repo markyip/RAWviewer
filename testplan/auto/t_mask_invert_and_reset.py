@@ -135,9 +135,10 @@ def main() -> int:
         "_sync_mask_layer_overlay" in handler,
     )
     check(
-        "after ending any latched solo",
-        "_mask_overlay_forced_by_stroke = False" in handler,
-        "a stroke's solo would otherwise stop the eye showing any other mask",
+        "and carries no separate solo state",
+        "_mask_overlay_forced_by_stroke" not in handler,
+        "one-mask-at-a-time lives in overlay_hidden now; a second flag for "
+        "the same thing is what latched and blocked the eye",
     )
 
     # --- reset: the readout is wired, and it zeroes the LAYER, not just the UI ---

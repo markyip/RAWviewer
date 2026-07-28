@@ -23633,15 +23633,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     _MASK_OVERLAY_STROKE_MAX_DIM = 1280
 
     def _on_mask_coverage_changed(self) -> None:
-        """Coverage or per-mask visibility moved: redraw the whole stack.
-
-        Clearing the solo first is the point. A stroke solos so that turning
-        the overlay on to paint one mask does not drag every other mask back
-        into view -- but the eye is the user managing visibility by hand, and
-        while a solo was latched their clicks could not show anything except
-        the mask that happened to be selected.
-        """
-        self._mask_overlay_forced_by_stroke = False
+        """Coverage or per-mask visibility moved: redraw the stack."""
         self._sync_mask_layer_overlay()
 
     def _sync_mask_layer_overlay(self, *, max_dim: int | None = None) -> None:
@@ -23664,14 +23656,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             if hasattr(gv, "update_mask_layer_overlay"):
                 gv.update_mask_layer_overlay(
-                    layers,
-                    panel.active_mask_index(),
-                    max_dim=max_dim,
-                    solo_index=(
-                        panel.active_mask_index()
-                        if getattr(self, "_mask_overlay_forced_by_stroke", False)
-                        else None
-                    ),
+                    layers, panel.active_mask_index(), max_dim=max_dim
                 )
         except Exception:
             pass
@@ -23777,20 +23762,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     feather=feather,
                 )
 
-            # The overlay is the only feedback a stroke has now that the photo
-            # is not re-rendered per stamp, so a stroke turns it on rather than
-            # painting into nothing. Arming Add/Erase already does this; this
-            # covers the case where M switched it off again afterwards.
-            #
-            # When the stroke is what switched it on, only the mask being
-            # edited is drawn (see solo_index). The user had the overlay off;
-            # answering that by lighting up every mask they had put away is
-            # not what asking to paint one of them meant.
+            # Rule 2. The overlay is the only feedback a stroke has now that
+            # the photo is not re-rendered per stamp, so a stroke shows the
+            # mask it is changing -- and only that one, so the answer to
+            # "paint this mask" is not every other mask lighting up too.
             if not panel.dodge_burn_show_mask() and hasattr(
-                panel, "force_mask_overlay_visible"
+                panel, "_mask_overlay_for_editing_coverage"
             ):
-                panel.force_mask_overlay_visible()
-                self._mask_overlay_forced_by_stroke = True
+                panel._mask_overlay_for_editing_coverage()
 
             # Live coverage overlay while painting (throttled with is_end flush).
             if panel.dodge_burn_show_mask():
@@ -24251,15 +24230,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
 
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
-        # Any deliberate move on the overlay toggle ends the stroke's solo.
-        # The stroke soloed because it had to switch the overlay on itself;
-        # once the user says anything about the overlay, that no longer
-        # applies and the stack is shown normally again.
-        #
-        # A forced show reaches here too, but the stroke sets the flag right
-        # after calling it, so it survives.
-        self._mask_overlay_forced_by_stroke = False
-
         # Route to whichever overlay this photo actually has. Mask layers were
         # falling through to the dodge/burn sync, which knows nothing about
         # them, so the Mask button did nothing while masking.

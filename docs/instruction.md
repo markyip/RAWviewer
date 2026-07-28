@@ -121,29 +121,36 @@ again. Both are undoable with **Ctrl/⌘+Z**.
 
 ## 4. Change visibility
 
-Two different controls, easily confused:
+Three rules, and everything defers to them:
 
-**The eye, per mask row.** Hides that mask's coloured overlay. **The
-adjustment still applies.** It is view state only: not written to the sidecar,
-not part of the render cache key, and toggling it does not re-render or save
-(`raw_mask_layers.py` — `MaskLayer.overlay_hidden`).
+1. **At most one mask's overlay is drawn.** Two coloured regions at once
+   cannot be told apart, which is the opposite of what the overlay is for.
+   Showing one mask hides the rest.
+2. **Editing coverage shows it.** Arming Add or Erase, or starting a stroke,
+   shows the mask you are about to change — and only that one.
+3. **Editing the adjustments hides it.** Moving Exposure, Sharpness or any
+   other mask slider puts the tint away, because you are judging the effect
+   on the photo and the tint is the one thing in the way.
 
-**M / the Mask button.** Shows or hides the overlay for everything at once.
+**The eye, per mask row.** Shows that mask and hides the others; clicking a
+shown mask hides it, leaving nothing shown. It is view state only: not
+written to the sidecar, not part of the render cache key, and toggling it
+does not re-render or save. **The adjustment still applies either way** —
+this controls the tint, not the edit.
 
-The overlay follows what you are doing:
-- Arming **Add** or **Erase** turns it on — painting coverage you cannot see
-  is guesswork.
-- **Starting a stroke** turns it on even if **M** switched it off, because
-  since mid-stroke rendering was removed the overlay is the only feedback a
-  stroke has. It stays on afterwards: the tint is what you just painted.
-  When the stroke is what switched it on, **only the mask being edited is
-  drawn** — bringing back every mask you had put away is not what asking to
-  paint one of them meant. Pressing **M** ends that and shows the stack
-  normally.
-- Switching between **Global** and **Masks** turns it off — the tint would
-  otherwise sit over the photo you switched pages to judge.
-- **M** overrules the first and third of those, and your choice is remembered
-  across them.
+Only top-level masks carry an eye. A group's parts do not: the overlay is
+built from the top-level layers and `_combined_alpha_at` folds a group's
+components together without consulting `overlay_hidden`, so a per-component
+eye could not change anything on screen.
+
+**M / the Mask button** switches the overlay off and on wholesale.
+**Switching between Global and Masks** turns it off — the tint would
+otherwise sit over the photo you switched pages to judge.
+
+Exclusivity lives in `overlay_hidden` itself rather than in a separate
+"solo" flag. That matters: an earlier attempt kept the two apart, and the
+solo latched and stopped the eye from showing anything but the selected
+mask.
 
 > There is no UI control that disables a mask's *effect* while keeping it in
 > the list. `MaskLayer.enabled` implements exactly that and is fully wired

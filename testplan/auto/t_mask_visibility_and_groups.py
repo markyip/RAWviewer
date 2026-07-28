@@ -326,34 +326,37 @@ def main() -> int:
     host = _H()
     p5.mask_coverage_changed.connect(host._on_mask_coverage_changed)
     p5._set_mask_overlay_visible(False)
+    row_a = p5._mask_list.topLevelItem(0)
     row_b = p5._mask_list.topLevelItem(1)
 
-    p5._on_mask_row_clicked(row_b, 1)  # hide B
+    def shown():
+        return [not l.overlay_hidden for l in two.layers]
+
     check(
-        "hiding a mask does not switch the overlay on",
-        not p5.dodge_burn_show_mask(),
-        "you asked to hide something, not to see everything",
+        "a fresh stack starts with exactly one shown",
+        shown().count(True) == 1,
+        str(shown()),
     )
 
     drawn.clear()
-    p5._on_mask_row_clicked(row_b, 1)  # show B again
+    p5._on_mask_row_clicked(row_b, 1)  # show B
     check(
         "showing a mask switches the overlay on",
         p5.dodge_burn_show_mask(),
         "with the overlay off, clicking an eye changed a flag nothing was "
         "drawing and the control looked dead",
     )
+    check("and shows only that one", shown() == [False, True], str(shown()))
     check("and actually redraws", len(drawn) >= 1, str(len(drawn)))
 
-    # A latched solo must not survive the user managing visibility by hand.
-    host._mask_overlay_forced_by_stroke = True
-    drawn.clear()
-    p5._on_mask_row_clicked(row_b, 1)
+    p5._on_mask_row_clicked(row_a, 1)  # show A instead
+    check("showing another swaps them", shown() == [True, False], str(shown()))
+
+    p5._on_mask_row_clicked(row_a, 1)  # hide it again
     check(
-        "the eye ends a stroke's solo",
-        drawn and drawn[-1] is None,
-        f"solo_index {drawn[-1] if drawn else 'n/a'} -- while a solo was "
-        "latched, no eye click could show any mask but the selected one",
+        "and a mask can be hidden with nothing taking its place",
+        shown() == [False, False],
+        str(shown()),
     )
 
     # --- a component inside a group hides on its own ---
@@ -370,16 +373,18 @@ def main() -> int:
     parent = p2._mask_list.topLevelItem(0)
     check("the group has child rows", parent.childCount() == 2, str(parent.childCount()))
 
+    before = [c.overlay_hidden for c in stack.layers[0].components]
     p2._on_mask_row_clicked(parent.child(0), 1)
     check(
-        "hiding a component's tint leaves the group's shown",
-        stack.layers[0].components[0].overlay_hidden is True
-        and stack.layers[0].overlay_hidden is False,
-        "the eye must act on the row it is on, not the whole group",
+        "a component row carries no eye",
+        [c.overlay_hidden for c in stack.layers[0].components] == before,
+        "the overlay is built from top-level layers and _combined_alpha_at "
+        "folds a group's parts without consulting overlay_hidden, so a "
+        "per-component eye could never change anything on screen",
     )
     check(
-        "the other component is untouched",
-        stack.layers[0].components[1].overlay_hidden is False,
+        "and only top-level rows draw one",
+        parent.child(0).icon(1).isNull() and not parent.icon(1).isNull(),
     )
 
     # --- renaming still works, and does not disturb visibility ---

@@ -158,7 +158,7 @@ def main() -> int:
     check("M can still switch it off", not panel.dodge_burn_show_mask())
     check("and that is recorded as a user choice", panel._mask_user_hidden is True)
 
-    panel.force_mask_overlay_visible()
+    panel._mask_overlay_for_editing_coverage()
     check(
         "but a stroke turns it back on",
         panel.dodge_burn_show_mask(),
@@ -172,60 +172,51 @@ def main() -> int:
     )
     check(
         "and the stroke path actually calls it",
-        "force_mask_overlay_visible" in src,
+        "_mask_overlay_for_editing_coverage" in src,
+        "rule 2: editing coverage shows the mask being edited",
     )
 
-    # --- a forced-on overlay shows only the mask being edited ---
-    # Turning the overlay on to give a stroke something to show must not
-    # also bring back every mask the user had put away.
-    def L(y):
+    # --- one mask's overlay at a time, expressed in overlay_hidden ---
+    # This replaced a separate "solo" flag. Exclusivity belongs in the same
+    # state the eye and the selection already write, or the two disagree --
+    # which is exactly what left a latched solo blocking every eye click.
+    from raw_mask_layers import MaskLayerStack
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget
+
+    panel2 = ImageAdjustPanelWidget()
+    panel2.show()
+    panel2._panel_tabs.set_current(1)
+
+    def _lyr(y):
         lyr = MaskLayer(np.zeros((200, 300), np.float32))
         lyr.alpha[y:y + 40, 20:120] = 1.0
         lyr.touch()
         return lyr
 
-    la, lb = L(10), L(100)
-    v2 = GpuImageView()
+    three = MaskLayerStack(layers=[_lyr(10), _lyr(60), _lyr(120)])
+    panel2.set_mask_layer_stack(three)
 
-    def tints(**kw):
-        v2.update_mask_layer_overlay([la, lb], 0, **kw)
-        img = v2._mask_item.pixmap().toImage()
-        hh, ww = v2._mask_overlay_shape
-        return (
-            img.pixelColor(int(60 * ww / 300), int(25 * hh / 200)).alpha(),
-            img.pixelColor(int(60 * ww / 300), int(115 * hh / 200)).alpha(),
-        )
+    def shown():
+        return [not l.overlay_hidden for l in three.layers]
 
-    both = tints()
-    check("normally every mask is tinted", both[0] > 0 and both[1] > 0, str(both))
-
-    solo0 = tints(solo_index=0)
     check(
-        "solo draws only the mask being edited",
-        solo0[0] > 0 and solo0[1] == 0,
-        f"{solo0} -- the other mask must not reappear because you painted",
+        "a freshly loaded stack shows exactly one",
+        shown().count(True) == 1,
+        f"{shown()} -- overlay_hidden defaults to False, so without this "
+        "every mask starts marked visible",
     )
-    solo1 = tints(solo_index=1)
-    check("and follows which mask that is", solo1[0] == 0 and solo1[1] > 0, str(solo1))
 
-    lb.overlay_hidden = True
-    eye = tints()
-    check(
-        "the per-mask eye is still independent of solo",
-        eye[0] > 0 and eye[1] == 0,
-        str(eye),
-    )
-    lb.overlay_hidden = False
+    panel2.show_only_mask_overlay(2)
+    check("showing one hides the rest", shown() == [False, False, True], str(shown()))
 
     check(
-        "the stroke marks the overlay as forced",
-        "_mask_overlay_forced_by_stroke = True" in src,
+        "the overlay builder no longer takes a solo",
+        "solo_index" not in inspect.getsource(GpuImageView.update_mask_layer_overlay),
+        "a second source of truth for the same thing",
     )
-    toggled = inspect.getsource(mainmod.RAWImageViewer._on_dodge_burn_mask_toggled)
     check(
-        "and a deliberate M press ends the solo",
-        "_mask_overlay_forced_by_stroke = False" in toggled,
-        "once the user says anything about the overlay, soloing no longer applies",
+        "and neither does the host",
+        "_mask_overlay_forced_by_stroke" not in inspect.getsource(mainmod),
     )
 
     print(f"\n{len(FAILURES)} failure(s)")

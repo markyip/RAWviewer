@@ -3867,6 +3867,63 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._db_show_mask_btn.toggle()
 
+    # ---- Overlay visibility: one set of rules, in one place ---------------
+    #
+    # These grew one patch at a time and kept colliding, so they are stated
+    # together here and every caller below defers to them:
+    #
+    #   1. At most ONE mask's overlay is drawn. Two coloured regions at once
+    #      cannot be told apart, which is the opposite of what the overlay is
+    #      for.
+    #   2. Editing COVERAGE (Add / Erase, or a stroke) shows it. You are
+    #      changing where the mask reaches, so you have to see where it
+    #      reaches.
+    #   3. Editing the mask's ADJUSTMENTS (Exposure, Sharpness, ...) hides it.
+    #      You are judging the effect on the photo, and a tint over the region
+    #      is the one thing stopping you.
+    #
+    # Exclusivity lives in overlay_hidden itself rather than in a separate
+    # "solo" flag: one source of truth, and the eye, the tools and the
+    # selection all express themselves the same way.
+
+    def show_only_mask_overlay(self, index) -> None:
+        """Rule 1: draw this mask's overlay and no other."""
+        stack = self._mask_stack
+        if stack is None:
+            return
+        for i, layer in enumerate(stack.layers):
+            layer.overlay_hidden = i != index
+        self._refresh_mask_row_eyes()
+
+    def _refresh_mask_row_eyes(self) -> None:
+        """Redraw every row's eye from the layer it belongs to."""
+        lst = getattr(self, "_mask_list", None)
+        stack = self._mask_stack
+        if lst is None or stack is None:
+            return
+        self._mask_block = True
+        try:
+            for i in range(lst.topLevelItemCount()):
+                item = lst.topLevelItem(i)
+                if item is not None and i < len(stack.layers):
+                    self._apply_mask_row_visibility(item, stack.layers[i])
+        finally:
+            self._mask_block = False
+
+    def _mask_overlay_for_editing_coverage(self) -> None:
+        """Rule 2: about to change where the mask reaches -- show it."""
+        idx = self.active_mask_index()
+        if idx is None:
+            return
+        self.show_only_mask_overlay(idx)
+        self._set_mask_overlay_visible(True)
+        self.mask_coverage_changed.emit()
+
+    def _mask_overlay_for_editing_adjustments(self) -> None:
+        """Rule 3: about to judge the effect -- get the tint out of the way."""
+        if self.dodge_burn_show_mask():
+            self._set_mask_overlay_visible(False)
+
     def force_mask_overlay_visible(self) -> None:
         """Show the overlay whatever the user last chose.
 
@@ -4493,6 +4550,13 @@ class ImageAdjustPanelWidget(QWidget):
             self.disarm_mask_layer_tools()
             self.disarm_gradient_tools()
         self._rebuild_mask_list()
+        # Rule 1 from the outset. overlay_hidden defaults to False, so a
+        # freshly loaded stack would start with every mask marked visible --
+        # the exact state the rule exists to prevent, and one that made the
+        # first click on an eye read as "hide" when the user meant "show".
+        if stack is not None and getattr(stack, "layers", None):
+            idx = self.active_mask_index()
+            self.show_only_mask_overlay(idx if idx is not None else 0)
         self._sync_mask_create_buttons()
 
     def mask_layer_stack(self):
@@ -4617,7 +4681,7 @@ class ImageAdjustPanelWidget(QWidget):
                             & ~Qt.ItemFlag.ItemIsUserCheckable
                             & ~Qt.ItemFlag.ItemIsDropEnabled
                         )
-                        self._apply_mask_row_visibility(child, comp)
+                        # No eye on a component: see _on_mask_row_clicked.
                         item.addChild(child)
                 else:
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDropEnabled)
@@ -4711,31 +4775,31 @@ class ImageAdjustPanelWidget(QWidget):
         row = self._mask_list._top_index(item)
         if not (0 <= row < len(stack.layers)):
             return
-        layer = stack.layers[row]
         if item.parent() is not None:
-            # A component row: hide the part, not the whole group.
-            idx = item.parent().indexOfChild(item)
-            if not (0 <= idx < len(layer.components)):
-                return
-            target = layer.components[idx]
-        else:
-            target = layer
-        target.overlay_hidden = not bool(getattr(target, "overlay_hidden", False))
-        if not target.overlay_hidden:
-            # Asking to see a mask has to produce something to see. With the
-            # overlay switched off, clicking an eye changed a flag nothing
-            # was drawing and the control looked dead.
-            self._set_mask_overlay_visible(True)
+            # Component rows carry no eye: the overlay is built from the
+            # top-level layers, and _combined_alpha_at folds a group's parts
+            # together without consulting overlay_hidden, so a per-component
+            # eye could never change anything on screen.
+            return
+        layer = stack.layers[row]
         # No touch(), no _emit_preview_and_save(): this shows or hides a tint
         # and changes nothing about the photo. Versioning the layer would
         # throw away a correct composite and re-render the frame to produce
         # identical pixels, and saving would write a sidecar for something
         # that is not an edit.
-        self._mask_block = True
-        try:
-            self._apply_mask_row_visibility(item, target)
-        finally:
-            self._mask_block = False
+        if getattr(layer, "overlay_hidden", False):
+            # Showing this one hides the rest (rule 1), and switches the
+            # overlay on -- otherwise the click changes a flag nothing is
+            # drawing and the control looks dead.
+            self.show_only_mask_overlay(row)
+            self._set_mask_overlay_visible(True)
+        else:
+            layer.overlay_hidden = True
+            self._mask_block = True
+            try:
+                self._apply_mask_row_visibility(item, layer)
+            finally:
+                self._mask_block = False
         self.mask_coverage_changed.emit()
 
     def _mask_row_icon(self, layer):
@@ -5019,6 +5083,13 @@ class ImageAdjustPanelWidget(QWidget):
             return
         self._sync_mask_sliders_from_active()
         self._sync_mask_controls_enabled()
+        # Rule 1 again: with the overlay up, it follows the selection rather
+        # than leaving a tint on the mask you just navigated away from.
+        if self.dodge_burn_show_mask():
+            idx = self.active_mask_index()
+            if idx is not None:
+                self.show_only_mask_overlay(idx)
+                self.mask_coverage_changed.emit()
         self.mask_selection_changed.emit()
 
     def _on_mask_item_changed(self, item, column: int = 0) -> None:
@@ -5081,13 +5152,11 @@ class ImageAdjustPanelWidget(QWidget):
             # with a press on the photo.
             if self.gradient_tool() is not None:
                 self.disarm_gradient_tools()
-            # Picking up a brush shows what is masked. Painting coverage you
-            # cannot see is guesswork -- you are aiming at a region whose
-            # edges are the whole point. Unconditional, unlike
-            # request_mask_overlay_visible: reaching for the brush is a
-            # clearer statement of intent than an earlier click on Mask, and
-            # M still turns it straight back off.
-            self._set_mask_overlay_visible(True)
+            # Rule 2: a coverage tool shows the mask it will change, and
+            # only that one. AI Selection is excluded -- it makes a NEW mask
+            # from a click rather than editing the selected one's coverage.
+            if self.mask_layer_mode() in ("paint", "erase"):
+                self._mask_overlay_for_editing_coverage()
         self._sync_mask_brush_visible()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
 
@@ -5174,6 +5243,9 @@ class ImageAdjustPanelWidget(QWidget):
         layer.adjustments[key] = self._mask_sliders[key].value() / div
         layer.touch()
         self._update_mask_value_label(key)
+        # Rule 3: you are judging the effect on the photo now, and the tint
+        # over the region is the one thing stopping you.
+        self._mask_overlay_for_editing_adjustments()
         self._schedule_live_preview()
 
     def _update_slider_label(self, key: str, fmt: Callable[[float], str]) -> None:
