@@ -9084,6 +9084,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_selection_changed.connect(
                 self._on_mask_selection_changed
             )
+            self.single_image_adjust_panel.mask_coverage_changed.connect(
+                self._sync_mask_layer_overlay
+            )
             self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
                 self._on_mask_gradient_tool_changed
             )

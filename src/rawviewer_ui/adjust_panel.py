@@ -1005,6 +1005,13 @@ class ImageAdjustPanelWidget(QWidget):
     mask_gradient_tool_changed = pyqtSignal(str)
     # Selected mask row changed -- the host moves the gradient handles to it.
     mask_selection_changed = pyqtSignal()
+    # What the mask COVERS changed while the stack's structure did not, so the
+    # "show what is masked" overlay has to be rebuilt. Invert is the case that
+    # needs it: it rewrites coverage in place, and the preview/save flow the
+    # other in-place edits ride only re-renders the photo -- it never touches
+    # the overlay, which left an inverted mask still tinting its old region
+    # while the image underneath showed the new one.
+    mask_coverage_changed = pyqtSignal()
     # Drag one mask onto another to group them: (source index, target index).
     # The host owns the stack, so it performs the move and the undo entry.
     mask_group_requested = pyqtSignal(int, int)
@@ -4168,6 +4175,7 @@ class ImageAdjustPanelWidget(QWidget):
             val.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
             val.setFixedWidth(52)
             val.setText("0")
+            val.clicked.connect(lambda k=key: self._reset_mask_slider(k))
             row.addWidget(val)
             self._mask_sliders[key] = slider
             self._mask_value_labels[key] = val
@@ -4634,6 +4642,9 @@ class ImageAdjustPanelWidget(QWidget):
         layer.invert = bool(checked)
         layer.touch()
         self._emit_preview_and_save()
+        # Invert changes coverage, not just the render, so the overlay has to
+        # be rebuilt too -- _emit_preview_and_save only re-renders the photo.
+        self.mask_coverage_changed.emit()
 
     def _on_mask_slider_changed(self, key: str) -> None:
         if self._mask_block:
@@ -4832,6 +4843,24 @@ class ImageAdjustPanelWidget(QWidget):
         if self._block_emit:
             return
         self._schedule_live_preview()
+
+    def _reset_mask_slider(self, key: str) -> None:
+        """Click a mask slider's value readout to zero it, as in Light/Colour.
+
+        Every mask adjustment is a delta applied inside the mask, so the
+        default is 0 for all of them -- there is no per-key default table to
+        consult the way _reset_slider needs one.
+
+        _mask_block stays OFF deliberately: setValue fires
+        _on_mask_slider_changed, which is what writes the layer and refreshes
+        the readout. Blocking it would move the handle and leave the mask
+        holding its old value.
+        """
+        slider = self._mask_sliders.get(key)
+        if slider is None or slider.value() == 0:
+            return
+        slider.setValue(0)
+        self._emit_preview_and_save()
 
     def _reset_slider(self, key: str) -> None:
         spec = next((s for s in SLIDER_SPECS if s.key == key), None)
