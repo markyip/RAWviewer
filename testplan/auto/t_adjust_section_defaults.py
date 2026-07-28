@@ -62,8 +62,22 @@ def test_first_open_expands_only_histogram_and_light():
 
 
 def test_defaults_constant_matches_behaviour():
-    """The constant is the documented contract; keep it honest."""
-    assert set(_SECTION_DEFAULT_EXPANDED) == {"histogram", "light"}
+    """The constant is the documented contract; keep it honest.
+
+    Global keeps its two. The mask groups are open on top of those and are
+    deliberately different: the Masks page holds only the mask stack and
+    those three groups, so there is nothing to scroll past, and adjusting
+    the selected mask is the reason to be on the page. Collapsed by default
+    would have hidden every mask slider behind a header.
+    """
+    keys = set(_SECTION_DEFAULT_EXPANDED)
+    assert {"histogram", "light"} <= keys, sorted(keys)
+    assert {k for k in keys if not k.startswith("mask_")} == {"histogram", "light"}, (
+        f"a Global section was added to the defaults: {sorted(keys)}"
+    )
+    assert {k for k in keys if k.startswith("mask_")} == {
+        "mask_light", "mask_color", "mask_detail"
+    }, sorted(keys)
     print("  OK   _SECTION_DEFAULT_EXPANDED matches")
 
 

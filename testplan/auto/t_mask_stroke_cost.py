@@ -175,6 +175,59 @@ def main() -> int:
         "force_mask_overlay_visible" in src,
     )
 
+    # --- a forced-on overlay shows only the mask being edited ---
+    # Turning the overlay on to give a stroke something to show must not
+    # also bring back every mask the user had put away.
+    def L(y):
+        lyr = MaskLayer(np.zeros((200, 300), np.float32))
+        lyr.alpha[y:y + 40, 20:120] = 1.0
+        lyr.touch()
+        return lyr
+
+    la, lb = L(10), L(100)
+    v2 = GpuImageView()
+
+    def tints(**kw):
+        v2.update_mask_layer_overlay([la, lb], 0, **kw)
+        img = v2._mask_item.pixmap().toImage()
+        hh, ww = v2._mask_overlay_shape
+        return (
+            img.pixelColor(int(60 * ww / 300), int(25 * hh / 200)).alpha(),
+            img.pixelColor(int(60 * ww / 300), int(115 * hh / 200)).alpha(),
+        )
+
+    both = tints()
+    check("normally every mask is tinted", both[0] > 0 and both[1] > 0, str(both))
+
+    solo0 = tints(solo_index=0)
+    check(
+        "solo draws only the mask being edited",
+        solo0[0] > 0 and solo0[1] == 0,
+        f"{solo0} -- the other mask must not reappear because you painted",
+    )
+    solo1 = tints(solo_index=1)
+    check("and follows which mask that is", solo1[0] == 0 and solo1[1] > 0, str(solo1))
+
+    lb.overlay_hidden = True
+    eye = tints()
+    check(
+        "the per-mask eye is still independent of solo",
+        eye[0] > 0 and eye[1] == 0,
+        str(eye),
+    )
+    lb.overlay_hidden = False
+
+    check(
+        "the stroke marks the overlay as forced",
+        "_mask_overlay_forced_by_stroke = True" in src,
+    )
+    toggled = inspect.getsource(mainmod.RAWImageViewer._on_dodge_burn_mask_toggled)
+    check(
+        "and a deliberate M press ends the solo",
+        "_mask_overlay_forced_by_stroke = False" in toggled,
+        "once the user says anything about the overlay, soloing no longer applies",
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

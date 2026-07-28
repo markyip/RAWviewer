@@ -203,7 +203,15 @@ class AdjustValueLabel(QLabel):
 # fully-expanded column meant scrolling past HSL, Tone Curve and Looks to
 # reach anything, every single launch. Histogram and Light are the two you
 # read or reach for immediately on opening an image.
-_SECTION_DEFAULT_EXPANDED = frozenset({"histogram", "light"})
+#
+# The mask groups start open, unlike most Global sections. The Masks page
+# holds only the mask stack and these three, so there is nothing to scroll
+# past -- and adjusting the selected mask is the reason you are on the page.
+# Collapsed by default would have hidden every slider behind a header the
+# moment the groups became foldable.
+_SECTION_DEFAULT_EXPANDED = frozenset(
+    {"histogram", "light", "mask_light", "mask_color", "mask_detail"}
+)
 
 # Collapse state for the rest of the run, keyed by section settings_key.
 #
@@ -1346,6 +1354,7 @@ class ImageAdjustPanelWidget(QWidget):
         copy_btn.setToolTip("Copy this image's edit settings (session clipboard)")
         copy_btn.clicked.connect(self._on_copy_settings_clicked)
         header.addWidget(copy_btn)
+        self._copy_btn = copy_btn
         self._paste_btn = QPushButton("Paste")
         self._paste_btn.setObjectName("adjust_reset_btn")
         self._paste_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -3397,6 +3406,16 @@ class ImageAdjustPanelWidget(QWidget):
             hint.setText(self._HEADER_HINTS[page])
             hint.setToolTip(self._HEADER_HINT_TIPS[page])
 
+        # Copy/Paste carry the GLOBAL edit and nothing else: they work off
+        # get_adjustments(), which never contains masks (main.py injects the
+        # live stack separately, and dodge/burn never passes through it at
+        # all). On the Masks page they are two buttons that look like they
+        # would copy the mask you are working on and silently do not.
+        for name in ("_copy_btn", "_paste_btn"):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.setVisible(not masks)
+
         # Leaving a page puts its overlay away. The coloured tint answers
         # "where does this apply", which is a question you are only asking
         # while you are on the page that applies it -- carried onto the other
@@ -3999,7 +4018,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_block = False
         self._mask_sliders: Dict[str, AdjustSlider] = {}
         self._mask_value_labels: Dict[str, QLabel] = {}
-        self._mask_group_labels: list[QLabel] = []
+        self._mask_group_labels: list = []
+        self._mask_group_sections: list = []
 
         container = QWidget()
         col = QVBoxLayout(container)
@@ -4368,16 +4388,22 @@ class ImageAdjustPanelWidget(QWidget):
         params_col.addWidget(self._mask_section_head("Adjust", "inside the mask"))
 
         for group_i, (group_title, specs) in enumerate(self._MASK_SLIDER_GROUPS):
-            group_lbl = QLabel(group_title.upper())
-            group_lbl.setStyleSheet(
-                f"color: {theme.INK_MUTED}; font-size: 9px; font-weight: 700; "
-                "letter-spacing: 1.2px;"
+            # The same CollapsibleSection the Global page uses, not a styled
+            # label: these groups carry the same names and the same controls,
+            # so they should fold the same way. Ten sliders in a fixed column
+            # also meant scrolling past Light and Color to reach Detail on
+            # every visit.
+            #
+            # settings_key is namespaced per group and remembers its state for
+            # the run, exactly like the Global sections -- "mask_light" cannot
+            # collide with Global's "light".
+            section = CollapsibleSection(
+                group_title, settings_key=f"mask_{group_title.lower()}"
             )
-            # A little air above each heading except the first, which already
-            # sits under the "Adjust" rule.
-            group_lbl.setContentsMargins(0, 0 if group_i == 0 else 6, 0, 0)
-            params_col.addWidget(group_lbl)
-            self._mask_group_labels.append(group_lbl)
+            params_col.addWidget(section)
+            self._mask_group_sections.append(section)
+            group_col = section.content_layout
+            self._mask_group_labels.append(section)
 
             for key, label, lo, hi, div in specs:
                 row = QHBoxLayout()
@@ -4404,7 +4430,7 @@ class ImageAdjustPanelWidget(QWidget):
                 row.addWidget(val)
                 self._mask_sliders[key] = slider
                 self._mask_value_labels[key] = val
-                params_col.addLayout(row)
+                group_col.addLayout(row)
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "

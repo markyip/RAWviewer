@@ -130,6 +130,10 @@ The overlay follows what you are doing:
 - **Starting a stroke** turns it on even if **M** switched it off, because
   since mid-stroke rendering was removed the overlay is the only feedback a
   stroke has. It stays on afterwards: the tint is what you just painted.
+  When the stroke is what switched it on, **only the mask being edited is
+  drawn** — bringing back every mask you had put away is not what asking to
+  paint one of them meant. Pressing **M** ends that and shows the stack
+  normally.
 - Switching between **Global** and **Masks** turns it off — the tint would
   otherwise sit over the photo you switched pages to judge.
 - **M** overrules the first and third of those, and your choice is remembered
@@ -149,6 +153,11 @@ grouped the way the Global page groups the same controls:
 - **Light** — Exposure, Contrast
 - **Color** — Temp (rel), Tint, Saturation, Vibrance
 - **Detail** — Sharpness, Clarity, Dehaze, Defringe
+
+Each group folds, using the same `CollapsibleSection` as the Global page, and
+remembers its state for the rest of the run. All three start open — the Masks
+page has nothing else to scroll past, and adjusting the selected mask is the
+reason to be on it.
 
 Click a slider's **value readout** to reset it to 0, as on the Global page.
 
@@ -188,6 +197,10 @@ times a second.
 - **H** histogram · **J** clipping warnings · **G** composition guide ·
   **F** focus point.
 - **M** to drop the overlay and look at the photo itself.
+- **Copy** / **Paste** are hidden on the Masks page: they carry the global
+  edit only (they work off `get_adjustments()`, which never contains a mask),
+  so on that page they would look like they copied the mask and silently
+  would not.
 - **?** opens the shortcut cheat sheet, which is context-aware.
 
 ---

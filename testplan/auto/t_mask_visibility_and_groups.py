@@ -254,9 +254,61 @@ def main() -> int:
     p4 = _panel(MaskLayerStack(layers=[_layer()]))
     titles = [t for t, _ in p4._MASK_SLIDER_GROUPS]
     check("adjustments are grouped", titles == ["Light", "Color", "Detail"], str(titles))
+    # --- the groups fold, the way the Global page's sections do ---
+    from rawviewer_ui.adjust_panel import CollapsibleSection
+
+    secs = p4._mask_group_sections
+    check("there is a section per group", len(secs) == 3, str(len(secs)))
     check(
-        "the headings are rendered",
-        [l.text() for l in p4._mask_group_labels] == ["LIGHT", "COLOR", "DETAIL"],
+        "and they are the Global page's own section widget",
+        all(isinstance(s, CollapsibleSection) for s in secs),
+        "a styled label cannot fold; these carry the same controls as Global "
+        "and should behave the same",
+    )
+    check(
+        "they start open",
+        all(s._expanded for s in secs),
+        "collapsed by default would hide every slider behind a header on the "
+        "one page whose purpose is adjusting the selected mask",
+    )
+
+    secs[1].set_expanded(False)
+    check("a group collapses", not secs[1]._expanded)
+    check("and takes its sliders with it", not secs[1].content.isVisible())
+    check("leaving the others alone", secs[0]._expanded and secs[2]._expanded)
+    secs[1].set_expanded(True)
+    check("and re-opens", secs[1]._expanded)
+
+    check(
+        "the mask groups do not collide with Global's sections",
+        p4.sect_light._expanded is True,
+        "'mask_light' and 'light' must be separate settings keys",
+    )
+
+    # --- Copy/Paste are global-only, so they leave the Masks page ---
+    p4._panel_tabs.set_current(0)
+    check(
+        "Copy and Paste show on Global",
+        p4._copy_btn.isVisible() and p4._paste_btn.isVisible(),
+    )
+    p4._panel_tabs.set_current(1)
+    check(
+        "and are hidden on Masks",
+        not p4._copy_btn.isVisible() and not p4._paste_btn.isVisible(),
+        "they copy get_adjustments(), which never contains a mask -- on this "
+        "page they look like they would copy the mask and silently would not",
+    )
+    p4._panel_tabs.set_current(0)
+    check("and come back on Global", p4._copy_btn.isVisible())
+    p4._panel_tabs.set_current(1)
+
+    import inspect as _inspect
+
+    copy_src = _inspect.getsource(p4._on_copy_settings_clicked)
+    check(
+        "Copy really is global-only",
+        "get_adjustments()" in copy_src and "mask" not in copy_src.lower().split('"""')[-1],
+        "if it ever learns about masks, it should come back to this page",
     )
 
     # Exposure/Contrast under Light, WB and saturation under Color: the same

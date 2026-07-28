@@ -23624,7 +23624,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         try:
             if hasattr(gv, "update_mask_layer_overlay"):
                 gv.update_mask_layer_overlay(
-                    layers, panel.active_mask_index(), max_dim=max_dim
+                    layers,
+                    panel.active_mask_index(),
+                    max_dim=max_dim,
+                    solo_index=(
+                        panel.active_mask_index()
+                        if getattr(self, "_mask_overlay_forced_by_stroke", False)
+                        else None
+                    ),
                 )
         except Exception:
             pass
@@ -23734,10 +23741,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # is not re-rendered per stamp, so a stroke turns it on rather than
             # painting into nothing. Arming Add/Erase already does this; this
             # covers the case where M switched it off again afterwards.
+            #
+            # When the stroke is what switched it on, only the mask being
+            # edited is drawn (see solo_index). The user had the overlay off;
+            # answering that by lighting up every mask they had put away is
+            # not what asking to paint one of them meant.
             if not panel.dodge_burn_show_mask() and hasattr(
                 panel, "force_mask_overlay_visible"
             ):
                 panel.force_mask_overlay_visible()
+                self._mask_overlay_forced_by_stroke = True
 
             # Live coverage overlay while painting (throttled with is_end flush).
             if panel.dodge_burn_show_mask():
@@ -24198,6 +24211,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.set_crop_insets(0.0, 0.0, 0.0, 0.0, emit=not panel.is_crop_mode())
 
     def _on_dodge_burn_mask_toggled(self, show: bool) -> None:
+        # Any deliberate move on the overlay toggle ends the stroke's solo.
+        # The stroke soloed because it had to switch the overlay on itself;
+        # once the user says anything about the overlay, that no longer
+        # applies and the stack is shown normally again.
+        #
+        # A forced show reaches here too, but the stroke sets the flag right
+        # after calling it, so it survives.
+        self._mask_overlay_forced_by_stroke = False
+
         # Route to whichever overlay this photo actually has. Mask layers were
         # falling through to the dodge/burn sync, which knows nothing about
         # them, so the Mask button did nothing while masking.
