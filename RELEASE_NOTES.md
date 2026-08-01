@@ -3,61 +3,104 @@
 **Language / 語言：** English · [繁體中文](RELEASE_NOTES.zh-TW.md)
 
 
-## 🚧 Unreleased (on `development`)
-
-### Local masks, reworked
-
-- **Masks moved to their own tab** in the Adjust panel, grouped by what each control acts on: the stack, the six ways to make a mask, what you can do to the selected one, the brush, and the mask's own adjustments.
-- **Linear and radial gradients**, placed by dragging on the photo the way you would expect, with handles afterwards to move, resize or re-aim them. Stored as geometry rather than pixels, so they stay re-draggable after a reload, land identically on preview and export, and cost a few hundred bytes in the sidecar instead of a full-size image.
-- **Every mask kind now shows a colour overlay** — brush, gradients, Smart Object, Sky, AI Selection. The selected mask reads in the accent colour, the rest recede. Previously a mask made by anything other than the brush was invisible.
-- **Mask rows show the mask**, not just a name: each row renders that mask's own shape.
-- **Brush Feather** joins Size and Flow, and all three are reachable from the Masks tab. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
-- **Smart Object** (was "Subject") and **AI Selection** (was "Click") are renamed to say who is choosing — the app, or you — and every mask tool now explains itself on hover. Asking for a mask the photo already has selects the existing one instead of stacking a duplicate.
-- **Invert now works across the whole frame.** It was applying only inside the painted region, which is the one place an inverted mask has no effect.
-
-### Brushes
-
-- **Hold D / B / X / H and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's tool buttons still arm persistently if you prefer that.
-- **The eraser actually erases.** It was held back by Edge Assist, so paint that had spilled across an edge could not be removed; worse, releasing the brush put back about a third of what you had just erased. Both fixed.
-- **The mask overlay toggles with no tool armed** — checking whether anything is masked no longer requires picking up a brush.
-
-### Editing and transform
-
-- **Nikon HE/HE\* NEF files can be edited**, via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as it does editing a JPEG.
-- **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
-- **Anamorphic desqueeze updates the live preview** and moved to its own section as buttons. It was correct on export all along; the preview simply never refreshed.
-- **Panel sliders respond to horizontal trackpad swipes only**, so scrolling the panel no longer snags on whichever slider is under the pointer.
-
-### Colour
-
-- **Camera profiles record the decode they were calibrated against** and say so if it changes. A profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
-
-### Smaller download
-
-- **The sky model is half the size** (168 MB → 84 MB) for pixel-identical output. The subject model stays as it is: both smaller variants were measured and both ran slower than they were worth.
-
-### Panel
-
-- **Sections start collapsed** apart from Histogram and Light, and remember how you arrange them for the rest of the session.
-
----
-
 ## 🚀 Version 3.1.0
-**Release Date: July 22, 2026**
+**Status: not yet released — currently on `development`**
 
-### What's new for you
+The headline is local masks: a whole tab, a new engine behind it, and the
+adjustments to go with it. Alongside that, photo merging (HDR, panorama,
+focus stacking), non-destructive editing of ordinary image files, camera
+colour calibration, and a long list of speed work.
 
-- **Non-Destructive JPEG & WebP Editing Support:** You can now open and edit JPEG, WebP, PNG, TIFF, and BMP images in the Adjust panel (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence. Adjust Exposure, Contrast, Relative White Balance, Curves, HSL, Vignette, Denoise, Dodge & Burn, Spot Heal, and Geometry transforms without modifying your original files.
-- **HDR Merge, Panorama & Panorama HDR Stitching:** Multi-select photos in Gallery view and right-click to launch **🌄 Standard Panorama**, **☀️ HDR Merge**, or **🌅 Panorama HDR Merge**. Features handheld MTB exposure alignment, Highlight/Shadow/Midtone weight tuning, and automatic rectangular border auto-cropping.
-- **Camera Color Calibration & Auto EXIF Inheritance:** Click **"Calibrate Camera from Color Checker..."** in the Adjust panel to sample 24 patch colors, calculate RGB curves, White Balance offsets, and HSL deltas. Calibrated color science is bound to your camera model's EXIF metadata (`Make` & `Model`), automatically applying to all future photos from that camera model without needing manual XMP or 3D LUT exports.
-- **Anamorphic Lens Desqueeze:** Added dedicated Anamorphic Desqueeze controls in the Transform section of the Adjust panel. Easily un-squeeze footage captured with anamorphic lenses using standard factors: **1.33x**, **1.5x**, **1.6x**, and **2.0x**.
-- **Apply Edits to Burst Photo Groups:** When viewing a photo stack from a burst sequence, click the new **"Apply to Burst Group (N photos)"** button in the Adjust panel to apply fundamental tone, color, and noise adjustments across all member photos in the burst group at once while preserving individual crop and local retouching masks.
-- **Context-Aware Export Format Options:** The Export menu dynamically adapts to your source file format. Editing RAW files offers 16-bit TIFF, JPEG, and WebP exports; editing JPEG or WebP files restricts output formats to JPEG and WebP.
-- **Installer Setup UI Refinements:** Setup radio buttons clearly present edition capabilities (`Browse + Basic Adjustment`, `AI search + denoise`, `GPU RAW processing`).
+### 🎭 Local masks
+
+- **Masks have their own tab** in the Adjust panel, arranged by what each control acts on: the mask stack, the ways to make a mask, what you can do to the selected one, the brush, and that mask's own adjustments.
+- **Six ways to start a mask**, all visible in one section, one press each: **Brush**, **Linear Gradient**, **Radial Gradient**, **Smart Object**, **Sky**, **AI Selection**. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
+- **Gradients are placed by dragging** on the photo, with handles afterwards to move, resize or re-aim them. They are stored as geometry rather than pixels, so they stay re-draggable after a reload, land identically on preview and export, and cost a few hundred bytes in the sidecar instead of a full-size image.
+- **Masks can be grouped.** Drag one mask onto another and they combine into a single mask with one adjustment set; drag a part back out to separate it again. Both are undoable.
+- **Each mask carries its own adjustments**, grouped the way the Global tab groups them — **Light** (Exposure, Contrast), **Color** (Temp, Tint, Saturation, Vibrance) and **Detail** (Sharpness, Clarity, Dehaze, Defringe). The groups fold, and click a value readout to reset that slider, exactly as on Global.
+- **Add / Erase / Invert / Duplicate / Delete** act on the selected mask. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
+- **Mask rows show the mask**, not just a name: each row renders that mask's own shape, and an inverted mask draws — and says — what it actually covers.
+- **One overlay at a time.** Two coloured regions at once cannot be told apart, so showing one mask hides the others. Editing coverage (Add/Erase) shows the mask you are changing; moving an adjustment slider hides the tint so you can judge the effect on the photo. <kbd>M</kbd> overrides either.
+- **Invert works across the whole frame.** It was applying only inside the painted region, which is the one place an inverted mask has no effect.
+
+### 🤖 AI masks *(Plus)*
+
+- **Smart Object** (was "Subject") and **AI Selection** (was "Click") are named for who is choosing — the app, or you. **Sky** masks the sky in one press.
+- **AI Selection is a click tool, not a brush**: each click is a point, and more clicks add to the same mask.
+- **A progress dialog** for the wait, with Cancel and a timeout, instead of a status line that was indistinguishable from a hang. First use downloads the model and is not timed out.
+- **Asking for a mask the photo already has selects the existing one** instead of stacking a duplicate, and a tool whose mask exists is disabled with an explanation.
+- **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind.
+- **Standard edition omits these entirely** — no greyed-out buttons, and nothing on the Masks tab can trigger a model download.
+
+### 🖌️ Brushes
+
+- **Hold <kbd>D</kbd> / <kbd>B</kbd> / <kbd>X</kbd> / <kbd>H</kbd> and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's buttons still arm persistently if you prefer that. On the Masks tab, **hold <kbd>P</kbd>** to add coverage and <kbd>X</kbd> to erase it.
+- **Brush Feather** joins Size and Flow, and all three are reachable from the Masks tab without leaving the page. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
+- **The eraser actually erases.** It was held back by Edge Assist, so paint that had spilled across an edge could not be removed; worse, releasing the brush put back about a third of what you had just erased.
+- **Two-finger scroll resizes the brush mid-stroke**, and horizontal scroll sets Flow, without ending the stroke.
+- **No square edge printed into the mask** on stroke release.
+
+### 🌄 Merging photos
+
+- **HDR Merge, Panorama and Panorama HDR.** Multi-select in the gallery and right-click. Handheld MTB exposure alignment, Highlight/Shadow/Midtone weighting, and automatic rectangular border cropping.
+- **Focus Stack (All-in-Focus)** merges a focus bracket, with parallax correction and seam-aware fusion.
+
+### 🖼️ Editing beyond RAW
+
+- **JPEG, WebP, PNG, TIFF and BMP open in the Adjust panel** (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence — exposure, contrast, relative white balance, curves, HSL, vignette, denoise, dodge & burn, spot heal and geometry, without touching the original.
+- **Files deeper than 8 bits are edited at their real depth.** A 16-bit TIFF was reaching the editor with 256 of its 65,536 levels, which mattered most for this app's own output: HDR merge, panorama and focus stack all export 16-bit TIFF, and a shadow lift banded where the file would not have.
+- **Nikon HE/HE\* NEF files can be edited** via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as editing a JPEG. RAW that cannot be demosaiced keeps showing its embedded preview instead of a grey tile.
+
+### 🎨 Colour and lens
+
+- **Camera colour calibration from a ColorChecker**, with an interactive dialog, corner handles and auto-detect. Sample 24 patches to derive RGB curves, white-balance offsets and HSL deltas, bound to the camera's EXIF `Make`/`Model` so it applies to every future photo from that body.
+- **Profiles record the decode they were calibrated against** and say so if it changes — a profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
+- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×) now updates the live preview. It was correct on export all along; the preview simply never refreshed.
+- **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
+
+### 📤 Export and AI
+
+- **Context-aware export formats.** RAW offers 16-bit TIFF, JPEG and WebP; raster files offer JPEG and WebP.
+- **AI Upscale 2× (Real-ESRGAN)** and **AI Denoise (SCUNet)** appear as export variants, and only when those models are actually on disk.
+- **Faster AI denoise** — NAFNet on CPU platforms, plus a half-res mode with detail restore — and a new **AI Detail** slider controlling the denoise/detail balance.
+- **The sky model is half the size** (168 MB → 84 MB) for pixel-identical output.
+- **Fixed export band seams** and a case where AI denoise was silently skipped on the banded path.
+- **Dithering happens in encoded space, not linear**, fixing shadow noise.
+
+### ⚡ Speed
+
+- **Painting a mask is ~42× cheaper per stroke tick** (about 1360 ms → 32 ms on a 2200×3300 base). The photo is no longer re-rendered on every brush stamp; the overlay updates instead, and the edit renders once when you let go.
+- **Loading a photo with saved edits is much faster** — the sidecar is parsed once and shared, and mask coverage is stored at half resolution.
+- **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past.
+- **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.
+- **Missing gallery tiles come back.** A transient failure used to cache a grey placeholder permanently for the session.
+- **Trackpad scrolling is smooth**, no longer discarding sub-pixel movement.
+- **Visiting the editor no longer forces a re-decode.** Opening and closing without changing anything was dropping every cache tier for that photo.
+- **The full-image cache is bounded by memory rather than a fixed count of 8**, so smaller files keep more of them.
+
+### 🖥️ Panel, gallery and shortcuts
+
+- **A keyboard cheat sheet** on the panel's "i" button, grouped by task and aware of whether you are browsing, editing or comparing.
+- **Files this app writes appear in the gallery immediately** — no reopening the folder after an HDR merge, panorama or export.
+- **An edited photo's gallery tile refreshes** after you visit it in the editor, instead of showing the embedded JPEG forever.
+- **Apply to Burst Group** applies tone, colour and noise settings across a burst while preserving each photo's crop and local masks.
+- **<kbd>↓</kbd> discards only in single-image view**, not while editing, and Looks (LUT/XMP) can be renamed in place.
+- **Sections start collapsed** apart from Histogram and Light, and remember your arrangement for the rest of the session.
+- **Copy / Paste are hidden on the Masks tab** — they carry the global edit and never contained a mask, so on that page they looked like they would copy the mask and would not.
+- **The installer states edition capabilities plainly** (`Browse + Basic Adjustment`, `AI search + denoise`, `GPU RAW processing`).
+- **Release notes are shown in the update popup.**
+
+### 🔧 Under the hood
+
+Eleven rounds of review findings were fixed across this cycle, including
+building a `QPixmap` on worker threads, a decode-slot double-free reachable
+from several cancel paths, a registry keyed on `id()` that could match a
+different object after an address was reused, shared state guarded by
+per-instance locks, and a CUDA-GL resource released on the wrong thread.
 
 ### Upgrade
 
-Install over 3.0.2. No cache clear needed for this update.
+Install over 3.0.2. No cache clear needed.
 
 ---
 
