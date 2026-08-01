@@ -5580,19 +5580,33 @@ class ImageAdjustPanelWidget(QWidget):
         if is_raw:
             formats.insert(0, ("16-bit TIFF (baked)", "tiff16"))
 
-        # AI submenus appear only for models actually present on disk -- both
-        # are optional downloads, and a menu entry that silently exports an
-        # ordinary file is worse than no entry at all.
+        # Two conditions, and both are needed.
+        #
+        # Edition first: these are Plus features. Presence alone was the only
+        # test, which is not an edition check -- it merely looked like one
+        # because Standard cannot fetch the models. On any machine where the
+        # files exist for another reason (previously ran Plus, dev checkout,
+        # downgrade), Standard offered them, and the engines have no edition
+        # check of their own, so they ran.
+        #
+        # Then presence: a menu entry that silently exports an ordinary file
+        # is worse than no entry at all.
+        try:
+            from rawviewer_profile import ai_export_enabled
+
+            ai_allowed = ai_export_enabled()
+        except Exception:
+            ai_allowed = True
         try:
             from onnx_scunet import scunet_model_path
 
-            denoise_ready = os.path.exists(scunet_model_path())
+            denoise_ready = ai_allowed and os.path.exists(scunet_model_path())
         except Exception:
             denoise_ready = False
         try:
             from onnx_realesrgan import realesrgan_model_available
 
-            upscale_ready = realesrgan_model_available()
+            upscale_ready = ai_allowed and realesrgan_model_available()
         except Exception:
             upscale_ready = False
 

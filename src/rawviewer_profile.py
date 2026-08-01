@@ -164,6 +164,34 @@ def edition_display_name() -> str:
     return "Standard" if is_lite_build() else "Plus"
 
 
+def ai_export_enabled() -> bool:
+    """False in Standard, where AI denoise and AI upscale are not offered.
+
+    The export menu used to decide this on model presence alone -- "is the
+    file on disk" -- which is not an edition check at all. It only looked
+    right because a Standard user has no way to fetch those models. It stops
+    looking right the moment the files exist for another reason: a machine
+    that has run Plus, a dev checkout, a downgrade, or a manual copy.
+    Standard then offered Plus features, and since neither onnx_scunet nor
+    onnx_realesrgan has an edition check of its own, they ran.
+
+    Mirrors raw_ai_masks.ai_masks_enabled, including behaving like Plus when
+    the profile is unknown (dev checkout, tests) rather than silently
+    removing working features.
+    """
+    if os.environ.get("RAWVIEWER_FORCE_AI_EXPORT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return True
+    try:
+        return not is_lite_build()
+    except Exception:
+        return True
+
+
 def apply_shared_scroll_prefetch_defaults() -> None:
     """Gallery/nav prefetch for both Standard and Plus (setdefault; env wins)."""
     for key, value in SHARED_SCROLL_PREFETCH_DEFAULTS.items():

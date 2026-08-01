@@ -45,6 +45,9 @@ def shown(attr):
 _items = [b.text() for b in p._mask_create_buttons.values()]
 def offered(label):
     return label in _items
+# The export menu's AI variants are Plus features too, and used to be gated
+# on model presence alone -- which is not an edition check.
+_export = [a.text() for a in p._export_btn.menu().actions() if a.text()]
 print("@@" + json.dumps({
     "edition": rp.edition_display_name(),
     "enabled": m.ai_masks_enabled(),
@@ -63,6 +66,9 @@ print("@@" + json.dumps({
     "linear_item": offered("Linear Gradient"),
     "radial_item": offered("Radial Gradient"),
     "ai_btns_enabled": bool(p._mask_ai_subject_btn.isEnabled()),
+    "export_ai": [x for x in _export if x.startswith("AI ")],
+    "export_plain": [x for x in _export if not x.startswith("AI ")],
+    "ai_export_gate": rp.ai_export_enabled(),
 }))
 """
 
@@ -127,6 +133,31 @@ def main() -> int:
         check(f"Standard offers {name}", std[name], "model-free mask must survive")
     for name in ("brush", "erase", "invert"):
         check(f"Standard keeps {name}", std[name], "model-free mask must survive")
+
+    # --- AI export variants follow the edition, not what is on disk ---
+    check(
+        "Plus offers the AI export variants",
+        plus["export_ai"] == [
+            "AI Denoise (SCUNet)",
+            "AI Upscale 2\u00d7 (Real-ESRGAN)",
+            "AI Denoise + Upscale 2\u00d7",
+        ],
+        str(plus["export_ai"]),
+    )
+    check("Plus enables the export gate", plus["ai_export_gate"] is True)
+    check(
+        "Standard offers none of them",
+        std["export_ai"] == [],
+        f"{std['export_ai']} -- these models are on this machine, so gating "
+        "on presence alone showed Plus features in Standard, and neither "
+        "onnx engine has an edition check to stop the export running",
+    )
+    check("Standard disables the export gate", std["ai_export_gate"] is False)
+    check(
+        "and Standard keeps every ordinary format",
+        std["export_plain"] == plus["export_plain"] and std["export_plain"],
+        str(std["export_plain"]),
+    )
 
     # --- the override, for dev checkouts ---
     forced = probe("lite", {"RAWVIEWER_FORCE_AI_MASKS": "1"})
