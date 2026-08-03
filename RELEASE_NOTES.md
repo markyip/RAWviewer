@@ -14,20 +14,21 @@ colour calibration, and a long list of speed work.
 ### 🎭 Local masks
 
 - **Masks have their own tab** in the Adjust panel, arranged by what each control acts on: the mask stack, the ways to make a mask, what you can do to the selected one, the brush, and that mask's own adjustments.
-- **Six ways to start a mask**, all visible in one section, one press each: **Brush**, **Linear Gradient**, **Radial Gradient**, **Smart Object**, **Sky**, **AI Selection**. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
-- **Gradients are placed by dragging** on the photo, with handles afterwards to move, resize or re-aim them. They are stored as geometry rather than pixels, so they stay re-draggable after a reload, land identically on preview and export, and cost a few hundred bytes in the sidecar instead of a full-size image.
+- **Five ways to start a mask**, all visible in one section, one press each: **Brush**, **Smart Object**, **Sky**, **Depth**, **AI Selection**. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
 - **Masks can be grouped.** Drag one mask onto another and they combine into a single mask with one adjustment set; drag a part back out to separate it again. Both are undoable.
 - **Each mask carries its own adjustments**, grouped the way the Global tab groups them — **Light** (Exposure, Contrast), **Color** (Temp, Tint, Saturation, Vibrance) and **Detail** (Sharpness, Clarity, Dehaze, Defringe). The groups fold, and click a value readout to reset that slider, exactly as on Global.
 - **Add / Erase / Invert / Duplicate / Delete** act on the selected mask. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
 - **Mask rows show the mask**, not just a name: each row renders that mask's own shape, and an inverted mask draws — and says — what it actually covers.
 - **One overlay at a time.** Two coloured regions at once cannot be told apart, so showing one mask hides the others. Editing coverage (Add/Erase) shows the mask you are changing; moving an adjustment slider hides the tint so you can judge the effect on the photo. <kbd>M</kbd> overrides either.
-- **Invert works across the whole frame.** It was applying only inside the painted region, which is the one place an inverted mask has no effect.
+- **Invert covers the whole frame**, not just the part you painted — an inverted mask acts everywhere its original did not.
 
 ### 🤖 AI masks *(Plus)*
 
-- **Smart Object** (was "Subject") and **AI Selection** (was "Click") are named for who is choosing — the app, or you. **Sky** masks the sky in one press.
-- **AI Selection is a click tool, not a brush**: each click is a point, and more clicks add to the same mask.
-- **A progress dialog** for the wait, with Cancel and a timeout, instead of a status line that was indistinguishable from a hang. First use downloads the model and is not timed out.
+- **Smart Object** and **AI Selection** are named for who is choosing — the app, or you. **Sky** masks the sky in one press.
+- **AI Selection is a click tool, not a brush**: each click is a point, and more clicks add to the same mask. Selections come back solid inside and crisp at the edge. It leads the AI tools, being roughly ten times faster than Smart Object and needing no model download of its own.
+- **Smart Object takes the longest and gives the cleanest edge.** One press, no aiming, and it returns a single mask even when what stands out is several separate things. Reach for it when the cutout has to survive a strong adjustment; reach for AI Selection when you want a specific object, or want it now.
+- **Depth** masks by distance rather than by subject: full strength on the nearest things, fading to nothing on the farthest. Use it to lift a background, add haze to a distance, or cool the far half of a landscape. It is a fade, not a cutout — the whole frame is masked, by varying amounts — so invert it to grade the background instead. About a second on a typical frame.
+- **A progress dialog** for the wait, with Cancel and a timeout. First use downloads the model and is not timed out.
 - **Asking for a mask the photo already has selects the existing one** instead of stacking a duplicate, and a tool whose mask exists is disabled with an explanation.
 - **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind.
 - **Standard edition omits these entirely** — no greyed-out buttons, and nothing on the Masks tab can trigger a model download.
@@ -48,14 +49,14 @@ colour calibration, and a long list of speed work.
 ### 🖼️ Editing beyond RAW
 
 - **JPEG, WebP, PNG, TIFF and BMP open in the Adjust panel** (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence — exposure, contrast, relative white balance, curves, HSL, vignette, denoise, dodge & burn, spot heal and geometry, without touching the original.
-- **Files deeper than 8 bits are edited at their real depth.** A 16-bit TIFF was reaching the editor with 256 of its 65,536 levels, which mattered most for this app's own output: HDR merge, panorama and focus stack all export 16-bit TIFF, and a shadow lift banded where the file would not have.
+- **Files deeper than 8 bits are edited at their real depth** — a 16-bit TIFF keeps all 65,536 levels through the editor, not 256 of them. This matters most for this app's own output: HDR merge, panorama and focus stack all write 16-bit TIFF, so a shadow lift holds together instead of banding.
 - **Nikon HE/HE\* NEF files can be edited** via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as editing a JPEG. RAW that cannot be demosaiced keeps showing its embedded preview instead of a grey tile.
 
 ### 🎨 Colour and lens
 
 - **Camera colour calibration from a ColorChecker**, with an interactive dialog, corner handles and auto-detect. Sample 24 patches to derive RGB curves, white-balance offsets and HSL deltas, bound to the camera's EXIF `Make`/`Model` so it applies to every future photo from that body.
 - **Profiles record the decode they were calibrated against** and say so if it changes — a profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
-- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×) now updates the live preview. It was correct on export all along; the preview simply never refreshed.
+- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×), applied live in the preview and on export.
 - **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
 
 ### 📤 Export and AI
@@ -63,13 +64,13 @@ colour calibration, and a long list of speed work.
 - **Context-aware export formats.** RAW offers 16-bit TIFF, JPEG and WebP; raster files offer JPEG and WebP.
 - **AI Upscale 2× (Real-ESRGAN)** and **AI Denoise (SCUNet)** appear as export variants, and only when those models are actually on disk.
 - **Faster AI denoise** — NAFNet on CPU platforms, plus a half-res mode with detail restore — and a new **AI Detail** slider controlling the denoise/detail balance.
-- **The sky model is half the size** (168 MB → 84 MB) for pixel-identical output.
+- **The sky mask model is a compact 84 MB** half-precision export, for output identical to the full-size one.
 - **Fixed export band seams** and a case where AI denoise was silently skipped on the banded path.
 - **Dithering happens in encoded space, not linear**, fixing shadow noise.
 
 ### ⚡ Speed
 
-- **Painting a mask is ~42× cheaper per stroke tick** (about 1360 ms → 32 ms on a 2200×3300 base). The photo is no longer re-rendered on every brush stamp; the overlay updates instead, and the edit renders once when you let go.
+- **Painting a mask stays responsive on big files** — about 32 ms per stroke tick on a 2200×3300 base. The photo is not re-rendered on every brush stamp; the overlay updates instead, and the edit renders once when you let go.
 - **Loading a photo with saved edits is much faster** — the sidecar is parsed once and shared, and mask coverage is stored at half resolution.
 - **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past.
 - **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.

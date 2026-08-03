@@ -161,10 +161,7 @@ def test_compositor_applies_a_group_once():
 
 def test_xmp_roundtrip():
     a = MaskLayer(blob(100, 90, 60), name="Brush 1")
-    b = MaskLayer(
-        np.zeros((H, W), np.float32), name="Grad", kind="linear",
-        params={"x0": 0.1, "y0": 0.1, "x1": 0.9, "y1": 0.9}, blend="subtract",
-    )
+    b = MaskLayer(blob(100, 210, 45), name="Brush 2", blend="subtract")
     g = _group([a, b], name="Sky group")
     g.adjustments = {"Exposure2012": 0.8, "Saturation": 20.0}
 
@@ -173,7 +170,7 @@ def test_xmp_roundtrip():
 
     check("round-trips as a group", back.is_group)
     check("component count preserved", len(back.components) == 2)
-    check("component kinds preserved", [c.kind for c in back.components] == ["brush", "linear"])
+    check("component kinds preserved", [c.kind for c in back.components] == ["brush", "brush"])
     check("component blends preserved", [c.blend for c in back.components] == ["add", "subtract"])
     check("group adjustments preserved", abs(back.adjustments.get("Exposure2012", 0) - 0.8) < 1e-4)
     check(

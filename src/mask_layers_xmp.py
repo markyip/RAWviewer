@@ -33,11 +33,6 @@ from raw_mask_layers import (
     MaskLayerStack,
     _hsl_keys,
 )
-from raw_mask_shapes import PARAMETRIC_KINDS
-
-# Reference resolution for a deserialized parametric layer's placeholder
-# alpha; see the comment at its construction below.
-_SHAPE_REF_DIM = 128
 
 
 def _encode_alpha(alpha: np.ndarray) -> str:
@@ -120,36 +115,9 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
         return ""
     entries = []
     for layer in stack.layers:
-        # `layer.enabled and` matters: is_empty reports True for a HIDDEN
-        # layer, so testing it alone discarded the mask -- and the coverage
-        # the user had painted into it -- the moment they hid one and saved.
-        # Visibility is a display state, not a reason to throw a mask away.
-        if layer.enabled and layer.is_empty and not layer.adjustments:
-            continue
-        # A parametric mask stores its geometry, not its pixels: a few dozen
-        # bytes instead of a frame-sized PNG, exact at any resolution, and
-        # still re-draggable after a reload. Encoding its generated alpha
-        # would throw all three away.
-        if getattr(layer, "is_parametric", False):
-            entries.append(
-                {
-                    "kind": layer.kind,
-                    "params": {
-                        k: round(float(v), 5) for k, v in (layer.params or {}).items()
-                    },
-                    "adjustments": {
-                        k: round(float(v), 4)
-                        for k, v in layer.adjustments.items()
-                        if k in _all_keys() and abs(float(v)) > 1e-4
-                    },
-                    "name": layer.name,
-                    "enabled": bool(layer.enabled),
-                    "invert": bool(layer.invert),
-                    "blend": layer.blend,
-                    "source": layer.source,
-                }
-            )
-            continue
+        # Keep empty layers. Skipping them meant Create→Brush never reached
+        # XMP, so the first paint's undo snapshot was "no masks" and Ctrl+Z
+        # deleted the whole mask instead of just the stroke.
         if getattr(layer, "is_group", False):
             entry = _serialize_group(layer)
             if entry is not None:
@@ -190,14 +158,6 @@ def _component_entry(comp: MaskLayer) -> Optional[dict]:
         "source": comp.source,
         "kind": comp.kind,
     }
-    if getattr(comp, "is_parametric", False):
-        entry["params"] = {
-            k: round(float(v), 5) for k, v in (comp.params or {}).items()
-        }
-        # Its alpha buffer is never read, but the SHAPE is -- alpha_at
-        # regenerates at whatever size is asked for.
-        entry["shape"] = [int(comp.alpha.shape[0]), int(comp.alpha.shape[1])]
-        return entry
     alpha = _encode_alpha(_downscale_for_store(comp.alpha))
     if not alpha:
         return None
@@ -260,25 +220,8 @@ def _deserialize_group(entry: dict, common: dict, raw_components: list):
             "enabled": bool(raw.get("enabled", True)),
             "invert": bool(raw.get("invert", False)),
             "source": str(raw.get("source", "") or ""),
-            "kind": kind,
+            "kind": str(raw.get("kind", "") or "brush"),
         }
-        if kind in PARAMETRIC_KINDS:
-            params = raw.get("params")
-            if not isinstance(params, dict):
-                continue
-            shape = raw.get("shape") or [_SHAPE_REF_DIM, _SHAPE_REF_DIM]
-            try:
-                hh, ww = int(shape[0]), int(shape[1])
-            except Exception:
-                hh = ww = _SHAPE_REF_DIM
-            components.append(
-                MaskLayer(
-                    np.zeros((max(1, hh), max(1, ww)), dtype=np.float32),
-                    params={k: float(v) for k, v in params.items()},
-                    **shared,
-                )
-            )
-            continue
         alpha = _decode_alpha(str(raw.get("alpha", "") or ""))
         if alpha is None:
             continue
@@ -330,33 +273,10 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
             # is still a faithful render of the group, so the mask survives
             # as a flat layer rather than vanishing.
 
-        kind = str(entry.get("kind", "") or "brush")
-        if kind in PARAMETRIC_KINDS:
-            params = entry.get("params") or {}
-            if not isinstance(params, dict):
-                continue
-            # A parametric layer's alpha buffer is never read -- alpha_at
-            # generates from params at the caller's resolution. But its SHAPE is
-            # the coordinate space bbox() reports in, which the compositor then
-            # scales to the frame, so it cannot be 1x1: a radial's analytic
-            # bbox would quantise to the whole frame and give up the
-            # bbox-limited compute that keeps a mask tick inside the preview
-            # budget. _SHAPE_REF_DIM is small enough to be free (64 KB) and
-            # fine enough that the scaled bbox lands within a couple of pixels.
-            layers.append(
-                MaskLayer(
-                    np.zeros((_SHAPE_REF_DIM, _SHAPE_REF_DIM), dtype=np.float32),
-                    kind=kind,
-                    params={k: float(v) for k, v in params.items()},
-                    **common,
-                )
-            )
-            continue
-
         alpha = _decode_alpha(str(entry.get("alpha", "")))
         if alpha is None:
             continue
-        layers.append(MaskLayer(alpha, **common))
+        layers.append(MaskLayer(alpha, kind=str(entry.get("kind", "") or "brush"), **common))
     if not layers:
         return None
     return MaskLayerStack(layers=layers)

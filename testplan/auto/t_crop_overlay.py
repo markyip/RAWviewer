@@ -52,6 +52,30 @@ def main() -> int:
         f"{r2.width():.1f}x{r2.height():.1f}",
     )
 
+    # Non-interactive preview must not claim edge drags -- otherwise Masks /
+    # gradient placement near the photo boundary silently crops and looks
+    # like the image itself is resizing.
+    from PyQt6.QtCore import QPointF, Qt
+    from PyQt6.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    item.set_image_size(400, 300)
+    item.set_insets(0.0, 0.0, 0.0, 0.0)
+    item.set_interactive(False)
+    check("preview mode reports non-interactive", not item.is_interactive())
+    check(
+        "preview mode accepts no mouse buttons",
+        item.acceptedMouseButtons() == Qt.MouseButton.NoButton,
+    )
+    item.set_interactive(True)
+    check("crop mode is interactive again", item.is_interactive())
+    check(
+        "crop mode accepts left button",
+        bool(item.acceptedMouseButtons() & Qt.MouseButton.LeftButton),
+    )
+    # Edge hit still resolves, but only interactive mode will accept a press.
+    check("edge hit test still finds the border", item._hit_test(QPointF(0, 150)) == "l")
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

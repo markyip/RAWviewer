@@ -125,6 +125,46 @@ def _sample_luma(luminance: np.ndarray, cx: float, cy: float) -> float:
     return float(luminance[y, x])
 
 
+def _sample_luma_robust(
+    luminance: np.ndarray, cx: float, cy: float, *, radius: int = 2
+) -> float:
+    """Median luma in a small window — survives a noisy/edge pixel under the tip."""
+    h, w = luminance.shape[:2]
+    x = int(np.clip(round(cx), 0, w - 1))
+    y = int(np.clip(round(cy), 0, h - 1))
+    y0 = max(0, y - int(radius))
+    y1 = min(h, y + int(radius) + 1)
+    x0 = max(0, x - int(radius))
+    x1 = min(w, x + int(radius) + 1)
+    window = luminance[y0:y1, x0:x1]
+    if window.size == 0:
+        return float(luminance[y, x])
+    return float(np.median(window))
+
+
+def _sample_chroma_robust(
+    chroma: np.ndarray, cx: float, cy: float, *, radius: int = 2
+) -> np.ndarray:
+    """Median opponent-chroma in a small window around the brush tip."""
+    h, w = chroma.shape[:2]
+    x = int(np.clip(round(cx), 0, w - 1))
+    y = int(np.clip(round(cy), 0, h - 1))
+    y0 = max(0, y - int(radius))
+    y1 = min(h, y + int(radius) + 1)
+    x0 = max(0, x - int(radius))
+    x1 = min(w, x + int(radius) + 1)
+    window = chroma[y0:y1, x0:x1]
+    if window.size == 0:
+        return np.asarray(chroma[y, x], dtype=np.float32)
+    return np.median(window.reshape(-1, window.shape[-1]), axis=0).astype(np.float32)
+
+
+# Flood-fill cost is O(brush area). Above this patch side length, run the gate
+# at reduced resolution and upsample — large brushes stay interactive without
+# changing the hard-boundary contract on typical portrait/product edges.
+_EDGE_ASSIST_MAX_DIM = 160
+
+
 def _edge_assist_gate(
     luminance: np.ndarray,
     y0: int,
@@ -146,9 +186,9 @@ def _edge_assist_gate(
     even when the far side happens to share a similar tone.
 
     Steps:
-      1. Soft luma similarity to the brush-center seed (smooth falloff),
-         with the tolerance widened by the patch's own noise floor so
-         sensor grain doesn't randomly snap connectivity
+      1. Soft luma similarity to a robust brush-center seed (median window),
+         with the tolerance widened by the patch's own noise floor and a
+         low-contrast boost so soft subjects (skin, fog) do not fragment
       2. Optional chroma similarity (``chroma``: (H,W,2) opponent-color
          channels) — catches iso-luminance color boundaries (e.g. a red
          subject against green foliage of similar brightness) a luma-only
@@ -158,12 +198,76 @@ def _edge_assist_gate(
          even if their raw luma still falls inside the (noise-widened)
          tolerance -- stops a thin, high-contrast rim from being bridged
       4. Binary connected component of the combined similar-pixel mask,
-         grown from the seed via flood fill
+         grown from the seed via flood fill (or a nearby similar pixel when
+         the tip itself sits on a boundary / noise spike)
       5. Soften the region mask so stamp edges aren't a hard cut
+
+    Large brush patches downsample the flood-fill working resolution, then
+    upsample the gate, so cost stays bounded while hard edges still block.
     """
+    h = int(y1) - int(y0)
+    w = int(x1) - int(x0)
+    if h <= 0 or w <= 0:
+        return np.zeros((0, 0), dtype=np.float32)
+
+    longest = max(h, w)
+    if longest > _EDGE_ASSIST_MAX_DIM:
+        scale = float(_EDGE_ASSIST_MAX_DIM) / float(longest)
+        small_h = max(1, int(round(h * scale)))
+        small_w = max(1, int(round(w * scale)))
+        try:
+            import cv2
+
+            patch = luminance[y0:y1, x0:x1].astype(np.float32, copy=False)
+            small_luma = cv2.resize(patch, (small_w, small_h), interpolation=cv2.INTER_AREA)
+            small_chroma = None
+            if chroma is not None and chroma.shape[:2] == luminance.shape[:2]:
+                cpatch = chroma[y0:y1, x0:x1].astype(np.float32, copy=False)
+                small_chroma = cv2.resize(
+                    cpatch, (small_w, small_h), interpolation=cv2.INTER_AREA
+                )
+            # Map brush centre into the downsampled patch's local frame, then
+            # into "full image" coords expected by the core (origin at 0,0).
+            local_cx = (float(cx) - float(x0)) * (small_w / float(w))
+            local_cy = (float(cy) - float(y0)) * (small_h / float(h))
+            small_gate = _edge_assist_gate_core(
+                small_luma,
+                0,
+                0,
+                small_h,
+                small_w,
+                local_cx,
+                local_cy,
+                luma_tol=luma_tol,
+                chroma=small_chroma,
+            )
+            return cv2.resize(
+                small_gate, (w, h), interpolation=cv2.INTER_LINEAR
+            ).astype(np.float32)
+        except Exception:
+            pass
+
+    return _edge_assist_gate_core(
+        luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
+    )
+
+
+def _edge_assist_gate_core(
+    luminance: np.ndarray,
+    y0: int,
+    x0: int,
+    y1: int,
+    x1: int,
+    cx: float,
+    cy: float,
+    *,
+    luma_tol: float = 0.10,
+    chroma: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Full-resolution gate body (see ``_edge_assist_gate``)."""
     patch = luminance[y0:y1, x0:x1].astype(np.float32, copy=False)
     h, w = patch.shape
-    seed = _sample_luma(luminance, cx, cy)
+    seed = _sample_luma_robust(luminance, cx, cy)
 
     local_span = float(max(0.08, np.percentile(patch, 90) - np.percentile(patch, 10)))
 
@@ -179,7 +283,13 @@ def _edge_assist_gate(
     except Exception:
         noise_sigma = 0.0
 
-    tol = max(float(luma_tol), 0.45 * local_span, 2.5 * noise_sigma)
+    # Low-contrast subjects (skin, haze): raise the floor so grain does not
+    # shatter connectivity. High-contrast patches keep the tighter base so
+    # real edges still stop the flood.
+    base_tol = float(luma_tol)
+    if local_span < 0.18:
+        base_tol *= 1.0 + 0.45 * (1.0 - local_span / 0.18)
+    tol = max(base_tol, 0.45 * local_span, 2.5 * noise_sigma)
     diff = np.abs(patch - seed)
     sim = np.clip(1.0 - diff / tol, 0.0, 1.0)
     sim = sim * sim * (3.0 - 2.0 * sim)  # smoothstep
@@ -205,10 +315,7 @@ def _edge_assist_gate(
     # (which the luma test alone cannot see) still breaks connectivity.
     if chroma is not None and chroma.shape[:2] == luminance.shape[:2]:
         cpatch = chroma[y0:y1, x0:x1].astype(np.float32, copy=False)
-        ch, cw = chroma.shape[:2]
-        scx = int(np.clip(round(cx), 0, cw - 1))
-        scy = int(np.clip(round(cy), 0, ch - 1))
-        seed_c = chroma[scy, scx]
+        seed_c = _sample_chroma_robust(chroma, cx, cy)
         cdiff = np.sqrt(np.sum((cpatch - seed_c) ** 2, axis=-1))
         c_span = float(
             max(
@@ -217,6 +324,8 @@ def _edge_assist_gate(
             )
         )
         ctol = max(0.05, 0.6 * c_span)
+        if c_span < 0.10:
+            ctol *= 1.0 + 0.35 * (1.0 - c_span / 0.10)
         csim = np.clip(1.0 - cdiff / ctol, 0.0, 1.0)
         csim = csim * csim * (3.0 - 2.0 * csim)
         sim = sim * csim
@@ -226,6 +335,21 @@ def _edge_assist_gate(
     sy = int(np.clip(round(cy), y0, max(y0, y1 - 1))) - y0
     sx = int(np.clip(sx, 0, w - 1))
     sy = int(np.clip(sy, 0, h - 1))
+
+    # Tip on a boundary/noise pixel: flood from the nearest similar neighbour
+    # so the stamp still covers the subject under the brush instead of dying.
+    if not bool(similar[sy, sx]) and bool(similar.any()):
+        search_r = max(3, min(h, w) // 6)
+        y_lo = max(0, sy - search_r)
+        y_hi = min(h, sy + search_r + 1)
+        x_lo = max(0, sx - search_r)
+        x_hi = min(w, sx + search_r + 1)
+        ys, xs = np.nonzero(similar[y_lo:y_hi, x_lo:x_hi])
+        if ys.size:
+            d2 = (ys + y_lo - sy) ** 2 + (xs + x_lo - sx) ** 2
+            best = int(np.argmin(d2))
+            sy = int(ys[best] + y_lo)
+            sx = int(xs[best] + x_lo)
 
     connected = np.zeros((h, w), dtype=np.float32)
     if similar[sy, sx]:
@@ -262,7 +386,8 @@ def _edge_assist_gate(
                         seen[ny, nx] = True
                         q.append((ny, nx))
     else:
-        # Seed pixel itself failed the hard threshold — still allow a tiny core.
+        # No similar pixel near the tip — keep a soft core so the brush
+        # never fully vanishes under aggressive tolerances.
         connected[sy, sx] = 1.0
 
     # Soften the hard flood region so stamps don't look cut with scissors.
@@ -274,11 +399,16 @@ def _edge_assist_gate(
     except Exception:
         region = connected
 
+    tip_sx = int(np.clip(round(cx), x0, max(x0, x1 - 1))) - x0
+    tip_sy = int(np.clip(round(cy), y0, max(y0, y1 - 1))) - y0
+    tip_sx = int(np.clip(tip_sx, 0, w - 1))
+    tip_sy = int(np.clip(tip_sy, 0, h - 1))
+
     gate = region * sim
-    # Preserve a small core around the seed so the brush never fully dies
+    # Preserve a small core around the tip so the brush never fully dies
     # under aggressive tolerances.
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    dist = np.sqrt((xx - sx) ** 2 + (yy - sy) ** 2)
+    dist = np.sqrt((xx - tip_sx) ** 2 + (yy - tip_sy) ** 2)
     core_r = max(2.0, 0.12 * max(h, w))
     core = np.clip(1.0 - dist / core_r, 0.0, 1.0)
     gate = np.maximum(gate, core * sim)
@@ -568,7 +698,12 @@ def resize_mask_to(mask: DodgeBurnMask, height: int, width: int) -> np.ndarray:
 
 
 def apply_dodge_burn(
-    img: np.ndarray, mask: Optional[DodgeBurnMask], stops: float
+    img: np.ndarray,
+    mask: Optional[DodgeBurnMask],
+    stops: float,
+    *,
+    row_offset: int = 0,
+    full_height: int | None = None,
 ) -> np.ndarray:
     """Scene-linear per-pixel exposure multiplier: img * 2**(mask * stops).
 
@@ -582,34 +717,44 @@ def apply_dodge_burn(
     without the cache, an UNCHANGED mask still paid a full resize + exp2
     over the whole frame every tick -- measured ~56ms on a 2200x3300 half-
     res base, more than half the 80ms live-preview throttle window.
+
+    ``row_offset`` / ``full_height``: when ``img`` is a horizontal band of a
+    taller frame, resize the mask to the full frame and slice — never squash
+    the whole mask into the band height.
     """
     if mask is None or mask.is_empty:
         return img
     h, w = img.shape[:2]
-    cache_key = (mask.version, h, w, round(float(stops), 6))
+    fh = int(full_height) if full_height is not None else h
+    ro = int(row_offset)
+    if fh < h:
+        fh = h
+        ro = 0
+    cache_key = (mask.version, fh, w, round(float(stops), 6))
     cached = mask._gain_cache
     if cached is not None and cached[0] == cache_key:
-        gain = cached[1]
+        gain_full = cached[1]
     else:
         try:
             from perf_metrics import perf_mark
             import time as _time
 
             t0 = _time.perf_counter()
-            m = resize_mask_to(mask, h, w)
-            gain = np.exp2(m * float(stops)).astype(np.float32)
-            mask._gain_cache = (cache_key, gain)
+            m = resize_mask_to(mask, fh, w)
+            gain_full = np.exp2(m * float(stops)).astype(np.float32)
+            mask._gain_cache = (cache_key, gain_full)
             perf_mark(
                 "db_apply",
                 (_time.perf_counter() - t0) * 1000.0,
-                h=h,
+                h=fh,
                 w=w,
                 cache="miss",
             )
         except Exception:
-            m = resize_mask_to(mask, h, w)
-            gain = np.exp2(m * float(stops)).astype(np.float32)
-            mask._gain_cache = (cache_key, gain)
+            m = resize_mask_to(mask, fh, w)
+            gain_full = np.exp2(m * float(stops)).astype(np.float32)
+            mask._gain_cache = (cache_key, gain_full)
+    gain = gain_full if (ro == 0 and fh == h) else gain_full[ro : ro + h]
     # Not `img * gain[..., np.newaxis]`: numpy's broadcasting iterator does
     # not take the contiguous SIMD path for a trailing size-1 axis. Measured
     # here at 24MP: 220ms broadcast vs 109ms per-channel-out, bit-identical.

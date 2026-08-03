@@ -151,6 +151,8 @@ def apply_spot_heal(
     mask: Optional[HealMask],
     *,
     inpaint_radius: int = INPAINT_RADIUS,
+    row_offset: int = 0,
+    full_height: int | None = None,
 ) -> np.ndarray:
     """Inpaint covered pixels; soft-composite back onto ``img``.
 
@@ -161,10 +163,18 @@ def apply_spot_heal(
     Work is limited to the painted bounding box (+ pad) so a small heal
     stroke does not Telea-process a full sensor frame (which looked like
     a hang / no-op on large RAW bases).
+
+    ``row_offset`` / ``full_height`` support the banded settle path: resize
+    coverage to the full frame, then slice the band so heal stays aligned
+    with the painted region (same squash bug mask layers / D&B had).
     """
     if mask is None or mask.is_empty or img is None:
         return img
     h, w = img.shape[:2]
+    fh = int(full_height) if full_height is not None else h
+    ro = int(row_offset) if row_offset else 0
+    if fh < h:
+        fh, ro = h, 0
     radius = max(1, int(inpaint_radius))
     # Must include the source buffer identity — caching only by mask
     # version returned a stale healed frame after Exposure/WB changes.
@@ -177,7 +187,7 @@ def apply_spot_heal(
     # this array, the entry cannot match.
     import weakref as _weakref
 
-    cache_key = (mask.version, h, w, radius, id(img))
+    cache_key = (mask.version, h, w, radius, id(img), ro, fh)
     cached = mask._inpaint_cache
     if cached is not None and cached[0] == cache_key:
         _ref = cached[2] if len(cached) > 2 else None
@@ -186,7 +196,11 @@ def apply_spot_heal(
 
     import cv2
 
-    coverage = resize_mask_to(mask, h, w)
+    coverage_full = resize_mask_to(mask, fh, w)
+    if ro != 0 or fh != h:
+        coverage = coverage_full[ro : ro + h]
+    else:
+        coverage = coverage_full
     bin_mask = ((coverage > 0.08).astype(np.uint8)) * 255
     if not np.any(bin_mask):
         return img

@@ -2122,6 +2122,8 @@ class _AIMaskWorker(QRunnable):
                 alpha = raw_ai_masks.segment_sky(self.rgb, self.target_hw)
             elif self.kind == "subject":
                 alpha = raw_ai_masks.segment_subject(self.rgb, self.target_hw)
+            elif self.kind == "depth":
+                alpha = raw_ai_masks.estimate_depth(self.rgb, self.target_hw)
             elif self.kind == "sam_encode":
                 predictor = raw_ai_masks.SamPredictor()
                 if predictor.set_image(self.rgb, image_key=self.file_path):
@@ -2312,7 +2314,7 @@ _AI_MASK_MIN_COVERAGE = 0.002
 
 # Layer names match the buttons that make them -- a row called "AI Subject"
 # under a button called "Smart Object" is a puzzle the user has to solve.
-_AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
+_AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}
 
 # How long to wait for a model that is already on disk before giving up.
 #
@@ -2322,6 +2324,7 @@ _AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
 #     Smart Object (BiRefNet)   18.5s at 1650x1100,  20.3s at 3300x2200
 #     Sky                        2.5s
 #     AI Selection: encode       1.9s,  each later click  0.5s
+#     Depth                      1.2s
 #
 # -- so a 15s limit aborted every Smart Object run, turning "slow" into
 # "broken". The budget has to clear the slowest operation with room for a
@@ -2329,10 +2332,30 @@ _AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky"}
 #
 # Smart Object is the outlier because its session runs on CPU: _make_session
 # in raw_ai_masks only requests a GPU provider on Windows, so CoreML is never
-# asked for on macOS. Whether CoreML actually helps this graph is a separate
-# question -- onnx_scunet documents it partitioning 200+ segments and ending
-# up slower for attention-heavy models -- so the number below reflects what
-# the app does today, and should come down if that changes.
+# asked for on macOS. Bare graph inference, no app overhead, measured by
+# scripts/bench/bench_ai_masks.py on the same machine, is where the gap
+# actually lives:
+#
+#     subject (BiRefNet, 1024^2)   13.4s
+#     sky     (U^2-Net,   320^2)    1.0s
+#     depth   (DA-V2 vits, 518)     0.6s
+#     sam_encoder (1024^2)          0.8s
+#
+# Smart Object is ~20x its nearest neighbour, and that is a property of the
+# model, not of the plumbing around it. Two ways out were measured and both
+# are dead ends, so the number below stands until a third turns up:
+#
+#   * CoreML on this graph. Asking for the Neural Engine hangs the session
+#     BUILD -- ANECompilerService ran 25+ minutes without finishing. Pinning
+#     it away from the ANE builds fast but infers far slower than the plain
+#     CPU provider: 245s for CPUAndGPU and 161s for CPUOnly, against 13.4s.
+#     Same failure onnx_scunet documents -- the graph partitions into
+#     segments CoreML cannot fuse, and the round trips cost more than the
+#     acceleration returns.
+#   * A cheaper first pass at 512^2 -- this export hard-codes 1024 into its
+#     decoder Split nodes, so it physically cannot run at another size, and
+#     upstream publishes no lite 512 export (the 512x512 one is full
+#     BiRefNet at 940 MB).
 #
 # Applied to INFERENCE ONLY. First use downloads 214 MB, which cannot fit in
 # any sane timeout, so the wait is left open when the weights are not yet
@@ -2344,8 +2367,30 @@ _AI_MASK_TIMEOUT_MS = 90_000
 _AI_MASK_BUSY_TEXT = {
     "subject": "Finding the subject…",
     "sky": "Finding the sky…",
+    "depth": "Measuring depth…",
     "sam_encode": "Analysing the photo for click-to-select…",
 }
+
+# What "it found nothing" reads like per tool. This was an f-string over the
+# kind, which only ever worked because "subject" and "sky" happen to be the
+# nouns the sentence needed -- Depth is not a thing you find "a" of in a
+# photo, so the noun has to be written rather than interpolated.
+_AI_MASK_NOTHING_FOUND = {
+    "subject": "Could not find a subject in this photo.",
+    "sky": "Could not find any sky in this photo.",
+    "depth": "Could not read depth from this photo — it looks flat.",
+}
+
+
+def _ai_mask_nothing_found_text(kind: str, *, no_layer: bool = False) -> str:
+    """Status line for a run that produced nothing usable.
+
+    ``no_layer`` distinguishes "the model returned an empty result" from
+    "it returned something too empty to be worth a layer"; the user only
+    needs to hear the second half in the latter case.
+    """
+    base = _AI_MASK_NOTHING_FOUND.get(kind, f"Could not find a {kind} in this photo.")
+    return f"{base[:-1]} — no mask added." if no_layer else base
 
 # Mean absolute alpha difference below which two masks are "the same mask".
 # Generous enough to survive the sidecar's 8-bit round trip (1/255 = 0.004),
@@ -4525,10 +4570,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage("RAW recovery is only available for RAW/DNG", 2500)
             return True
         if self._adjust_panel_active():
-            self.status_bar.showMessage(
-                "Adjust panel is open — use «Use recovery look» for recovery tone",
-                5000,
-            )
+            # Do not steal P for a status toast — Adjust owns P as mask Add.
+            self._handle_brush_key_down("mask_paint")
             return True
         self._raw_recovery_active = not getattr(self, "_raw_recovery_active", False)
         if self._raw_recovery_active:
@@ -9127,9 +9170,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.single_image_adjust_panel.mask_coverage_changed.connect(
                 self._on_mask_coverage_changed
             )
-            self.single_image_adjust_panel.mask_gradient_tool_changed.connect(
-                self._on_mask_gradient_tool_changed
-            )
             self.single_image_adjust_panel.mask_ai_requested.connect(
                 self._on_mask_ai_requested
             )
@@ -9184,6 +9224,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_preview_stage_cache_fast = PreviewStageCache()
             self._adjust_compare_original_pixmap: Any = None
             self._adjust_compare_original_path: str | None = None
+            self._adjust_compare_original_geo = None
+            self._adjust_compare_original_geo_pending = None
             self._adjust_compare_original_signals = _AdjustCompareOriginalSignals()
             self._adjust_compare_original_signals.finished.connect(
                 self._on_adjust_compare_original_ready
@@ -9228,10 +9270,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if editing_features_enabled():
                     self.gpu_view.colorPickRequested.connect(self._on_wb_color_picked)
                     self.gpu_view.dodgeBurnStroke.connect(self._on_dodge_burn_stroke)
-                    self.gpu_view.gradientDragged.connect(self._on_gradient_dragged)
-                    self.gpu_view.gradientParamsEdited.connect(
-                        self._on_gradient_params_edited
-                    )
                     self.gpu_view.dodgeBurnBrushSizeWheel.connect(
                         self._on_dodge_burn_brush_size_wheel
                     )
@@ -18262,12 +18300,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Editor-open: show Adjust-relevant shortcuts (H/M are browse-only).
         if getattr(self, "_adjust_overlay_visible", False):
             lines = [
-                "E / Esc — Close Adjust panel",
+                "E / Esc — Close Adjust panel (Esc first puts an armed brush away)",
                 "Space / Double-click — Toggle fit-to-window / 100% zoom",
                 "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
-                "Dodge/Burn/Heal armed: two-finger scroll — Brush Size",
-                "D / B / X / H — Arm Dodge / Burn / Eraser / Heal (again to disarm)",
-                "M — Toggle Mask overlay (armed, or an existing dodge/burn/heal edit)",
+                "Brush armed: two-finger scroll — Brush Size",
+                "Hold D / B / X / H — Dodge / Burn / Erase / Heal (release to stop)",
+                "P / X — Masks: arm Add / Erase (again to put away)",
+                "M — Toggle Mask overlay",
                 "← / → — Nudge focused slider (or previous/next when none focused)",
                 "J — Show/hide highlight/shadow clipping",
                 "G — Cycle composition guide",
@@ -20521,6 +20560,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         first paint does not wait on demosaic (RAW HQ / Adjust must not starve
         that transition). ``_gallery_entry_accept_embedded`` outlives the brief
         ``_loading_from_gallery`` flag cleared mid-load.
+
+        Real JPEG/PNG/TIFF files are never "interim": their decode *is* the
+        image. Returning True here used to also trip the <1024px paint gate,
+        so a genuine small JPEG (or a launch fast-open that briefly cleared
+        the view) stayed blank forever.
         """
         if getattr(self, "_loading_from_gallery", False) or getattr(
             self, "_gallery_entry_accept_embedded", False
@@ -20529,11 +20573,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         path = file_path or getattr(self, "current_file_path", None)
         if not path:
             return False
-            
-        # For non-RAW files, full decode is extremely fast. We suppress interim
-        # blurry preview/thumbnail tiers to prevent a low-res flash.
+
+        # Non-RAW: the file itself is the final pixels. Do not treat it as a
+        # RAW-workflow camera-JPEG interim to suppress.
         if not is_raw_file(path):
-            return True
+            return False
         if str(os.environ.get("RAWVIEWER_RAW_NO_JPEG_INTERIM", "1")).strip().lower() in (
             "0",
             "false",
@@ -21067,6 +21111,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if (
                 rgb_image is not None
                 and hasattr(rgb_image, "shape")
+                and cur
+                and is_raw_file(cur)
                 and max(rgb_image.shape[0], rgb_image.shape[1]) < 1024
                 and self._suppress_jpeg_interim(cur)
                 and not self.image_cache.is_libraw_preview(cur)
@@ -21513,6 +21559,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if getattr(self, "_search_panel_expanded", False):
                 self._set_search_panel_expanded(False, animate=False)
             self._maybe_maximize_brightness_for_adjust(True)
+        # Browse: P = RAW recovery. Adjust: P = mask Add via the event-filter
+        # brush path. Leave the ApplicationShortcut disabled while editing or
+        # it steals P and only shows "Adjust panel is open…".
+        sc = getattr(self, "_shortcut_toggle_raw_recovery", None)
+        if sc is not None:
+            sc.setEnabled(not bool(self._adjust_overlay_visible))
         bar = self._filmstrip_bar()
         if self._adjust_overlay_visible:
             # Opening: always show the panel. Do not gate on a display image —
@@ -21572,6 +21624,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 gv.set_crop_mode(False)
             if hasattr(panel, "disarm_dodge_burn"):
                 panel.disarm_dodge_burn()
+            if hasattr(panel, "disarm_mask_layer_tools"):
+                panel.disarm_mask_layer_tools()
             if gv is not None and gv.is_dodge_burn_mode():
                 gv.set_dodge_burn_mode(False)
                 gv.set_dodge_burn_mask_overlay(None, False)
@@ -22607,6 +22661,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         gv = getattr(self, "gpu_view", None)
         comparing = bool(gv is not None and gv.is_compare_mode())
         self._pending_adjust_preview = dict(adj or {})
+        # Compare original is rendered with the current geometry. If Transform
+        # keys (anamorphic included) change while Compare is on, drop the
+        # stale original so the next toggle / ready path re-renders at the
+        # matching aspect.
+        if comparing:
+            geo_fp = self._compare_geometry_fingerprint(adj)
+            if geo_fp != getattr(self, "_adjust_compare_original_geo", None):
+                self._adjust_compare_original_pixmap = None
+                self._adjust_compare_original_path = None
+                self._adjust_compare_original_geo = None
+                try:
+                    path = getattr(self, "current_file_path", None)
+                    base = getattr(self, "_adjust_preview_base_rgb", None)
+                    if path and base is not None:
+                        self._adjust_compare_original_geo_pending = geo_fp
+                        worker = _AdjustCompareOriginalWorker(
+                            path,
+                            base,
+                            self._adjust_compare_original_signals,
+                            geometry_adj=dict(adj or {}),
+                        )
+                        _get_bg_thread_pool().start(worker)
+                except Exception:
+                    pass
         # Zero-latency gain path: when the delta vs the last exact render is
         # ONLY Exposure/Temperature/Tint, those are (near-)pure per-channel
         # gains in the BT.709 power region -- apply them as a 256-entry LUT
@@ -22764,6 +22842,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if getattr(self, "_crop_preview_uncropped", False):
                 for k in ("CropLeft", "CropRight", "CropTop", "CropBottom"):
                     geo_adj[k] = 0.0
+            # Source was only cached when Anamorphic/Distortion were identity;
+            # strip them anyway so a stale cache cannot double-desqueeze.
+            geo_adj["AnamorphicRatio"] = 1.0
+            geo_adj["Distortion"] = 0.0
             out = apply_geometry(src, geo_adj, preview=True)
             if out is None or getattr(out, "size", 0) == 0:
                 return False
@@ -22831,17 +22913,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         )
         panel.set_mask_layer_stack(stack)
         panel.select_mask_index(len(stack.layers) - 1)
-        # Arm Paint right away -- an empty mask renders nothing, so the only
-        # sensible next action after Add is painting coverage.
-        if hasattr(panel, "arm_mask_paint"):
-            panel.arm_mask_paint()
+        # Do not arm Add here. Create→Brush only makes an empty mask; the
+        # user arms painting with P (or the Add button). Auto-arming meant a
+        # following P toggled the brush straight back off.
+        #
+        # Persist immediately so undo has a pre-paint snapshot that still
+        # contains this empty mask (serialize used to drop empties, so the
+        # first stroke's Ctrl+Z restored "no masks at all").
+        self._on_adjust_panel_editing_finished(panel.get_adjustments())
 
     def ensure_mask_layer_for_painting(self) -> bool:
         """Make a mask to paint into if there is not one yet.
 
         Paint used to require pressing Add Mask first, which made brushing the
-        only coverage tool that took two presses -- Subject, Sky, Select and
-        the gradients all create their own layer. Returns True if a layer is
+        only coverage tool that took two presses -- Subject, Sky, Depth and
+        AI Selection all create their own layer. Returns True if a layer is
         available to paint into.
         """
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -22885,7 +22971,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 invert=layer.invert,
                 blend="add",
                 kind=layer.kind,
-                params=dict(layer.params or {}),
                 source=layer.source,
             )
 
@@ -22949,7 +23034,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             invert=comp.invert,
             blend="add",
             kind=comp.kind,
-            params=dict(comp.params or {}),
             source=comp.source,
         )
         group.touch()
@@ -23024,8 +23108,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
     def _on_mask_layer_delete(self, index: int) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return
+        # Prefer the host stack (preview / XMP source of truth). If a path
+        # ever published only to the panel, recover rather than leaving the
+        # ✕ button as a silent no-op.
         stack = getattr(self, "_mask_layer_stack", None)
-        if panel is None or stack is None or not (0 <= index < len(stack.layers)):
+        if stack is None:
+            stack = panel.mask_layer_stack()
+            if stack is not None:
+                self._mask_layer_stack = stack
+        if stack is None or not (0 <= index < len(stack.layers)):
             return
         del stack.layers[index]
         if not stack.layers:
@@ -23050,14 +23143,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             invert=src.invert,
             blend=src.blend,
         )
-        # kind/params carry a gradient's geometry, which is its source of
-        # truth -- without them a duplicated Linear came back as a plain
-        # brush holding one baked alpha, no longer re-draggable and no longer
-        # resolution-independent. components does the same for a group: the
-        # copy would flatten to the group's own (unused) alpha, which is
-        # empty, so duplicating a group produced a mask covering nothing.
+        # kind/source and components still matter on a duplicate: kind keeps
+        # the row semantics and source preserves one-shot AI availability.
+        # components does the same for a group: the copy would flatten to the
+        # group's own (unused) alpha, which is empty, so duplicating a group
+        # produced a mask covering nothing.
         copy.kind = src.kind
-        copy.params = dict(src.params or {})
         copy.source = src.source
         if getattr(src, "is_group", False):
             copy.components = [
@@ -23072,7 +23163,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             ]
             for dst_c, src_c in zip(copy.components, src.components):
                 dst_c.kind = src_c.kind
-                dst_c.params = dict(src_c.params or {})
                 dst_c.source = src_c.source
                 dst_c.touch()
         copy.touch()
@@ -23086,141 +23176,25 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _ai_mask_source_rgb(self):
         """RGB buffer the segmentation models run on.
 
-        The post-decode edit base -- the same buffer the mask alpha is
-        sized against, so click coordinates and the returned alpha share
-        one coordinate space with no extra mapping. It can overshoot 1.0
-        at speculars; raw_ai_masks._to_float_rgb clamps, since these nets
-        expect display-referred input.
+        Post-geometry (crop / straighten / anamorphic) — the same frame the
+        mask alpha is sized against, so click coordinates and the returned
+        alpha share one coordinate space. Using the pre-geometry edit base
+        with a desqueezed ``target_hw`` stretched faces horizontally.
         """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        adj = {}
+        try:
+            if panel is not None:
+                adj = panel.get_adjustments() or {}
+        except Exception:
+            adj = {}
+        sample = self._wb_linear_sample_buffer(adj)
+        if sample is not None and hasattr(sample, "shape") and getattr(sample, "ndim", 0) == 3:
+            return sample
         buf = getattr(self, "_adjust_preview_base_rgb", None)
         if buf is not None and hasattr(buf, "shape") and getattr(buf, "ndim", 0) == 3:
             return buf
         return None
-
-    def _sync_gradient_handles(self) -> None:
-        """Show handles for the selected mask when it is a gradient.
-
-        Selection-driven, like every other editor's: handles for every gradient
-        at once would be unreadable on a stack, and handles for none would make
-        a placed gradient un-adjustable.
-        """
-        gv = getattr(self, "gpu_view", None)
-        panel = getattr(self, "single_image_adjust_panel", None)
-        if gv is None or not hasattr(gv, "set_gradient_overlay"):
-            return
-        layer = None
-        if panel is not None and getattr(self, "_adjust_overlay_visible", False):
-            stack = panel.mask_layer_stack()
-            index = panel.active_mask_index()
-            if stack is not None and index is not None and 0 <= index < len(stack.layers):
-                candidate = stack.layers[index]
-                if getattr(candidate, "is_parametric", False):
-                    layer = candidate
-        if layer is None:
-            gv.set_gradient_overlay("", {})
-        else:
-            gv.set_gradient_overlay(layer.kind, layer.params)
-
-    def _on_gradient_params_edited(self, kind: str, params: dict, is_end: bool) -> None:
-        """A handle drag reshaped the selected gradient."""
-        panel = getattr(self, "single_image_adjust_panel", None)
-        if panel is None:
-            return
-        stack = panel.mask_layer_stack()
-        index = panel.active_mask_index()
-        if stack is None or index is None or not (0 <= index < len(stack.layers)):
-            return
-        layer = stack.layers[index]
-        if not getattr(layer, "is_parametric", False) or layer.kind != kind:
-            return
-        layer.params = dict(params or {})
-        layer.touch()
-        self._sync_mask_layer_overlay()
-        self._on_adjust_panel_editing_finished(panel.get_adjustments())
-
-    def _on_mask_gradient_tool_changed(self, kind: str) -> None:
-        """Arm/disarm gradient-drag mode on the canvas."""
-        gv = getattr(self, "gpu_view", None)
-        if gv is None:
-            return
-        if hasattr(gv, "set_gradient_drag_kind"):
-            gv.set_gradient_drag_kind(kind or None)
-        if kind:
-            self._gradient_drag_layer_index = None
-            self._show_status(
-                "Drag across the photo to place the gradient."
-                if kind == "linear"
-                else "Drag a box on the photo to place the gradient.",
-                0,
-            )
-        else:
-            self._gradient_drag_layer_index = None
-
-    def _on_gradient_dragged(
-        self, kind: str, x0: float, y0: float, x1: float, y1: float, is_end: bool
-    ) -> None:
-        """Create the gradient layer on the first drag sample, then update it.
-
-        One layer per drag, not one per sample: the first move creates it and
-        every later move rewrites its params, so dragging previews the real
-        mask live and the whole gesture is a single undoable edit rather than
-        a hundred stacked layers.
-        """
-        panel = getattr(self, "single_image_adjust_panel", None)
-        mask_shape = self._dodge_burn_mask_shape()
-        if panel is None or mask_shape is None:
-            return
-
-        from raw_mask_shapes import params_from_drag
-
-        params = params_from_drag(kind, x0, y0, x1, y1)
-        index = getattr(self, "_gradient_drag_layer_index", None)
-
-        if index is None:
-            import numpy as np
-
-            from raw_mask_layers import MaskLayer, MaskLayerStack
-
-            stack = panel.mask_layer_stack()
-            if stack is None:
-                stack = MaskLayerStack([])
-                panel.set_mask_layer_stack(stack)
-            layer = MaskLayer(
-                np.zeros((128, 128), dtype=np.float32),
-                kind=kind,
-                params=params,
-                name="Linear Gradient" if kind == "linear" else "Radial Gradient",
-            )
-            stack.layers.append(layer)
-            index = len(stack.layers) - 1
-            self._gradient_drag_layer_index = index
-            # set_mask_layer_stack rebuilds the row list and re-syncs the
-            # sliders -- the same route the AI mask path uses to publish a new
-            # layer, rather than a second way of doing it.
-            panel.set_mask_layer_stack(stack)
-            panel.select_mask_index(index)
-        else:
-            stack = panel.mask_layer_stack()
-            if stack is None or not (0 <= index < len(stack.layers)):
-                return
-            layer = stack.layers[index]
-            layer.params = params
-            layer.touch()
-
-        self._sync_mask_layer_overlay()
-        self._sync_gradient_handles()
-        # Same publish path as every other mask edit: hand the adjustments back
-        # so the preview re-renders and the sidecar records the change.
-        self._on_adjust_panel_editing_finished(panel.get_adjustments())
-
-        if is_end:
-            self._gradient_drag_layer_index = None
-            # The tool stays armed so a second gradient needs no second click
-            # on the button, matching how the brush tools behave.
-            self._show_status(
-                "Gradient placed. Adjust its sliders, or drag again for another.",
-                3000,
-            )
 
     def _on_mask_ai_requested(self, kind: str) -> None:
         """One-shot AI mask (Subject / Sky) -> a new mask layer."""
@@ -23286,8 +23260,22 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         message = _AI_MASK_BUSY_TEXT.get(kind, "Working…")
         if downloading:
+            # Worker kinds map onto the user-facing ops in _OP_REQUIREMENTS.
+            # sam_encode is the encoder half of click; the rest share a name.
+            download_op = "click" if kind == "sam_encode" else kind
+            try:
+                import raw_ai_masks as _ram
+
+                mb = int(_ram.op_download_mb(download_op))
+            except Exception:
+                mb = 0
+            size = f", about {mb} MB" if mb > 0 else ""
+            label = _AI_MASK_LAYER_NAMES.get(
+                kind,
+                "AI Selection" if kind == "sam_encode" else kind,
+            )
             message = (
-                f"Downloading the {kind} model (first use, about 214 MB).\n"
+                f"Downloading the {label} model (first use{size}).\n"
                 "This happens once."
             )
         dlg = ExportProgressDialog(self, title="AI mask", message=message)
@@ -23341,10 +23329,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return
-        for name in ("_mask_ai_subject_btn", "_mask_ai_sky_btn", "_mask_ai_click_btn"):
-            btn = getattr(panel, name, None)
-            if btn is not None:
-                btn.setEnabled(enabled)
+        if hasattr(panel, "set_ai_mask_tools_enabled"):
+            panel.set_ai_mask_tools_enabled(enabled)
+        else:
+            for name in (
+                "_mask_ai_subject_btn",
+                "_mask_ai_sky_btn",
+                "_mask_ai_depth_btn",
+                "_mask_ai_click_btn",
+            ):
+                btn = getattr(panel, name, None)
+                if btn is not None:
+                    btn.setEnabled(enabled)
+        # Re-enabling after a wait must not revive a one-shot tool whose mask
+        # already exists -- cancel / timeout / "nothing found" all land here
+        # without going through set_mask_layer_stack, so the used-state sync
+        # has to be explicit.
+        if enabled:
+            self._sync_ai_tool_availability()
 
     def _on_ai_mask_finished(self, token: int, file_path: str, kind: str, result) -> None:
         # Cancelled or timed out: the run was abandoned and its dialog is
@@ -23376,9 +23378,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
 
         if result is None:
-            self._show_status(
-                f"Could not find a {kind} in this photo.", 4000
-            )
+            self._show_status(_ai_mask_nothing_found_text(kind), 4000)
             return
 
         # A segmentation net asked for something absent does not fail -- it
@@ -23392,9 +23392,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             coverage = 1.0
         if coverage < _AI_MASK_MIN_COVERAGE:
-            self._show_status(
-                f"No {kind} found in this photo — no mask added.", 4000
-            )
+            self._show_status(_ai_mask_nothing_found_text(kind, no_layer=True), 4000)
             return
 
         # Pressing Smart Object twice does not find "the next" object: the
@@ -23435,7 +23433,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         stack = getattr(self, "_mask_layer_stack", None)
         for index, layer in enumerate(getattr(stack, "layers", []) or []):
-            if getattr(layer, "is_parametric", False) or not layer.enabled:
+            if not layer.enabled:
                 continue
             try:
                 other = layer.alpha
@@ -23457,7 +23455,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             getattr(layer, "source", "")
             for layer in (getattr(stack, "layers", []) or [])
         }
-        for kind in ("subject", "sky"):
+        for kind in ("subject", "sky", "depth"):
             panel.set_ai_tool_used(kind, kind in present)
 
     def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True,
@@ -23597,8 +23595,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             bar.showMessage(message, timeout)
 
     def _on_mask_selection_changed(self) -> None:
-        """Selecting a different mask row moves the handles with it."""
-        self._sync_gradient_handles()
+        """Selecting a different mask row updates the visible overlay."""
         self._sync_mask_layer_overlay()
         # Deleting a row goes through here too, which is what re-enables a
         # tool once its mask is gone.
@@ -23614,7 +23611,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # invites aiming something the tool cannot read.
             if hasattr(gv, "set_click_tool_mode"):
                 gv.set_click_tool_mode(mode == "ai_click")
-            if mode is not None:
+            if mode in ("paint", "erase"):
+                self._sync_dodge_burn_brush_cursor()
+                # Add / Erase button arming must latch like P: otherwise
+                # the blank cursor appears but only mouse-down paints.
+                if hasattr(gv, "begin_latched_paint"):
+                    gv.begin_latched_paint()
+            elif mode is not None:
                 self._sync_dodge_burn_brush_cursor()
             elif not self._any_brush_tool_armed() and hasattr(gv, "end_key_paint"):
                 # Disarmed by any route -- Esc, the toolbar, a file switch,
@@ -23649,8 +23652,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if not panel.dodge_burn_show_mask():
             return
+        # Geometry (anamorphic desqueeze, crop, …) can change the edit frame
+        # after a mask was painted. Resize stored alphas to the current frame
+        # before drawing so the tint tracks the stretched photo instead of
+        # relying only on a stale pixmap transform.
+        self._ensure_mask_layer_alphas_match_shape()
         # Deliberately NOT gated on a brush tool being armed. It used to be,
-        # which meant a subject, sky, point-select or gradient mask showed no
+        # which meant a subject, sky, depth or point-select mask showed no
         # overlay at all unless you happened to arm Paint first -- the mask
         # was there and invisible.
         try:
@@ -23661,24 +23669,82 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
 
+    def _ensure_mask_layer_alphas_match_shape(self) -> None:
+        """Resize live mask alphas to the current post-geometry edit frame."""
+        shape = self._dodge_burn_mask_shape()
+        stack = getattr(self, "_mask_layer_stack", None)
+        if shape is None:
+            return
+        mh, mw = int(shape[0]), int(shape[1])
+        if mh <= 0 or mw <= 0:
+            return
+        changed = False
+        if stack is not None:
+            from raw_mask_layers import resize_alpha_to
+
+            def _fix(layer) -> bool:
+                touched = False
+                if getattr(layer, "is_group", False):
+                    for comp in list(getattr(layer, "components", []) or []):
+                        if _fix(comp):
+                            touched = True
+                    return touched
+                alpha = getattr(layer, "alpha", None)
+                if alpha is None or tuple(getattr(alpha, "shape", ())[:2]) == (mh, mw):
+                    return False
+                layer.alpha = resize_alpha_to(alpha, mh, mw).copy()
+                layer.touch()
+                return True
+
+            for layer in list(getattr(stack, "layers", []) or []):
+                if _fix(layer):
+                    changed = True
+
+        # Dodge/burn + heal paint in the same post-geometry frame; keep them
+        # aligned when anamorphic / crop changes size without waiting for a
+        # stroke (which used to wipe them via empty()).
+        for attr in ("_dodge_burn_mask", "_spot_heal_mask"):
+            mask = getattr(self, attr, None)
+            if mask is None:
+                continue
+            data = getattr(mask, "data", None)
+            if data is None or tuple(data.shape[:2]) == (mh, mw):
+                continue
+            resized = self._resize_local_mask_data(mask, mh, mw)
+            if resized is not None:
+                setattr(self, attr, resized)
+                changed = True
+
+        if changed:
+            # Guides are resolution-locked to the previous frame.
+            self._dodge_burn_luma_guide = None
+            self._dodge_burn_chroma_guide = None
+
     def _ensure_brush_guides(self, mh: int, mw: int):
         """(luma, chroma) edge-assist guides at mask resolution, cached.
 
-        Same guides `_on_dodge_burn_stroke` builds inline; factored so the
-        mask-layer stroke path shares them without duplicating the build.
+        Built from the **post-geometry** linear sample buffer (same frame as
+        strokes / the Adjust display), not the pre-geometry edit base resized
+        with a plain INTER_AREA stretch — anamorphic / crop / straighten
+        would otherwise leave the gate looking at the wrong edges.
         """
         luma = getattr(self, "_dodge_burn_luma_guide", None)
         chroma_guide = getattr(self, "_dodge_burn_chroma_guide", None)
         if luma is not None and getattr(luma, "shape", None) == (mh, mw):
             return luma, chroma_guide
         try:
-            base = getattr(self, "_adjust_preview_base_rgb", None)
-            if base is None or not hasattr(base, "shape"):
+            panel = getattr(self, "single_image_adjust_panel", None)
+            adj = {}
+            if panel is not None:
+                try:
+                    adj = panel.get_adjustments() or {}
+                except Exception:
+                    adj = {}
+            sample = self._wb_linear_sample_buffer(adj)
+            if sample is None or not hasattr(sample, "shape"):
                 return None, None
-            from raw_edit_pipeline import _linear_float_from_buffer
-
-            b = _linear_float_from_buffer(base)
-            if b.shape[0] != mh or b.shape[1] != mw:
+            b = sample
+            if int(b.shape[0]) != int(mh) or int(b.shape[1]) != int(mw):
                 import cv2
 
                 b = cv2.resize(b, (mw, mh), interpolation=cv2.INTER_AREA)
@@ -23799,6 +23865,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             #
             # The edit still renders, once, when the stroke ends.
             if is_end:
+                if hasattr(panel, "refresh_mask_row_icon"):
+                    panel.refresh_mask_row_icon(idx)
                 self._on_adjust_panel_editing_finished(panel.get_adjustments())
         except Exception:
             import logging
@@ -23806,6 +23874,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             logging.getLogger(__name__).warning(
                 "[MASKS] mask layer stroke failed", exc_info=True
             )
+
+    def _disarm_adjust_brushes_if_any(self) -> bool:
+        """Put away any armed Adjust brush. Returns True if something was armed."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None:
+            return False
+        had = False
+        if hasattr(panel, "dodge_burn_mode") and panel.dodge_burn_mode() is not None:
+            had = True
+        if hasattr(panel, "mask_layer_mode") and panel.mask_layer_mode() is not None:
+            had = True
+        if getattr(self, "_brush_key_held", None) is not None:
+            had = True
+        if not had:
+            return False
+        self._brush_key_held = None
+        if hasattr(panel, "disarm_dodge_burn"):
+            panel.disarm_dodge_burn()
+        if hasattr(panel, "disarm_mask_layer_tools"):
+            panel.disarm_mask_layer_tools()
+        gv = getattr(self, "gpu_view", None)
+        if gv is not None and hasattr(gv, "end_key_paint"):
+            gv.end_key_paint()
+        return True
 
     def _handle_brush_key_down(self, mode: str) -> bool:
         """Route a brush hotkey (D/B/X/H) press.
@@ -23819,11 +23911,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if panel is None or not hasattr(panel, "set_dodge_burn_mode"):
             return False
 
-        # Mask brushes take the same momentary route as dodge/burn: hold to
-        # paint, release to put the tool away. The Masks tab's buttons stay
-        # the persistent alternative -- a mask stroke is usually longer than a
-        # dodge dab, and an armed tool that painted on pointer movement alone
-        # could not be moved across the photo without drawing on the way.
+        # Mask brushes: tap to arm, tap again to put away (same as clicking
+        # Add / Erase). Hold-to-paint is the Global D/B/X/H model; on Masks a
+        # stroke is usually longer, and a hold key that also disarmed on
+        # release left the brush looking stuck when the user had armed it
+        # from the Brush / Add button instead.
         if mode in ("mask_paint", "mask_erase"):
             return self._handle_mask_brush_key_down(panel, mode)
 
@@ -23865,32 +23957,49 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return False
 
     def _handle_mask_brush_key_down(self, panel, mode: str) -> bool:
-        """Arm a mask brush from P / X and open the paint gate."""
-        if not hasattr(panel, "set_mask_layer_mode"):
+        """Toggle a mask brush from P / X and latch the paint gate.
+
+        Second press of the same key puts the tool away. Does not use the
+        hold-to-paint ``_brush_key_held`` path — release must not disarm a
+        brush the user armed to keep painting with the mouse.
+        """
+        if not hasattr(panel, "toggle_mask_layer_mode"):
             return False
+        want = "paint" if mode == "mask_paint" else "erase"
         # Paint makes its own mask, exactly as the button does -- otherwise the
         # key would silently do nothing on a photo with no masks yet.
-        if mode == "mask_paint" and not self.ensure_mask_layer_for_painting():
-            return False
+        if want == "paint" and panel.mask_layer_mode() != "paint":
+            if not self.ensure_mask_layer_for_painting():
+                return False
         if panel.active_mask_index() is None:
             self._show_status("No mask to erase yet — paint one first.", 2500)
             return False
 
         if hasattr(panel, "show_masks_tab"):
             panel.show_masks_tab()
-        armed = panel.set_mask_layer_mode(
-            "paint" if mode == "mask_paint" else "erase"
-        )
-        if not armed:
-            return False
+        # Controls can still be disabled from an empty-list sync that raced
+        # the layer create above — a disabled Add ignores the armed look.
+        for attr in ("_mask_paint_btn", "_mask_erase_btn"):
+            btn = getattr(panel, attr, None)
+            if btn is not None:
+                btn.setEnabled(True)
 
         gv = getattr(self, "gpu_view", None)
-        if getattr(self, "_brush_key_held", None) not in (None, mode):
+        # Leaving a previous hold (D/B/…) must not keep stamping under the
+        # mask brush we are about to arm or put away.
+        if getattr(self, "_brush_key_held", None) is not None:
+            self._brush_key_held = None
             if gv is not None and hasattr(gv, "end_key_paint"):
                 gv.end_key_paint()
-        self._brush_key_held = mode
-        if gv is not None and hasattr(gv, "begin_key_paint"):
-            gv.begin_key_paint()
+
+        armed = panel.toggle_mask_layer_mode(want)
+        if armed:
+            if gv is not None and hasattr(gv, "begin_latched_paint"):
+                gv.begin_latched_paint()
+            elif gv is not None and hasattr(gv, "begin_key_paint"):
+                gv.begin_key_paint()
+        elif gv is not None and hasattr(gv, "end_key_paint"):
+            gv.end_key_paint()
         return True
 
     def _handle_brush_key_up(self, mode: str) -> bool:
@@ -23901,11 +24010,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         the next pointer move over the photo could still paint under a tool
         the user had stopped using.
 
-        Only the hotkey is momentary; the panel's tool buttons still arm
-        persistently, so click-to-arm remains available for anyone who wants
-        the tool to stay put.
+        Mask P / X are tap-to-toggle (not hold); their release is a no-op.
+        Only the Global hotkeys are momentary; the panel's tool buttons still
+        arm persistently.
         """
         if not HOLD_TO_PAINT:
+            return False
+        if mode in ("mask_paint", "mask_erase"):
+            # Mask brushes toggle on press; release must not clear a latched
+            # arm from P / Add / Brush.
             return False
         if getattr(self, "_brush_key_held", None) != mode:
             # A superseded key (multi-key last-wins) -- its stroke already ended.
@@ -23917,10 +24030,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return True
-        if mode in ("mask_paint", "mask_erase"):
-            if hasattr(panel, "disarm_mask_layer_tools"):
-                panel.disarm_mask_layer_tools()
-        elif hasattr(panel, "disarm_dodge_burn"):
+        if hasattr(panel, "disarm_dodge_burn"):
             panel.disarm_dodge_burn()
         return True
 
@@ -23939,6 +24049,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "disarm_dodge_burn"):
             panel.disarm_dodge_burn()
+        if panel is not None and hasattr(panel, "disarm_mask_layer_tools"):
+            panel.disarm_mask_layer_tools()
 
     def _on_brush_tool_left_image(self) -> None:
         """Disarm Dodge/Burn/Eraser/Heal when the cursor leaves the photo.
@@ -23985,15 +24097,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _on_dodge_burn_brush_strength_wheel(self, wheel_delta: int) -> None:
         """Two-finger horizontal scroll while painting → Brush Flow/Strength."""
         panel = getattr(self, "single_image_adjust_panel", None)
-        if panel is None or panel.dodge_burn_mode() is None:
+        if panel is None or not self._adjust_brush_size_wheel_armed(panel):
             return
         if hasattr(panel, "nudge_dodge_burn_brush_strength"):
             panel.nudge_dodge_burn_brush_strength(int(wheel_delta))
 
     def _on_dodge_burn_brush_size_wheel(self, wheel_delta: int) -> None:
-        """Trackpad/wheel while Dodge/Burn is armed → Brush Size, not navigate."""
+        """Trackpad/wheel while a brush is armed → Brush Size, not navigate."""
         panel = getattr(self, "single_image_adjust_panel", None)
-        if panel is None or panel.dodge_burn_mode() is None:
+        if panel is None or not self._adjust_brush_size_wheel_armed(panel):
             return
         if hasattr(panel, "nudge_dodge_burn_brush_size"):
             panel.nudge_dodge_burn_brush_size(int(wheel_delta))
@@ -24006,6 +24118,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             slider.setValue(
                 max(slider.minimum(), min(slider.maximum(), slider.value() + amount))
             )
+
+    def _adjust_brush_size_wheel_armed(self, panel) -> bool:
+        """True when two-finger scroll should nudge brush size/flow.
+
+        Mask Paint/Erase reuses the D&B brush sliders and view mode, but
+        ``dodge_burn_mode()`` stays None — gating only on that left the Masks
+        tip ("two-finger scroll changes Brush Size") as a lie.
+        """
+        if panel.dodge_burn_mode() is not None:
+            return True
+        mode = panel.mask_layer_mode() if hasattr(panel, "mask_layer_mode") else None
+        return mode in ("paint", "erase")
 
     def _on_xmp_preset_applied(self) -> None:
         """Drop per-image local mask when a global XMP look is applied."""
@@ -24074,17 +24198,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         fq = not bool(getattr(self, "_transform_interacting", False))
         if panel.is_crop_mode():
             if not gv.is_crop_mode():
-                gv.set_crop_mode(True, insets=insets, aspect=None, refit=True)
+                gv.set_crop_mode(True, insets=insets, aspect=None, refit=True, interactive=True)
             else:
                 gv.set_crop_insets(*insets)
+                if hasattr(gv, "_crop_item") and gv._crop_item is not None:
+                    gv._crop_item.set_interactive(True)
             if refresh:
                 self._apply_adjust_panel_preview(full_quality=fq)
             return
         self._geometry_overlay_preview = True
+        # Draw the frame so warp has context, but do NOT let edges crop --
+        # that path used to fire while placing masks and felt like the photo
+        # itself was being resized.
         if not gv.is_crop_mode():
-            gv.set_crop_mode(True, insets=insets, aspect=None, refit=True)
+            gv.set_crop_mode(
+                True, insets=insets, aspect=None, refit=True, interactive=False
+            )
         else:
             gv.set_crop_insets(*insets)
+            if hasattr(gv, "_crop_item") and gv._crop_item is not None:
+                gv._crop_item.set_interactive(False)
         if refresh:
             self._apply_adjust_panel_preview(full_quality=fq)
 
@@ -24137,7 +24270,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             panel.disarm_dodge_burn()
             insets = panel.get_crop_insets()
             self._crop_working_insets = insets
-            gv.set_crop_mode(True, insets=insets, aspect=None)
+            gv.set_crop_mode(True, insets=insets, aspect=None, interactive=True)
             self._crop_preview_uncropped = True
             self._apply_adjust_panel_preview(full_quality=True)
             if hasattr(self, "status_bar"):
@@ -24316,9 +24449,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _dodge_burn_mask_shape(self) -> tuple[int, int] | None:
         """Canonical (H, W) the mask is painted at: post-geometry edit frame.
 
-        Matches the Adjust display framing (crop/straighten/keystone) so
-        stroke mapping agrees with WB pick / on-screen pixels. Cached per
-        base identity + transform keys.
+        Matches the Adjust display framing (crop/straighten/keystone/
+        anamorphic) so stroke mapping agrees with WB pick / on-screen pixels.
+        Cached per base identity + transform keys.
+
+        Crop-overlay "uncropped" preview still applies anamorphic / warp with
+        insets zeroed — never fall back to the pre-geometry base size there,
+        or brushes and AI targets stay narrow while the photo is desqueezed.
         """
         base = getattr(self, "_adjust_preview_base_rgb", None)
         if base is None or not hasattr(base, "shape"):
@@ -24339,10 +24476,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             cached = getattr(self, "_dodge_burn_mask_shape_cached", None)
             if cached is not None:
                 return cached
+        # Geometry / base identity changed — edge-assist guides are locked to
+        # the previous post-geometry frame and must be rebuilt.
+        self._dodge_burn_luma_guide = None
+        self._dodge_burn_chroma_guide = None
         h, w = int(base.shape[0]), int(base.shape[1])
-        if uncropped or not has_geometry(adj):
+        if not has_geometry(adj) and not uncropped:
             shape = (h, w)
         else:
+            # Includes uncropped+anamorphic: sample buffer zeroes crop insets
+            # but keeps AnamorphicRatio / straighten / distortion.
             sample = self._wb_linear_sample_buffer(adj)
             if sample is None or not hasattr(sample, "shape"):
                 shape = (h, w)
@@ -24351,6 +24494,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._dodge_burn_mask_shape_cache_key = cache_key
         self._dodge_burn_mask_shape_cached = shape
         return shape
+
+    def _resize_local_mask_data(self, mask, mh: int, mw: int):
+        """Keep painted coverage when the post-geometry frame changes size.
+
+        Used for dodge/burn and heal: anamorphic / crop used to ``empty()`` the
+        mask on the next stroke, wiping the user's work.
+        """
+        if mask is None:
+            return None
+        data = getattr(mask, "data", None)
+        if data is None or tuple(data.shape[:2]) == (mh, mw):
+            return mask
+        try:
+            if hasattr(mask, "data") and type(mask).__name__ == "HealMask":
+                from raw_spot_heal import resize_mask_to as _resize
+            else:
+                from raw_dodge_burn import resize_mask_to as _resize
+
+            mask.data = np.ascontiguousarray(_resize(mask, mh, mw), dtype=np.float32)
+            if hasattr(mask, "touch"):
+                mask.touch()
+            return mask
+        except Exception:
+            return None
 
     def _on_spot_heal_stroke(self, pt, pressure: float, is_end: bool) -> None:
         """Paint heal coverage; run full inpaint preview on stroke end."""
@@ -24365,8 +24532,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             mh, mw = mask_shape
             mask = getattr(self, "_spot_heal_mask", None)
-            if mask is None or mask.data.shape != (mh, mw):
+            if mask is None:
                 mask = HealMask.empty(mh, mw)
+                self._spot_heal_mask = mask
+            elif mask.data.shape != (mh, mw):
+                resized = self._resize_local_mask_data(mask, mh, mw)
+                if resized is None:
+                    mask = HealMask.empty(mh, mw)
+                else:
+                    mask = resized
                 self._spot_heal_mask = mask
 
             mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
@@ -24444,8 +24618,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             mh, mw = mask_shape
             mask = getattr(self, "_dodge_burn_mask", None)
-            if mask is None or mask.data.shape != (mh, mw):
+            if mask is None:
                 mask = DodgeBurnMask.empty(mh, mw)
+                self._dodge_burn_mask = mask
+            elif mask.data.shape != (mh, mw):
+                resized = self._resize_local_mask_data(mask, mh, mw)
+                if resized is None:
+                    mask = DodgeBurnMask.empty(mh, mw)
+                else:
+                    mask = resized
                 self._dodge_burn_mask = mask
 
             # Map the stroke point from the CURRENTLY DISPLAYED pixmap's
@@ -24499,44 +24680,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "patch_max": 0.0,
                 }
 
-            # Edge-assist guide: cache luminance + chroma for the stroke so
-            # each stamp stays O(brush area). Rebuild when the edit-base
-            # shape changes. Chroma is a cheap opponent-color pair (R-Y,
-            # B-Y), not a full colorspace conversion -- only relative
-            # distances matter for the similarity gate in
-            # raw_dodge_burn._edge_assist_gate.
-            luma = getattr(self, "_dodge_burn_luma_guide", None)
-            chroma_guide = getattr(self, "_dodge_burn_chroma_guide", None)
-            if luma is None or getattr(luma, "shape", None) != (mh, mw):
-                luma = None
-                chroma_guide = None
-                try:
-                    base = getattr(self, "_adjust_preview_base_rgb", None)
-                    if base is not None and hasattr(base, "shape"):
-                        from raw_edit_pipeline import _linear_float_from_buffer
-
-                        b = _linear_float_from_buffer(base)
-                        if b.shape[0] != mh or b.shape[1] != mw:
-                            import cv2
-
-                            b = cv2.resize(
-                                b, (mw, mh), interpolation=cv2.INTER_AREA
-                            )
-                        luma = (
-                            0.2126 * b[..., 0]
-                            + 0.7152 * b[..., 1]
-                            + 0.0722 * b[..., 2]
-                        ).astype(np.float32)
-                        chroma_guide = np.stack(
-                            [b[..., 0] - luma, b[..., 2] - luma], axis=-1
-                        ).astype(np.float32)
-                        self._dodge_burn_luma_guide = luma
-                        self._dodge_burn_chroma_guide = chroma_guide
-                except Exception:
-                    luma = None
-                    chroma_guide = None
-                    self._dodge_burn_luma_guide = None
-                    self._dodge_burn_chroma_guide = None
+            # Edge-assist guides: shared with mask-layer strokes (post-geometry).
+            luma, chroma_guide = self._ensure_brush_guides(mh, mw)
 
             edge_on = bool(panel.dodge_burn_edge_assist())
             brush_feather = float(panel.dodge_burn_brush_feather())
@@ -24875,15 +25020,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         # Prefer uncropped (overlay) frames so straighten can show
                         # context outside the crop rect.
                         try:
+                            # Only cache frames with no size-changing warp baked
+                            # in. Anamorphic / Distortion are already in the
+                            # pixels; re-running apply_geometry on drag would
+                            # double-apply them. CropAngle / keystone likewise.
                             warp_zero = not any(
                                 abs(float(adj_used.get(k, 0.0) or 0.0)) > 1e-4
                                 for k in (
                                     "CropAngle",
                                     "PerspectiveVertical",
                                     "PerspectiveHorizontal",
+                                    "Distortion",
                                 )
                             )
-                            if warp_zero and array.dtype == np.uint8:
+                            ratio = float(adj_used.get("AnamorphicRatio", 1.0) or 1.0)
+                            if warp_zero and abs(ratio - 1.0) < 1e-4 and array.dtype == np.uint8:
                                 self._adjust_transform_source_u8 = array
                                 self._adjust_transform_source_adj = dict(adj_used)
                                 self._adjust_transform_source_norm = _norm_path(file_path)
@@ -24927,7 +25078,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         way to include them. Preview/export paths inject a live mask object
         plus a cheap fingerprint for stage-cache keys; XMP save serializes
         PNG separately (see ``_on_adjust_panel_editing_finished``).
+
+        Resizes mask alphas to the current post-geometry frame first so an
+        anamorphic / crop change cannot feed a mismatched coverage buffer into
+        the pipeline.
         """
+        try:
+            self._ensure_mask_layer_alphas_match_shape()
+        except Exception:
+            pass
         from raw_dodge_burn import (
             DEFAULT_STRENGTH,
             MASK_KEY,
@@ -25251,8 +25410,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if not hasattr(self, "_undo_stack"):
                     self._undo_stack = {}
                 history = self._undo_stack.setdefault(path, [])
-                if not history or history[-1] != old_adj:
-                    history.append(old_adj)
+                # Copy so later loads/writes cannot mutate a stacked snapshot.
+                snap = dict(old_adj)
+                if not history or history[-1] != snap:
+                    history.append(snap)
                     if len(history) > 50:
                         history.pop(0)
 
@@ -25674,12 +25835,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         """
         self._adjust_compare_original_pixmap = None
         self._adjust_compare_original_path = None
+        self._adjust_compare_original_geo = None
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None:
             panel.set_compare_active(False)
         gv = getattr(self, "gpu_view", None)
         if gv is not None:
             gv.set_compare_mode(False)
+
+    def _compare_geometry_fingerprint(self, adj: dict | None = None):
+        """Transform-key fingerprint for compare-original cache validity."""
+        from raw_transform import TRANSFORM_KEYS
+
+        if adj is None:
+            panel = getattr(self, "single_image_adjust_panel", None)
+            try:
+                adj = panel.get_adjustments() if panel is not None else None
+            except Exception:
+                adj = None
+        adj = adj or {}
+        out = []
+        for k in TRANSFORM_KEYS:
+            try:
+                default = 1.0 if k == "AnamorphicRatio" else 0.0
+                out.append(float(adj.get(k, default) or default))
+            except Exception:
+                out.append(0.0)
+        return tuple(out)
 
     def _on_adjust_compare_toggled(self, checked: bool) -> None:
         """Arm/disarm the compare-with-original split view (GPU single view only)."""
@@ -25701,8 +25883,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
             return
         norm = _norm_path(path)
+        geo_fp = self._compare_geometry_fingerprint()
         cached = getattr(self, "_adjust_compare_original_pixmap", None)
-        if cached is not None and getattr(self, "_adjust_compare_original_path", None) == norm:
+        if (
+            cached is not None
+            and getattr(self, "_adjust_compare_original_path", None) == norm
+            and getattr(self, "_adjust_compare_original_geo", None) == geo_fp
+        ):
             gv.set_compare_original_pixmap(cached)
             gv.set_compare_mode(True)
             return
@@ -25713,6 +25900,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             geo = panel.get_adjustments() if panel is not None else None
         except Exception:
             geo = None
+        # Remember the fingerprint we requested so a late worker still matches.
+        self._adjust_compare_original_geo_pending = geo_fp
         worker = _AdjustCompareOriginalWorker(
             path, base, self._adjust_compare_original_signals, geometry_adj=geo
         )
@@ -25736,6 +25925,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         self._adjust_compare_original_pixmap = pixmap
         self._adjust_compare_original_path = _norm_path(file_path)
+        pending = getattr(self, "_adjust_compare_original_geo_pending", None)
+        self._adjust_compare_original_geo = (
+            pending if pending is not None else self._compare_geometry_fingerprint()
+        )
         gv.set_compare_original_pixmap(pixmap)
         
         is_compare_active = panel is not None and getattr(panel, "_compare_btn", None) is not None and panel._compare_btn.isChecked()
@@ -28608,12 +28801,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, 'current_file_path') and self.is_animated_image(_require_str_path(self.current_file_path)):
             return
         # RAW workflow JPEG-interim suppression (see display_numpy_image) --
-        # same guard for the QPixmap paint path.
+        # same guard for the QPixmap paint path. Only RAW files: a real JPEG
+        # under 1024px is the final image, not a camera-JPEG interim.
         try:
             cur = getattr(self, "current_file_path", None)
             if (
                 pixmap is not None
                 and not pixmap.isNull()
+                and cur
+                and is_raw_file(cur)
                 and max(pixmap.width(), pixmap.height()) < 1024
                 and self._suppress_jpeg_interim(cur)
                 and not self.image_cache.is_libraw_preview(cur)
@@ -31549,6 +31745,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if self._shortcut_blocked_by_text_input():
             return
+        # While Adjust is open, P is Masks → Add (same as the event-filter
+        # brush keys). The shortcut is normally disabled in that state; this
+        # is the fallback if it still fires.
+        if self._adjust_panel_active():
+            self._handle_brush_key_down("mask_paint")
+            return
         self._toggle_auto_tone_preview()
 
     def _shortcut_activate_adjust_panel(self) -> None:
@@ -31638,6 +31840,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return
         elif vm == "single":
             if getattr(self, "_adjust_overlay_visible", False):
+                # Esc first puts an armed brush away so the user is not forced
+                # to close the whole editor just to stop painting.
+                if self._disarm_adjust_brushes_if_any():
+                    return
                 self._close_adjust_panel_from_ui()
                 return
             if getattr(self, "_burst_group_view_active", False):
@@ -32601,9 +32807,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if (
             panel is not None
             and getattr(self, "_adjust_overlay_visible", False)
-            and panel.dodge_burn_mode() is not None
+            and self._adjust_brush_size_wheel_armed(panel)
         ):
-            # Safety net: D&B should have consumed the wheel in GpuImageView.
+            # Safety net: an armed brush should have consumed the wheel in
+            # GpuImageView; still nudge size instead of changing photos.
             self._on_dodge_burn_brush_size_wheel(120 if direction < 0 else -120)
             return
         import time
@@ -34908,7 +35115,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     panel = getattr(self, "single_image_adjust_panel", None)
                     if (
                         panel is not None
-                        and panel.dodge_burn_mode() is not None
+                        and self._adjust_brush_size_wheel_armed(panel)
                         and abs(vertical_delta) > 0
                     ):
                         self._on_dodge_burn_brush_size_wheel(int(vertical_delta))
@@ -35752,8 +35959,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 and self.current_file_path
                 and _norm_path(effective_preserved) == _norm_path(self.current_file_path)
                 and (
-                    was_fast_open
-                    or getattr(self, "_single_view_first_render_logged", False)
+                    # Fast-open alone is not enough: a refused paint can leave
+                    # the view blank while the fast-open token still matches.
+                    # Only skip reload when something is actually on screen.
+                    getattr(self, "_single_view_first_render_logged", False)
                     or self._single_view_pixels_on_screen(self.current_file_path)
                 )
             )

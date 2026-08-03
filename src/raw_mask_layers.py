@@ -17,7 +17,7 @@ Design (mirrors raw_dodge_burn.DodgeBurnMask):
     - **bbox-limited compute** (Phase 0 finding): a naive full-frame
       adjustment+blend per layer measured 120-140ms/layer at a 2200x3300
       half-res base -- one layer alone blows the entire 80ms preview
-      budget. Real masks (brush/gradient) cover a fraction of the frame,
+      budget. Real masks (brush/AI) cover a fraction of the frame,
       so each layer's adjustment and blend run only inside the alpha
       channel's non-zero bounding box (cached alongside is_empty, gated
       on version) -- cost scales with mask *area*, not frame area, same
@@ -205,14 +205,9 @@ class MaskLayer:
     # composite and re-render the frame to produce identical pixels.
     overlay_hidden: bool = False
     blend: str = "add"  # "add" | "subtract" -- reserved for Phase 2 stack composability
-    # Parametric shapes (see raw_mask_shapes). "brush" keeps ``alpha`` as the
-    # source of truth; a gradient keeps ``params`` as the source of truth and
-    # regenerates alpha at whatever resolution is asked for, which is what
-    # makes it re-draggable after reload and resolution-independent between
-    # the preview and export bases.
     kind: str = "brush"
-    params: dict = field(default_factory=dict)
-    # What produced this layer: "" (hand-painted), "subject", "sky", "sam".
+    # What produced this layer: "" (hand-painted), "subject", "sky", "depth",
+    # "sam".
     # Distinct from ``kind``, which is how the alpha is *stored*. Used to stop
     # a one-shot AI tool being offered again when its mask already exists --
     # matching on the layer NAME would break the moment a user renames a row.
@@ -220,8 +215,8 @@ class MaskLayer:
     # Grouped masks (Lightroom's model). When non-empty this layer is a GROUP:
     # its coverage is its components combined by each component's ``blend``,
     # not its own ``alpha``. Components are MaskLayer instances too, but only
-    # their alpha/kind/params/blend/invert/enabled are consulted -- the
-    # adjustments live on the group, exactly one set per mask.
+    # their alpha/kind/blend/invert/enabled are consulted -- the adjustments
+    # live on the group, exactly one set per mask.
     #
     # That is precisely why dropping one mask onto another discards the
     # dragged mask's adjustments: a component cannot own any.
@@ -233,7 +228,6 @@ class MaskLayer:
     version: int = field(default=0, compare=False, repr=False)
     _empty_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _bbox_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
-    _shape_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _group_alpha_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
     @classmethod
@@ -241,18 +235,11 @@ class MaskLayer:
         return cls(np.zeros((height, width), dtype=np.float32), **kwargs)
 
     def touch(self) -> None:
-        """Call after any in-place mutation of ``alpha`` or ``params``."""
+        """Call after any in-place mutation of this layer's editable state."""
         self.version += 1
         self._empty_cache = None
         self._bbox_cache = None
-        self._shape_alpha_cache = None
         self._group_alpha_cache = None
-
-    @property
-    def is_parametric(self) -> bool:
-        from raw_mask_shapes import PARAMETRIC_KINDS
-
-        return self.kind in PARAMETRIC_KINDS
 
     @property
     def is_group(self) -> bool:
@@ -263,8 +250,8 @@ class MaskLayer:
 
         Add is a union (max), not a sum: two overlapping brush strokes should
         cover the overlap once, not twice as hard. Subtract removes coverage
-        proportionally, so a soft eraser gradient thins the mask rather than
-        punching a hard hole.
+        proportionally, so a soft subtracting component thins the mask rather
+        than punching a hard hole.
 
         The first component is always added regardless of its blend -- a mask
         whose first component subtracts would otherwise be empty forever, and
@@ -302,24 +289,13 @@ class MaskLayer:
     def alpha_at(self, height: int, width: int) -> np.ndarray:
         """This layer's alpha at a given resolution.
 
-        A brush layer resizes its buffer; a parametric layer regenerates from
-        params, which is exact at any size rather than an interpolation of a
-        buffer authored at some other one. A group combines its components.
-        Cached per (version, shape) because the compositor asks for the same
-        size every tick.
+        Plain layers resize their stored buffer. Groups combine their
+        components. The compositor asks for the same size every tick, so
+        callers benefit from reusing the returned array when possible.
         """
         if self.is_group:
             return self._combined_alpha_at(height, width)
-        if not self.is_parametric:
-            return resize_alpha_to(self.alpha, height, width)
-        cached = self._shape_alpha_cache
-        if cached is not None and cached[0] == (self.version, height, width):
-            return cached[1]
-        from raw_mask_shapes import generate_alpha
-
-        generated = generate_alpha(self.kind, self.params, height, width)
-        self._shape_alpha_cache = ((self.version, height, width), generated)
-        return generated
+        return resize_alpha_to(self.alpha, height, width)
 
     def effective_alpha(self) -> np.ndarray:
         return (1.0 - self.alpha) if self.invert else self.alpha
@@ -340,12 +316,7 @@ class MaskLayer:
         cached = self._empty_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        if self.is_parametric:
-            # Its coverage comes from params, not the (unused) alpha buffer --
-            # testing alpha would call every gradient empty and skip it.
-            result = False
-        else:
-            result = not bool(np.any(self.alpha > 1e-4))
+        result = not bool(np.any(self.alpha > 1e-4))
         self._empty_cache = (self.version, result)
         return result
 
@@ -384,8 +355,7 @@ class MaskLayer:
 
         Computed on ``alpha`` regardless of ``invert``: this is the *editable*
         region -- what a brush has touched -- which is what the UI and the mask
-        overlay want. The compositor wants ``effective_bbox()``. Parametric
-        masks (gradient/radial) will derive a bbox analytically from params.
+        overlay want. The compositor wants ``effective_bbox()``.
         """
         if self.is_group:
             # Union of the ADDING components. A subtracting one can only
@@ -404,14 +374,7 @@ class MaskLayer:
         cached = self._bbox_cache
         if cached is not None and cached[0] == self.version:
             return cached[1]
-        if self.is_parametric:
-            from raw_mask_shapes import alpha_bbox
-
-            h, w = self.alpha.shape[:2]
-            y0, y1, x0, x1 = alpha_bbox(self.kind, self.params, h, w)
-            result = (y0, y1, x0, x1)
-        else:
-            result = _nonzero_bbox(self.alpha)
+        result = _nonzero_bbox(self.alpha)
         self._bbox_cache = (self.version, result)
         return result
 
@@ -422,18 +385,12 @@ class MaskLayer:
             f"{k}={self.adjustments.get(k, 0.0):.4f}" for k in _all_fingerprint_keys()
         )
         enabled_sig = int(self.enabled)
-        shape_sig = ""
-        if self.is_parametric:
-            shape_sig = ":" + self.kind + ":" + ",".join(
-                f"{k}={float(self.params.get(k, 0.0)):.5f}"
-                for k in sorted(self.params)
-            )
         group_sig = ""
         if self.is_group:
             group_sig = ":grp[" + "|".join(c.fingerprint() for c in self.components) + "]"
         return (
             f"mem:{int(h)}x{int(w)}:v{int(self.version)}:inv{int(self.invert)}"
-            f":en{enabled_sig}:bl{self.blend}{shape_sig}{group_sig}:{adj_sig}"
+            f":en{enabled_sig}:bl{self.blend}:k{self.kind}{group_sig}:{adj_sig}"
         )
 
 
@@ -491,13 +448,25 @@ def _scaled_bbox(bbox: tuple, src_h: int, src_w: int, dst_h: int, dst_w: int) ->
     return (ty0, ty1, tx0, tx1)
 
 
-def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
+def _composite_one_layer(
+    img: np.ndarray,
+    layer: "MaskLayer",
+    *,
+    row_offset: int = 0,
+    full_height: int | None = None,
+) -> np.ndarray:
     """Blend one layer's adjustment into ``img``, limited to its alpha bbox.
 
     Spatially-aware adjustments (Dehaze/Sharpness/Clarity/Defringe) render
     over a padded extraction region so their neighborhood ops see clean
     context, then only the tight bbox is cropped back out of that padded
     result before blending -- the pad-before-filter-crop-after pattern.
+
+    ``row_offset`` / ``full_height`` support the banded edit pipeline: ``img``
+    may be a horizontal strip of a taller frame. Without them, ``effective_alpha_at``
+    would bilinear-squash the *whole* mask into the strip height, so a face
+    painted mid-frame lands at the top of every band (drag lite looks right;
+    settle/export jumps).
     """
     # effective_bbox, not bbox: an inverted layer applies everywhere outside
     # its painted region, so confining it to the painted bbox made Invert a
@@ -507,32 +476,43 @@ def _composite_one_layer(img: np.ndarray, layer: "MaskLayer") -> np.ndarray:
         return img
     mh, mw = layer.alpha.shape[:2]
     h, w = img.shape[:2]
-    y0, y1, x0, x1 = _scaled_bbox(bbox, mh, mw, h, w)
+    fh = int(full_height) if full_height is not None else h
+    ro = int(row_offset)
+    if fh < h:
+        fh = h
+        ro = 0
+
+    # Scale bbox into the FULL frame, then intersect with this strip's rows.
+    y0, y1, x0, x1 = _scaled_bbox(bbox, mh, mw, fh, w)
+    band_y0, band_y1 = ro, ro + h
+    y0 = max(y0, band_y0)
+    y1 = min(y1, band_y1)
+    x0 = max(0, x0)
+    x1 = min(w, x1)
     if y1 <= y0 or x1 <= x0:
         return img
 
+    # Local coords inside the strip buffer.
+    ly0, ly1 = y0 - ro, y1 - ro
+
     pad = _SPATIAL_FILTER_PAD if _needs_spatial_pad(layer.adjustments) else 0
-    ey0, ey1 = max(0, y0 - pad), min(h, y1 + pad)
+    ey0, ey1 = max(0, ly0 - pad), min(h, ly1 + pad)
     ex0, ex1 = max(0, x0 - pad), min(w, x1 + pad)
 
     extraction = img[ey0:ey1, ex0:ex1]
     adjusted_padded = _apply_layer_adjustments(extraction, layer.adjustments)
-    ry0, ry1, rx0, rx1 = y0 - ey0, y1 - ey0, x0 - ex0, x1 - ex0
+    ry0, ry1, rx0, rx1 = ly0 - ey0, ly1 - ey0, x0 - ex0, x1 - ex0
     adjusted_region = adjusted_padded[ry0:ry1, rx0:rx1]
 
-    # effective_alpha_at, not resize(effective_alpha()): a parametric layer
-    # generates exactly at the target resolution, so the same gradient lands
-    # identically on the half-res preview and the full-res export instead of
-    # being interpolated up from whatever size it was authored at.
-    alpha_full = layer.effective_alpha_at(h, w)
+    alpha_full = layer.effective_alpha_at(fh, w)
     alpha_region = alpha_full[y0:y1, x0:x1]
-    tight_region = img[y0:y1, x0:x1]
+    tight_region = img[ly0:ly1, x0:x1]
     blended = tight_region * (1.0 - alpha_region[..., np.newaxis]) + adjusted_region * alpha_region[..., np.newaxis]
 
-    if (y0, y1, x0, x1) == (0, h, 0, w):
+    if (ly0, ly1, x0, x1) == (0, h, 0, w):
         return blended
     out = img.copy()
-    out[y0:y1, x0:x1] = blended
+    out[ly0:ly1, x0:x1] = blended
     return out
 
 
@@ -603,7 +583,14 @@ def erase_mask_layer_brush(
     luma_tol: float = 0.10,
     feather: float = DEFAULT_BRUSH_FEATHER,
 ) -> tuple[int, int, int, int]:
-    """Pull ``layer.alpha`` toward zero under a soft circular brush."""
+    """Pull ``layer.alpha`` toward zero under a soft circular brush.
+
+    Edge assist is intentionally ignored, matching ``erase_brush`` for
+    dodge/burn: an eraser has to reach wherever paint went, including across
+    the luminance edge assist was protecting. The guide args stay in the
+    signature so callers need not special-case this brush against paint.
+    """
+    del luminance, chroma, edge_assist, luma_tol
     from raw_dodge_burn import circular_brush_falloff
 
     h, w = layer.alpha.shape
@@ -617,30 +604,36 @@ def erase_mask_layer_brush(
 
     falloff = circular_brush_falloff(y0, y1, x0, x1, cx, cy, r, feather)
 
-    if edge_assist and luminance is not None and luminance.shape[:2] == (h, w):
-        from raw_dodge_burn import _edge_assist_gate
-
-        falloff = falloff * _edge_assist_gate(
-            luminance, y0, x0, y1, x1, cx, cy, luma_tol=luma_tol, chroma=chroma
-        )
-
     region = layer.alpha[y0:y1, x0:x1]
     region *= np.clip(1.0 - falloff * float(strength), 0.0, 1.0)
     layer.touch()
     return (x0, y0, x1, y1)
 
 
-def _composite_layers(img: np.ndarray, layers: list) -> np.ndarray:
+def _composite_layers(
+    img: np.ndarray,
+    layers: list,
+    *,
+    row_offset: int = 0,
+    full_height: int | None = None,
+) -> np.ndarray:
     out = img
     for layer in layers:
         if layer.is_empty:
             continue
-        out = _composite_one_layer(out, layer)
+        out = _composite_one_layer(
+            out, layer, row_offset=row_offset, full_height=full_height
+        )
     return out
 
 
 def apply_mask_layers(
-    img: np.ndarray, stack: Optional[MaskLayerStack], *, active_index: Optional[int] = None
+    img: np.ndarray,
+    stack: Optional[MaskLayerStack],
+    *,
+    active_index: Optional[int] = None,
+    row_offset: int = 0,
+    full_height: int | None = None,
 ) -> np.ndarray:
     """Composite every enabled, non-empty layer's adjustment onto ``img``.
 
@@ -662,10 +655,16 @@ def apply_mask_layers(
     recompute. This result is intentionally NOT written to the full
     composite cache -- it's a mid-drag approximation the caller should
     replace with an active_index=None settle call once the drag ends.
+
+    ``row_offset`` / ``full_height``: when ``img`` is a horizontal band of a
+    taller frame (banded edit pipeline), pass the band's top row in the full
+    frame and the full-frame height so alpha is sliced, not squashed.
     """
     if stack is None or stack.is_empty():
         return img
     h, w = img.shape[:2]
+    fh = int(full_height) if full_height is not None else h
+    ro = int(row_offset)
 
     import weakref as _weakref
 
@@ -675,13 +674,15 @@ def apply_mask_layers(
         # different base with an identical fingerprint and shape would hit
         # this entry and render the previous frame. The weakref makes the
         # match exact: a dead or different referent cannot satisfy it.
-        cache_key = (stack.fingerprint(), h, w, id(img))
+        cache_key = (stack.fingerprint(), h, w, id(img), ro, fh)
         cached = stack._composite_cache
         if cached is not None and cached[0] == cache_key:
             ref = cached[2] if len(cached) > 2 else None
             if ref is not None and ref() is img:
                 return cached[1]
-        out = _composite_layers(img, stack.layers)
+        out = _composite_layers(
+            img, stack.layers, row_offset=ro, full_height=fh
+        )
         try:
             stack._composite_cache = (cache_key, out, _weakref.ref(img))
         except TypeError:
@@ -694,7 +695,7 @@ def apply_mask_layers(
     active_index = max(0, min(active_index, n - 1))
     prefix_layers = stack.layers[:active_index]
     prefix_fp = "|".join(l.fingerprint() for l in prefix_layers) if prefix_layers else "empty"
-    prefix_key = (prefix_fp, h, w, id(img))
+    prefix_key = (prefix_fp, h, w, id(img), ro, fh)
     cached_prefix = stack._prefix_cache
     prefix_out = None
     if cached_prefix is not None and cached_prefix[0] == prefix_key:
@@ -702,10 +703,17 @@ def apply_mask_layers(
         if ref is not None and ref() is img:
             prefix_out = cached_prefix[1]
     if prefix_out is None:
-        prefix_out = _composite_layers(img, prefix_layers)
+        prefix_out = _composite_layers(
+            img, prefix_layers, row_offset=ro, full_height=fh
+        )
         try:
             stack._prefix_cache = (prefix_key, prefix_out, _weakref.ref(img))
         except TypeError:
             stack._prefix_cache = None
 
-    return _composite_layers(prefix_out, stack.layers[active_index:])
+    return _composite_layers(
+        prefix_out,
+        stack.layers[active_index:],
+        row_offset=ro,
+        full_height=fh,
+    )

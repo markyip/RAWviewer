@@ -129,6 +129,32 @@ def test_tab_bar_clamps_out_of_range():
     print("  OK   tab index clamps to range")
 
 
+def test_leaving_masks_disarms_brush_tools():
+    """Paint left armed used to keep the brush cursor on Global."""
+    from raw_mask_layers import MaskLayer, MaskLayerStack
+    import numpy as np
+
+    p = _panel()
+    p._panel_tabs.set_current(MASKS)
+    alpha = np.zeros((32, 32), dtype=np.float32)
+    alpha[8:24, 8:24] = 1.0
+    p.set_mask_layer_stack(MaskLayerStack([MaskLayer(name="Brush 1", alpha=alpha)]))
+    p.set_mask_layer_mode("paint")
+    assert p.mask_layer_mode() == "paint"
+    p._panel_tabs.set_current(GLOBAL)
+    assert p.mask_layer_mode() is None, "mask brush stayed armed on Global"
+    print("  OK   leaving Masks disarms mask brush tools")
+
+
+def test_entering_masks_disarms_dodge_burn():
+    p = _panel()
+    p.set_dodge_burn_mode("dodge")
+    assert p.dodge_burn_mode() == "dodge"
+    p._panel_tabs.set_current(MASKS)
+    assert p.dodge_burn_mode() is None, "dodge/burn stayed armed on Masks"
+    print("  OK   entering Masks disarms dodge/burn")
+
+
 def main() -> int:
     test_two_tabs_global_first()
     test_masks_section_is_on_the_masks_page()
@@ -139,6 +165,8 @@ def main() -> int:
     test_show_masks_tab_helper()
     test_adjustments_round_trip()
     test_tab_bar_clamps_out_of_range()
+    test_leaving_masks_disarms_brush_tools()
+    test_entering_masks_disarms_dodge_burn()
     print("\nPASS t_adjust_panel_tabs")
     return 0
 

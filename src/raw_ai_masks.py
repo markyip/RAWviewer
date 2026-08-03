@@ -9,11 +9,13 @@ mask is indistinguishable from a hand-painted one once created (it can be
 brushed, erased, inverted, and round-trips through mask_layers_xmp for
 free).
 
-Three models, all ONNX, all commercially licensed:
+Four models, all ONNX, all commercially licensed:
 
     subject  BiRefNet (MIT)        1024x1024  one-click foreground matte
     sky      U^2-Net skyseg (MIT)   320x320   one-click sky matte
     click    MobileSAM (Apache 2)  1024x1024  point-prompted segmentation
+    depth    Depth Anything V2     518 long   near-to-far depth gradient
+             Small (Apache 2)      side
 
 Weights live in ``<repo>/models`` and are fetched on first use with
 SHA-256 verification, like the denoise models. Unlike them, they are
@@ -31,9 +33,9 @@ embedding cache is keyed on the base image identity the same way
 raw_mask_layers' composite cache is keyed on ``id(img)``.
 
 Inference deliberately runs at each model's native input resolution
-(1024 or 320) rather than the edit base's working resolution: these are
-fully-convolutional segmentation nets trained at a fixed scale, and the
-resulting alpha is then bilinearly resized up to the mask resolution.
+(1024, 518 or 320) rather than the edit base's working resolution: these
+are nets trained at a fixed scale, and the resulting alpha is then
+bilinearly resized up to the mask resolution.
 Masks tolerate that upsample in a way pixel output never could -- which
 is the whole reason segmentation fits this app and generative editing
 does not.
@@ -86,6 +88,9 @@ _MODELS = {
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
         "label": "Subject",
+        # Approximate on-disk size for the first-use download dialog. Measured
+        # from the published file; the dialog only needs a round number.
+        "download_mb": 214,
     },
     "sky": {
         "filename": "skyseg.onnx",
@@ -121,6 +126,29 @@ _MODELS = {
         "mean": (0.485, 0.456, 0.406),
         "std": (0.229, 0.224, 0.225),
         "label": "Sky",
+        "download_mb": 84,
+    },
+    "depth": {
+        "filename": "depth_anything_v2_vits.onnx",
+        # The Small (vits) variant specifically. Depth Anything V2's Base and
+        # Large checkpoints are CC-BY-NC-4.0; only Small is Apache 2.0, which
+        # is the whole reason this is the one we ship.
+        "url": (
+            "https://huggingface.co/onnx-community/depth-anything-v2-small"
+            "/resolve/main/onnx/model.onnx"
+        ),
+        "sha256": "afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c",
+        # Longest side, not a square: unlike the matte models above this graph
+        # has dynamic H/W, so we keep the photo's aspect instead of squashing
+        # it. Measured on a 5825x3883 frame: 0.55s aspect-preserved against
+        # 0.87s squared, and the squared feed distorts the geometry the depth
+        # estimate is read from. Both dimensions still have to be multiples of
+        # 14 (the ViT patch size) -- see _depth_feed_size.
+        "input_size": 518,
+        "mean": (0.485, 0.456, 0.406),
+        "std": (0.229, 0.224, 0.225),
+        "label": "Depth",
+        "download_mb": 94,
     },
     "sam_encoder": {
         "filename": "mobilesam_encoder.onnx",
@@ -132,6 +160,7 @@ _MODELS = {
         "mean": (123.675 / 255.0, 116.28 / 255.0, 103.53 / 255.0),
         "std": (58.395 / 255.0, 57.12 / 255.0, 57.375 / 255.0),
         "label": "Click",
+        "download_mb": 27,
     },
     "sam_decoder": {
         "filename": "mobilesam_decoder.onnx",
@@ -142,6 +171,7 @@ _MODELS = {
         "sha256": "22cf85e35d14182f4b4712364264c06b22edbef63f065189586f080ef4e2f325",
         "input_size": 0,  # decoder takes an embedding, not an image
         "label": "Click",
+        "download_mb": 16,
     },
 }
 
@@ -149,6 +179,7 @@ _MODELS = {
 _OP_REQUIREMENTS = {
     "subject": ("subject",),
     "sky": ("sky",),
+    "depth": ("depth",),
     "click": ("sam_encoder", "sam_decoder"),
 }
 
@@ -301,6 +332,17 @@ def available_ops() -> dict:
     if not ai_masks_enabled():
         return {op: False for op in _OP_REQUIREMENTS}
     return {op: op_is_ready(op) for op in _OP_REQUIREMENTS}
+
+
+def op_download_mb(op: str) -> int:
+    """Approximate megabytes a first-use download of ``op`` will pull.
+
+    Sums the models that operation needs. Used only for the wait dialog's
+    "about N MB" line -- a round number the user can trust, not a meter.
+    """
+    return sum(
+        int(_MODELS[k].get("download_mb", 0)) for k in _OP_REQUIREMENTS.get(op, ())
+    )
 
 
 # ----------------------------------------------------------------------
@@ -497,6 +539,88 @@ def segment_sky(rgb: np.ndarray, target_hw: tuple) -> Optional[np.ndarray]:
 
 
 # ----------------------------------------------------------------------
+# Depth (Depth Anything V2 Small)
+# ----------------------------------------------------------------------
+
+# ViT patch size. Both fed dimensions must be a multiple of this or the
+# graph silently floors them (its output shape is literally
+# "14*floor(height/14)"), which would misalign the depth map against the
+# frame it gets resized onto.
+_DEPTH_PATCH = 14
+
+
+def _depth_feed_size(h: int, w: int, longest: int) -> tuple:
+    """(feed_h, feed_w): longest side to ``longest``, both multiples of 14."""
+    scale = float(longest) / float(max(1, max(h, w)))
+    fh = int(round(h * scale / _DEPTH_PATCH)) * _DEPTH_PATCH
+    fw = int(round(w * scale / _DEPTH_PATCH)) * _DEPTH_PATCH
+    return max(_DEPTH_PATCH, fh), max(_DEPTH_PATCH, fw)
+
+
+def estimate_depth(rgb: np.ndarray, target_hw: tuple) -> Optional[np.ndarray]:
+    """Near-to-far depth as a mask alpha: 1.0 nearest, 0.0 farthest.
+
+    Deliberately NOT routed through ``_to_alpha``. That helper sigmoids
+    anything outside [0, 1] because the matte models emit logits; this
+    graph emits *relative inverse depth* on an arbitrary positive scale
+    (measured [0, 4.6] on real frames), and a sigmoid would crush that to
+    the flat top of the curve -- 4.6 and 2.3 both land within 1% of 1.0.
+    Min-max per image is the normalization this output actually wants,
+    and it is also what makes the result comparable frame to frame: the
+    scale carries no absolute units, so only its spread is meaningful.
+
+    The alpha is a smooth gradient rather than a cutout, which is the
+    point -- it grades an adjustment by distance. Invert the layer to
+    grade the background instead; the mask stack already does that, so
+    there is no "far" variant of this to ship.
+    """
+    session = _get_session("depth")
+    if session is None:
+        return None
+    spec = _MODELS["depth"]
+    import cv2
+
+    img = _to_float_rgb(rgb)
+    h, w = img.shape[:2]
+    fh, fw = _depth_feed_size(h, w, int(spec["input_size"]))
+    try:
+        resized = cv2.resize(img, (fw, fh), interpolation=cv2.INTER_AREA)
+        normalized = (resized - np.asarray(spec["mean"], dtype=np.float32)) / np.asarray(
+            spec["std"], dtype=np.float32
+        )
+        tensor = np.ascontiguousarray(
+            normalized.transpose(2, 0, 1)[np.newaxis, ...].astype(np.float32)
+        )
+        outputs = session.run(None, {session.get_inputs()[0].name: tensor})
+    except Exception:
+        logger.warning("[AIMASK] depth inference failed", exc_info=True)
+        return None
+    if not outputs:
+        return None
+
+    depth = np.asarray(outputs[0], dtype=np.float32)
+    while depth.ndim > 2:
+        depth = depth[0]
+    if depth.ndim != 2:
+        logger.warning("[AIMASK] unexpected depth output shape %s", np.shape(outputs[0]))
+        return None
+
+    lo, hi = float(depth.min()), float(depth.max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi - lo < 1e-6:
+        # A perfectly flat depth map (a scan, a blank wall) carries no
+        # gradient to grade by. Returning a constant 0.5 would add a
+        # half-strength mask over the whole frame; report nothing found
+        # and let the caller decline the layer, like an absent sky.
+        return None
+    depth = (depth - lo) / (hi - lo)
+
+    th, tw = int(target_hw[0]), int(target_hw[1])
+    if depth.shape != (th, tw):
+        depth = cv2.resize(depth, (tw, th), interpolation=cv2.INTER_LINEAR)
+    return np.clip(depth, 0.0, 1.0).astype(np.float32)
+
+
+# ----------------------------------------------------------------------
 # MobileSAM click-to-mask
 # ----------------------------------------------------------------------
 
@@ -659,6 +783,24 @@ class SamPredictor:
             best = int(np.argmax(iou)) if iou is not None else 0
             masks = masks[:, best : best + 1]
 
+        # Threshold at zero BEFORE _to_alpha, which would otherwise sigmoid
+        # these. SAM's mask output is a signed field trained to be cut at 0,
+        # not a calibrated probability: measured on a real frame it spans
+        # [-12.3, +14.3], and sigmoid maps that onto a broad ramp instead of
+        # an edge. The result was a mask that never reached 1.0 even in the
+        # middle of the subject (0.987) with 8.8% of the frame stranded in a
+        # visibly streaked 0.05..0.95 band -- against 0.0% once thresholded.
+        #
+        # This is what binarize_alpha's "useful for SAM output" note was for.
+        # It is done here rather than by the caller because it is a property
+        # of the model, not a choice: every consumer of this alpha wants it.
+        #
+        # Thresholding FIRST and resizing after is deliberate -- _to_alpha's
+        # bilinear pass then leaves roughly a pixel of antialiasing on the
+        # edge, which is what a mask wants. Resizing first and thresholding
+        # after would give the same coverage with a jagged edge.
+        masks = (masks > 0.0).astype(np.float32)
+
         alpha = _to_alpha(masks, target_hw)
         if "orig_im_size" not in feeds:
             # Fixed-size output covers the padded square, so crop the
@@ -701,5 +843,12 @@ def feather_alpha(alpha: np.ndarray, radius: float) -> np.ndarray:
 
 
 def binarize_alpha(alpha: np.ndarray, threshold: float = 0.5) -> np.ndarray:
-    """Hard-threshold a matte. Useful for SAM output, which is already crisp."""
+    """Hard-threshold a matte.
+
+    This used to say "useful for SAM output" and no caller ever acted on
+    it, which is precisely how SAM's masks shipped as sigmoid mush. SAM
+    now thresholds its own logits inside SamPredictor.predict, where the
+    scale the threshold applies to is actually known -- see the note
+    there. This stays as a general utility for hardening a soft matte.
+    """
     return (alpha >= threshold).astype(np.float32)

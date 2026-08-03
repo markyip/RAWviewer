@@ -33,8 +33,8 @@ hides the mask overlay (`adjust_panel.py:_on_panel_tab_changed`).
 The header hint line under "Adjust" follows the page:
 
 ```
-Global:  E closes · hold D B X H to paint · scroll = size
-Masks:   E closes · hold P to paint, X to erase · M shows the mask · scroll = size
+Global:  E closes · hold D / B / X / H = Dodge / Burn / Erase / Heal · scroll = size
+Masks:   E closes · P = Add · X = Erase · again to put away · M shows mask · scroll = size
 ```
 
 ---
@@ -46,25 +46,23 @@ The **Create new mask** section holds every way to start one, as six buttons
 
 | Button | What happens | Needs a model |
 |---|---|---|
-| **Brush** | Makes an empty mask, arms Add. You paint the coverage | no |
-| **Linear Gradient** | Arms the tool; drag across the photo to place it | no |
-| **Radial Gradient** | Arms the tool; drag a box, the ellipse is inscribed | no |
+| **Brush** | Makes an empty mask. Press **P** (or Add) to paint | no |
 | **Smart Object** | One press; finds whatever stands out and masks it | yes (214 MB) |
 | **Sky** | One press; masks the sky | yes |
+| **Depth** | One press; masks near / mid / far bands from a depth map | yes |
 | **AI Selection** | Arms click-to-select; click a thing to mask that thing | yes |
 
-Only **Brush** creates a layer up front. The gradients and the AI tools each
-create their own on completion, so arming one and changing your mind leaves
-nothing behind (`adjust_panel.py:_on_mask_create`).
+Only **Brush** creates a layer up front. The AI tools each create their own
+on completion, so arming one and changing your mind leaves nothing behind
+(`adjust_panel.py:_on_mask_create`).
 
-The three AI buttons are **Plus only**. Standard omits them entirely rather
+The AI buttons are **Plus only**. Standard omits them entirely rather
 than greying them out, because each downloads a model on first press
 (`t_mask_edition_gating.py`).
 
-**Linear, Radial and AI Selection stay lit while armed** — they wait for you
-to do something on the photo. Clicking a lit one puts it away. A line under
-the buttons also says what the armed tool is waiting for ("Drag across the
-photo to place the gradient"), which a lit button cannot say.
+**AI Selection stays lit while armed** — it waits for you to click on the
+photo. Clicking a lit one puts it away. A line under the buttons also says
+what the armed tool is waiting for, which a lit button cannot say.
 
 **AI Selection is not a brush.** It takes a point, so the pointer is a
 crosshair rather than a brush circle, and the Brush sliders are not offered
@@ -92,8 +90,8 @@ The **This mask** row acts on the selected mask only:
 
 | Control | Key | Effect |
 |---|---|---|
-| **Add** | hold **P** | Brush more coverage into the selected mask |
-| **Erase** | hold **X** | Remove coverage from it |
+| **Add** | **P** (again to put away) | Brush more coverage into the selected mask |
+| **Erase** | **X** (again to put away) | Remove coverage from it |
 | **Invert** | — | The mask applies everywhere *except* its coverage |
 | **⧉** | — | Duplicate: same coverage and adjustments, as a separate mask |
 | **✕** | **Delete** | Delete the selected mask |
@@ -233,8 +231,7 @@ A no-change guard means simply opening and closing the editor does not
 rewrite the sidecar or invalidate caches (`main.py:_adjustments_match`).
 
 Mask coverage is stored in that sidecar as base64 PNG at half resolution
-(`mask_layers_xmp.py`), with gradients stored as geometry rather than pixels
-so they stay re-draggable and resolution-independent.
+(`mask_layers_xmp.py`).
 
 ### Export (explicit)
 

@@ -10,10 +10,15 @@ the hashes printed here pasted into raw_ai_masks._MODELS.
     pixi run python3 scripts/fetch_ai_mask_models.py --only subject
 
 Sources (all commercially licensed):
-    birefnet.onnx            BiRefNet, MIT
-    skyseg.onnx              U^2-Net sky segmentation, MIT
-    mobilesam_encoder.onnx   MobileSAM image encoder, Apache 2.0
-    mobilesam_decoder.onnx   MobileSAM prompt decoder, Apache 2.0
+    birefnet.onnx                 BiRefNet, MIT
+    skyseg.onnx                   U^2-Net sky segmentation, MIT
+    depth_anything_v2_vits.onnx   Depth Anything V2 Small, Apache 2.0
+    mobilesam_encoder.onnx        MobileSAM image encoder, Apache 2.0
+    mobilesam_decoder.onnx        MobileSAM prompt decoder, Apache 2.0
+
+Depth Anything V2 is Apache 2.0 in its Small (vits) size ONLY -- Base and
+Large are CC-BY-NC-4.0. Do not "upgrade" that URL to a bigger checkpoint
+without checking what it costs.
 
 URLs and hashes are read from raw_ai_masks._MODELS rather than duplicated
 here. They were duplicated once, and this copy silently rotted: it still

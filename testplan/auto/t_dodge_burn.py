@@ -138,6 +138,54 @@ def main() -> int:
         f"assist={right:.4f} plain={right_plain:.4f}",
     )
 
+    # 5c. Large brush still respects a hard edge (downsample path).
+    from raw_dodge_burn import _EDGE_ASSIST_MAX_DIM
+
+    big = np.zeros((400, 600), dtype=np.float32)
+    big[:, 300:] = 0.85
+    big[:, :300] = 0.15
+    mask_big = DodgeBurnMask.empty(400, 600)
+    # Radius large enough that the stamp patch exceeds _EDGE_ASSIST_MAX_DIM.
+    stamp_brush(
+        mask_big, 280, 200, _EDGE_ASSIST_MAX_DIM + 40, 0.6,
+        dodge=True, luminance=big, edge_assist=True,
+    )
+    left_big = float(np.abs(mask_big.data[180:220, 200:260]).mean())
+    right_big = float(np.abs(mask_big.data[180:220, 360:420]).mean())
+    check(
+        "large-brush edge-assist still blocks bleed (downsample path)",
+        left_big > right_big * 2.0,
+        f"left={left_big:.4f} right={right_big:.4f}",
+    )
+
+    # 5d. Tip near the edge (or on a noise spike) still paints the subject
+    # and does not die — robust median seed + neighbour flood origin.
+    mask_tip = DodgeBurnMask.empty(120, 200)
+    stamp_brush(
+        mask_tip, 95, 60, 40, 0.5, dodge=True, luminance=split, edge_assist=True
+    )
+    tip_left = float(np.abs(mask_tip.data[55:65, 60:90]).mean())
+    tip_right = float(np.abs(mask_tip.data[55:65, 120:150]).mean())
+    check(
+        "tip near the edge still paints the seed-side subject",
+        tip_left > 0.05 and tip_left > tip_right * 2.0,
+        f"left={tip_left:.4f} right={tip_right:.4f}",
+    )
+
+    noisy = split.copy()
+    noisy[60, 90] = 0.95  # single-pixel spike under the tip
+    mask_spike = DodgeBurnMask.empty(120, 200)
+    stamp_brush(
+        mask_spike, 90, 60, 40, 0.5, dodge=True, luminance=noisy, edge_assist=True
+    )
+    spike_left = float(np.abs(mask_spike.data[55:65, 60:85]).mean())
+    spike_right = float(np.abs(mask_spike.data[55:65, 120:150]).mean())
+    check(
+        "tip on a noise spike still paints without bleeding",
+        spike_left > 0.05 and spike_left > spike_right * 2.0,
+        f"left={spike_left:.4f} right={spike_right:.4f}",
+    )
+
     # 6. Serialize round-trip (8-bit quantization tolerance)
     serial = serialize_mask(mask)
     check("serialize non-empty mask produces data", len(serial) > 0)

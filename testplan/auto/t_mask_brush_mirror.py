@@ -106,6 +106,23 @@ def main() -> int:
     p._mask_brush_sliders["Brush Size"].setValue(240)
     check("re-setting the same value is silent", len(fired) == 0, str(len(fired)))
 
+    # --- Edge Assist: same shared toggle, reachable while masking ---
+    edge = p._db_edge_btn
+    mirror_edge = p._mask_edge_btn
+    check("Edge Assist mirror exists", mirror_edge is not None and mirror_edge.isCheckable())
+    mirror_edge.setChecked(False)
+    check("Masks Edge Assist writes through", edge.isChecked() is False)
+    check(
+        "dodge_burn_edge_assist follows the Masks toggle",
+        p.dodge_burn_edge_assist() is False,
+    )
+    edge.setChecked(True)
+    check("Local Edge Assist writes through", mirror_edge.isChecked() is True)
+    check(
+        "dodge_burn_edge_assist follows the Local toggle",
+        p.dodge_burn_edge_assist() is True,
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

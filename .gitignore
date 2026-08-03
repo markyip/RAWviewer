@@ -237,5 +237,6 @@ bench/
 # AI mask weights (large); fetch with scripts/fetch_ai_mask_models.py
 models/birefnet.onnx
 models/skyseg.onnx
+models/depth_anything_v2_vits.onnx
 models/mobilesam_encoder.onnx
 models/mobilesam_decoder.onnx

@@ -168,9 +168,9 @@ def test_select_button_is_named_for_what_it_does():
     # Every mask tool needs a tooltip: the names alone cannot carry the
     # difference between "the app chooses" and "you choose".
     for btn in (
-        p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
+        p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_depth_btn,
+        p._mask_ai_click_btn,
         p._mask_paint_btn, p._mask_erase_btn, p._mask_invert_btn,
-        p._mask_linear_btn, p._mask_radial_btn,
     ):
         tip = btn.toolTip()
         assert len(tip) > 40, f"{btn.text()!r} has no real tooltip: {tip!r}"
@@ -221,29 +221,29 @@ def test_paint_creates_its_own_mask_like_every_other_tool():
 
 
 def test_create_section_shows_every_way_to_start_a_mask():
-    """Six buttons, one press each, all visible.
+    """Five buttons, one press each, all visible.
 
     This was briefly a "Create new mask" menu. The idea was right -- one
     place that starts a mask, naming the tool up front -- but it charged two
     clicks and hid the choices behind a word.
 
-    What it must not go back to is a "New empty mask" button above these six.
-    The gradients and the AI tools each create their own mask while the brush
+    What it must not go back to is a "New empty mask" button above these five.
+    The AI tools each create their own mask while the brush
     paints into the selected one, so that button was load-bearing for the
     brush alone and inert beside everything else.
     """
     p = _panel()
     btns = p._mask_create_buttons
+    # AI Selection leads the AI group: it is ~10x cheaper than Smart Object
+    # and needs no extra download, so it is the right default reach. Smart
+    # Object follows rather than leading -- see _MASK_CREATE_ITEMS.
     assert [b.text() for b in btns.values()] == [
-        "Brush", "Linear Gradient", "Radial Gradient",
-        "Smart Object", "Sky", "AI Selection",
+        "Brush", "AI Selection", "Smart Object", "Sky", "Depth",
     ], [b.text() for b in btns.values()]
     assert getattr(p, "_mask_add_btn", None) is None, "New empty mask came back"
 
     # Only the tools that wait for something on the photo stay lit.
-    assert {k for k, b in btns.items() if b.isCheckable()} == {
-        "linear", "radial", "ai_click"
-    }
+    assert {k for k, b in btns.items() if b.isCheckable()} == {"ai_click"}
 
     # Brush is the only entry that needs a layer made for it up front.
     fired = []
@@ -251,37 +251,33 @@ def test_create_section_shows_every_way_to_start_a_mask():
     p._on_mask_create("brush")
     assert fired == [1], "Brush did not ask the host for a mask"
 
-    for kind in ("linear", "radial", "ai_click"):
+    for kind in ("ai_click",):
         fired.clear()
         p._on_mask_create(kind)
         assert fired == [], (
             f"{kind} pre-created a mask -- it makes its own, so arming and "
             "then changing your mind would leave an empty one behind"
         )
-    print("  OK   six buttons, one press each")
+    print("  OK   five buttons, one press each")
 
 
 def test_create_button_lights_while_its_tool_is_armed():
     p = _panel()
     btns = p._mask_create_buttons
 
-    p._on_mask_create_clicked("linear")
-    assert p._mask_linear_btn.isChecked(), "Linear did not arm"
-    assert btns["linear"].isChecked(), "the armed tool's button is not lit"
+    p._on_mask_create_clicked("ai_click")
+    assert p._mask_ai_click_btn.isChecked(), "AI Selection did not arm"
+    assert btns["ai_click"].isChecked(), "the armed tool's button is not lit"
 
-    p._on_mask_create_clicked("radial")
-    assert not btns["linear"].isChecked(), "two tools lit at once"
-    assert btns["radial"].isChecked()
-
-    p._on_mask_create_clicked("radial")
-    assert not p._mask_radial_btn.isChecked(), "clicking a lit tool did not disarm"
-    assert not btns["radial"].isChecked()
+    p._on_mask_create_clicked("ai_click")
+    assert not p._mask_ai_click_btn.isChecked(), "clicking a lit tool did not disarm"
+    assert not btns["ai_click"].isChecked()
 
     # Driven from the arming buttons, so a hotkey/navigation disarm shows too.
-    p._on_mask_create_clicked("linear")
-    p.disarm_gradient_tools()
+    p._on_mask_create_clicked("ai_click")
+    p.disarm_mask_layer_tools()
     p._sync_mask_create_buttons()
-    assert not btns["linear"].isChecked(), "button stayed lit after disarm"
+    assert not btns["ai_click"].isChecked(), "button stayed lit after disarm"
     print("  OK   the armed tool's button stays lit")
 
 
@@ -348,16 +344,11 @@ def test_armed_creation_tool_says_what_it_wants():
     p = _panel()
     assert not p._mask_armed_hint.isVisible(), "hint shown with nothing armed"
 
-    p._on_mask_create("linear")
-    assert p._mask_armed_hint.isVisible(), "no hint after arming Linear"
-    assert "Drag" in p._mask_armed_hint.text(), p._mask_armed_hint.text()
+    p._on_mask_create("ai_click")
+    assert p._mask_armed_hint.isVisible(), "no hint after arming AI Selection"
+    assert "Click" in p._mask_armed_hint.text(), p._mask_armed_hint.text()
 
-    p._on_mask_create("radial")
-    assert "box" in p._mask_armed_hint.text(), (
-        "the hint did not follow the newly armed tool"
-    )
-
-    p.disarm_gradient_tools()
+    p.disarm_mask_layer_tools()
     p._sync_mask_armed_hint()
     assert not p._mask_armed_hint.isVisible(), "hint outlived the armed tool"
     print("  OK   the armed tool says what it is waiting for")
@@ -393,8 +384,7 @@ def _overlay_rgba(view):
 
 
 def test_overlay_covers_every_kind_of_mask():
-    """Brush, linear, radial and model-produced alphas alike."""
-    import raw_mask_shapes as shapes
+    """Brush and model-produced alpha buffers alike."""
 
     def brush():
         layer = MaskLayer.empty(W, W, name="brush")
@@ -402,18 +392,8 @@ def test_overlay_covers_every_kind_of_mask():
         layer.touch()
         return layer
 
-    def gradient(kind, drag):
-        return MaskLayer(
-            np.zeros((W, W), np.float32),
-            kind=kind,
-            params=shapes.params_from_drag(kind, *drag),
-            name=kind,
-        )
-
     cases = {
         "brush": brush(),
-        "linear": gradient("linear", (0.5, 0.05, 0.5, 0.6)),
-        "radial": gradient("radial", (0.25, 0.25, 0.75, 0.75)),
         # Subject / Sky / Point-select all arrive as a plain alpha buffer.
         "ai": brush(),
     }
@@ -423,25 +403,6 @@ def test_overlay_covers_every_kind_of_mask():
         rgba = _overlay_rgba(v)
         assert int(rgba[..., 3].max()) > 0, f"{name} mask produced no visible overlay"
     print("  OK   every mask kind produces a visible overlay")
-
-
-def test_gradients_render_from_params_not_the_placeholder():
-    """A gradient's alpha buffer is a placeholder; the overlay must generate."""
-    import raw_mask_shapes as shapes
-
-    layer = MaskLayer(
-        np.zeros((128, 128), np.float32),
-        kind="radial",
-        params=shapes.params_from_drag("radial", 0.3, 0.3, 0.7, 0.7),
-    )
-    assert float(layer.alpha.max()) == 0.0, "fixture is not a placeholder buffer"
-    v = _view()
-    v.update_mask_layer_overlay([layer], 0)
-    rgba = _overlay_rgba(v)
-    assert int(rgba[..., 3].max()) > 0, (
-        "gradient overlay read the empty placeholder instead of generating"
-    )
-    print("  OK   a gradient overlay is generated from its params")
 
 
 def test_selected_mask_is_ember_others_recede():
@@ -497,7 +458,7 @@ def test_disabled_masks_are_not_shown():
 
 
 def test_overlay_is_not_gated_on_an_armed_brush():
-    """The bug: a subject/sky/gradient mask was invisible unless Paint was armed."""
+    """The bug: a subject/sky mask was invisible unless Paint was armed."""
     src = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
     )
@@ -578,32 +539,76 @@ def test_a_brushed_mask_is_not_treated_as_the_same_mask():
 
 
 def test_one_shot_ai_tools_disable_once_used():
-    """Better than letting the press fail and explaining afterwards."""
+    """Better than letting the press fail and explaining afterwards.
+
+    The Create-section button is what the user presses; the arming button is
+    the state machine behind it. Both have to disable, or the explanation
+    only lands on a widget nobody can see.
+    """
     p = _panel()
+    create = p._mask_create_buttons
     assert p._mask_ai_subject_btn.isEnabled()
+    assert create["subject"].isEnabled()
     base_tip = p._mask_ai_subject_btn.toolTip()
+    base_create_tip = create["subject"].toolTip()
 
     p.set_ai_tool_used("subject", True)
     assert not p._mask_ai_subject_btn.isEnabled(), "Smart Object stayed live"
+    assert not create["subject"].isEnabled(), "Create Smart Object stayed live"
     assert p._mask_ai_sky_btn.isEnabled(), "Sky was disabled by a subject mask"
+    assert create["sky"].isEnabled(), "Create Sky was disabled by a subject mask"
     tip = p._mask_ai_subject_btn.toolTip()
     assert "already masked" in tip, f"disabled button does not say why: {tip!r}"
     assert "AI Selection" in tip, "disabled button offers no alternative"
+    assert "already masked" in create["subject"].toolTip()
+
+    p.set_ai_tool_used("depth", True)
+    assert not create["depth"].isEnabled(), "Create Depth stayed live"
+    assert create["subject"].isEnabled() is False  # still used
+    assert "already masked" in create["depth"].toolTip()
 
     # Deleting the mask has to give the tool back, tooltip included.
     p.set_ai_tool_used("subject", False)
     assert p._mask_ai_subject_btn.isEnabled()
+    assert create["subject"].isEnabled()
     assert p._mask_ai_subject_btn.toolTip() == base_tip, "original tooltip not restored"
+    assert create["subject"].toolTip() == base_create_tip, (
+        "Create-button tooltip not restored"
+    )
+    p.set_ai_tool_used("depth", False)
+    assert create["depth"].isEnabled()
     print("  OK   a used one-shot tool disables, explains, and comes back")
 
 
 def test_ai_selection_is_never_disabled():
     """Every click adds something, so it is never 'already done'."""
     p = _panel()
-    for kind in ("subject", "sky"):
+    for kind in ("subject", "sky", "depth"):
         p.set_ai_tool_used(kind, True)
     assert p._mask_ai_click_btn.isEnabled(), "AI Selection was disabled"
+    assert p._mask_create_buttons["ai_click"].isEnabled(), (
+        "Create AI Selection was disabled"
+    )
     print("  OK   AI Selection stays available")
+
+
+def test_busy_disables_visible_create_buttons_too():
+    """A wait that only greys the hidden arming row leaves Create clickable."""
+    p = _panel()
+    p.set_ai_mask_tools_enabled(False)
+    for kind in ("subject", "sky", "depth", "ai_click"):
+        assert not p._mask_create_buttons[kind].isEnabled(), f"{kind} Create stayed live"
+        arming = {
+            "subject": p._mask_ai_subject_btn,
+            "sky": p._mask_ai_sky_btn,
+            "depth": p._mask_ai_depth_btn,
+            "ai_click": p._mask_ai_click_btn,
+        }[kind]
+        assert not arming.isEnabled(), f"{kind} arming stayed live"
+    p.set_ai_mask_tools_enabled(True)
+    for kind in ("subject", "sky", "depth", "ai_click"):
+        assert p._mask_create_buttons[kind].isEnabled()
+    print("  OK   busy wait greys Create buttons and arming buttons together")
 
 
 def test_layer_remembers_what_made_it():
@@ -633,7 +638,7 @@ def test_overlay_draws_without_any_dodge_burn_mask():
 
     update_mask_layer_overlay used to early-return unless
     _mask_overlay_wanted was set -- a flag owned by the dodge/burn overlay
-    path and only ever set when THAT path ran. So a subject, sky or gradient
+    path and only ever set when THAT path ran. So a subject or sky
     mask on a photo with no dodge/burn strokes could never draw.
     """
     v = _view()
@@ -654,6 +659,32 @@ def test_hiding_the_overlay_clears_it():
     print("  OK   hiding the overlay clears it")
 
 
+def test_overlay_refits_after_anamorphic_display_size_change():
+    """Anamorphic stretch changes pixmap width; mask tint must follow."""
+    from PyQt6.QtGui import QImage, QPixmap, QTransform
+
+    v = _view()
+    layer = _painted_layer()
+    v.update_mask_layer_overlay([layer], 0)
+    assert v._mask_item.isVisible()
+    before = QTransform(v._mask_item.transform())
+
+    # Simulate the post-anamorphic preview: same height, wider frame.
+    wide = QImage(W * 2, H, QImage.Format.Format_RGB32)
+    wide.fill(0)
+    v.set_pixmap(QPixmap.fromImage(wide), preserve_view=False)
+    assert (v._img_w, v._img_h) == (W * 2, H)
+    after = v._mask_item.transform()
+    assert abs(after.m11() - (W * 2) / W) < 1e-6, (
+        f"overlay X scale did not follow anamorphic width: {after.m11()}"
+    )
+    assert abs(after.m22() - 1.0) < 1e-6, (
+        f"overlay Y scale should stay 1 when height is unchanged: {after.m22()}"
+    )
+    assert after.m11() != before.m11() or before.m11() == 1.0
+    print("  OK   overlay refits after anamorphic-sized pixmap change")
+
+
 def test_mask_toggle_routes_to_the_layer_overlay():
     src = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "main.py"
@@ -669,12 +700,50 @@ def test_mask_toggle_routes_to_the_layer_overlay():
     print("  OK   the Mask toggle reaches the mask-layer overlay")
 
 
+def test_mask_row_icon_updates_after_paint():
+    """Add starts empty (black icon); after a stamp the thumbnail must show it."""
+    from raw_mask_layers import stamp_mask_layer_brush
+
+    p = _panel()
+    layer = MaskLayer.empty(H, W)
+    p.set_mask_layer_stack(MaskLayerStack([layer]))
+    item = p._mask_list.topLevelItem(0)
+    assert item is not None
+    before = item.icon(0)
+    assert not before.isNull(), "empty mask should still have a (black) icon"
+
+    stamp_mask_layer_brush(layer, W // 2, H // 2, radius=40, strength=1.0, edge_assist=False)
+    p.refresh_mask_row_icon(0)
+    after = item.icon(0)
+    assert not after.isNull()
+
+    # Compare rendered pixels: painted icon must be brighter overall.
+    def _icon_mean(icon):
+        pm = icon.pixmap(p._MASK_ICON_BOX, p._MASK_ICON_BOX)
+        img = pm.toImage().convertToFormat(img.Format.Format_RGBA8888) if False else pm.toImage()
+        img = img.convertToFormat(img.Format.Format_RGBA8888)
+        ptr = img.bits()
+        ptr.setsize(img.sizeInBytes())
+        arr = np.frombuffer(ptr, np.uint8).reshape(img.height(), img.bytesPerLine() // 4, 4)[
+            :, : img.width(), 0
+        ]
+        return float(arr.mean())
+
+    assert _icon_mean(after) > _icon_mean(before) + 5, (
+        f"thumbnail stayed dark after paint: before={_icon_mean(before):.1f} "
+        f"after={_icon_mean(after):.1f}"
+    )
+    print("  OK   mask row thumbnail updates after paint")
+
+
 def test_brush_controls_are_reachable_while_masking():
     """Local lives on the Global tab; masking needed its own copy."""
     p = _panel()
     assert set(p._mask_brush_sliders) == {"Brush Size", "Brush Flow", "Brush Feather"}, (
         f"missing brush controls on the Masks tab: {sorted(p._mask_brush_sliders)}"
     )
+    assert getattr(p, "_mask_edge_btn", None) is not None, "Edge Assist missing on Masks Brush"
+    assert p._mask_edge_btn.isCheckable()
 
     mirror = p._mask_brush_sliders["Brush Size"]
     local = p._db_size_slider
@@ -688,22 +757,22 @@ def test_brush_controls_are_reachable_while_masking():
     assert abs(p.dodge_burn_brush_feather() - 0.15) < 1e-6, (
         "feather set while masking never reached the brush"
     )
+
+    # Edge Assist is the same shared flag the stamp path already reads.
+    p._mask_edge_btn.setChecked(False)
+    assert not p.dodge_burn_edge_assist(), "Masks Edge Assist did not reach the brush"
+    p._db_edge_btn.setChecked(True)
+    assert p._mask_edge_btn.isChecked(), "Local Edge Assist did not update the Masks mirror"
     print("  OK   brush controls mirror both ways and reach the brush")
 
 
 def test_mask_rows_show_the_mask_shape():
     """A row called "Mask 3" says nothing about what it covers."""
-    import raw_mask_shapes as shapes
 
     p = _panel()
     brush = _painted_layer(name="Brush 1")
-    gradient = MaskLayer(
-        np.zeros((64, 64), np.float32),
-        kind="radial",
-        params=shapes.params_from_drag("radial", 0.3, 0.3, 0.7, 0.7),
-        name="Radial Gradient",
-    )
-    p.set_mask_layer_stack(MaskLayerStack([brush, gradient]))
+    brush2 = _painted_layer(name="Brush 2")
+    p.set_mask_layer_stack(MaskLayerStack([brush, brush2]))
 
     for row in range(p._mask_list.topLevelItemCount()):
         icon = p._mask_list.topLevelItem(row).icon(0)
@@ -713,9 +782,6 @@ def test_mask_rows_show_the_mask_shape():
             f"row {row} thumbnail is too small to read: {sizes}"
         )
 
-    # A gradient's thumbnail must be generated, not read off its placeholder.
-    icon = p._mask_row_icon(gradient)
-    assert icon is not None and not icon.isNull(), "gradient row has no thumbnail"
     print("  OK   every row shows the mask's own shape")
 
 
@@ -734,14 +800,13 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
                  "_mask_params_wrap"):
         assert getattr(p, attr, None) is not None, f"{attr} missing"
 
-    # The six creation tools keep their names: they are now menu entries
+    # The five creation tools keep their names: they are now menu entries
     # driven by these buttons rather than buttons of their own.
     labels = {b.text() for b in (
-        p._mask_paint_btn, p._mask_linear_btn, p._mask_radial_btn,
-        p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_click_btn,
+        p._mask_paint_btn, p._mask_ai_subject_btn, p._mask_ai_sky_btn,
+        p._mask_ai_depth_btn, p._mask_ai_click_btn,
     )}
-    assert labels == {"Add (P)", "Linear", "Radial", "Smart Object", "Sky",
-                      "AI Selection"}, labels
+    assert labels == {"Add (P)", "Smart Object", "Sky", "Depth", "AI Selection"}, labels
     print("  OK   the tab is grouped by what each control acts on")
 
 
@@ -795,7 +860,6 @@ def main() -> int:
     test_brush_section_appears_only_with_a_brush_in_hand()
     test_delete_does_not_look_like_its_neighbours()
     test_overlay_covers_every_kind_of_mask()
-    test_gradients_render_from_params_not_the_placeholder()
     test_selected_mask_is_ember_others_recede()
     test_selected_mask_wins_where_masks_overlap()
     test_disabled_masks_are_not_shown()
@@ -805,10 +869,13 @@ def main() -> int:
     test_a_brushed_mask_is_not_treated_as_the_same_mask()
     test_one_shot_ai_tools_disable_once_used()
     test_ai_selection_is_never_disabled()
+    test_busy_disables_visible_create_buttons_too()
     test_layer_remembers_what_made_it()
     test_overlay_draws_without_any_dodge_burn_mask()
     test_hiding_the_overlay_clears_it()
+    test_overlay_refits_after_anamorphic_display_size_change()
     test_mask_toggle_routes_to_the_layer_overlay()
+    test_mask_row_icon_updates_after_paint()
     test_brush_controls_are_reachable_while_masking()
     test_mask_rows_show_the_mask_shape()
     print("\nPASS t_masks_ui_cleanup")

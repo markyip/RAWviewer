@@ -43,7 +43,30 @@ class CropOverlayItem(QGraphicsObject):
         self._drag_origin = QPointF()
         self._drag_start_insets = (0.0, 0.0, 0.0, 0.0)
         self._hover_mode = ""
+        self._interactive = True
         self.hide()
+
+    def set_interactive(self, enabled: bool) -> None:
+        """Allow or forbid edge/corner drags.
+
+        Geometry-overlay preview reuses this item to SHOW the crop frame while
+        straighten/perspective is live, but those edges must not be editable --
+        otherwise dragging near the photo boundary silently crops and looks
+        like the image itself is resizing. Explicit Crop mode turns this on.
+        """
+        enabled = bool(enabled)
+        self._interactive = enabled
+        if enabled:
+            self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+            self.setAcceptHoverEvents(True)
+        else:
+            self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            self.setAcceptHoverEvents(False)
+            self._drag_mode = None
+            self._apply_hover_cursor("")
+
+    def is_interactive(self) -> bool:
+        return bool(getattr(self, "_interactive", True))
 
     def boundingRect(self) -> QRectF:
         return QRectF(0, 0, max(1, self._img_w), max(1, self._img_h))
@@ -119,6 +142,10 @@ class CropOverlayItem(QGraphicsObject):
             y = crop.top() + crop.height() * i / 3.0
             painter.drawLine(QPointF(x, crop.top()), QPointF(x, crop.bottom()))
             painter.drawLine(QPointF(crop.left(), y), QPointF(crop.right(), y))
+
+        if not self._interactive:
+            # Preview-only: frame and guides, no grab affordances.
+            return
 
         # Corner handles.
         handle = QPen(QColor(theme.EMBER))
@@ -223,14 +250,23 @@ class CropOverlayItem(QGraphicsObject):
             pass
 
     def hoverMoveEvent(self, event) -> None:
+        if not self._interactive:
+            event.ignore()
+            return
         self._apply_hover_cursor(self._hit_test(event.pos()))
         super().hoverMoveEvent(event)
 
     def hoverLeaveEvent(self, event) -> None:
+        if not self._interactive:
+            event.ignore()
+            return
         self._apply_hover_cursor("")
         super().hoverLeaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
+        if not self._interactive:
+            event.ignore()
+            return
         mode = self._hit_test(event.pos())
         if not mode:
             event.ignore()
@@ -241,7 +277,7 @@ class CropOverlayItem(QGraphicsObject):
         event.accept()
 
     def mouseMoveEvent(self, event) -> None:
-        if not self._drag_mode or self._img_w <= 0 or self._img_h <= 0:
+        if not self._interactive or not self._drag_mode or self._img_w <= 0 or self._img_h <= 0:
             event.ignore()
             return
         dx = (event.pos().x() - self._drag_origin.x()) / self._img_w

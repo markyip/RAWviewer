@@ -1075,9 +1075,7 @@ class ImageAdjustPanelWidget(QWidget):
     # resolution and the RGB the model runs on), plus inference is slow
     # enough to need a worker thread and a busy state.
     mask_ai_requested = pyqtSignal(str)
-    # Gradient tool armed/disarmed: "linear" | "radial" | "" (disarm).
-    mask_gradient_tool_changed = pyqtSignal(str)
-    # Selected mask row changed -- the host moves the gradient handles to it.
+    # Selected mask row changed -- the host refreshes the visible overlay/state.
     mask_selection_changed = pyqtSignal()
     # What the mask COVERS changed while the stack's structure did not, so the
     # "show what is masked" overlay has to be rebuilt. Invert is the case that
@@ -1998,9 +1996,11 @@ class ImageAdjustPanelWidget(QWidget):
         self._db_edge_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._db_edge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._db_edge_btn.setToolTip(
-            "Keep dodge/burn paint on the subject under the cursor — flood-fills "
+            "Keep brush paint on the subject under the cursor — flood-fills "
             "within similar luminance so strokes stop at subject edges "
-            "instead of spilling onto neighbors (not used by Heal)"
+            "instead of spilling onto neighbors.\n"
+            "Shared by Dodge/Burn and Mask Add; not used by Heal or Erase "
+            "(either brush system)."
         )
         db_actions_row.addWidget(self._db_edge_btn, 1)
         db_container_layout.addLayout(db_actions_row)
@@ -3373,35 +3373,34 @@ class ImageAdjustPanelWidget(QWidget):
     # burn or heal, so listing D / B / H there was telling someone painting a
     # mask about three tools that page does not have.
     _HEADER_HINTS = (
-        "E closes · hold D B X H to paint · scroll = size",
-        "E closes · hold P to paint, X to erase · M shows the mask · scroll = size",
+        "E closes · hold D / B / X / H = Dodge / Burn / Erase / Heal · scroll = size",
+        "E closes · P = Add · X = Erase · again to put away · M shows mask · scroll = size",
     )
 
     _HEADER_HINT_TIPS = (
         "While Adjust is open:\n"
         "• E or Esc closes the editor (restores browse RAW/JPEG mode)\n"
-        "• Hold D / B / X / H and sweep the pointer over the photo to paint — "
-        "no mouse button needed. Releasing the key stops the stroke and puts "
-        "the tool away. Click a tool button instead if you want it to stay armed\n"
+        "• Hold D (Dodge), B (Burn), X (Erase), or H (Heal) and sweep the "
+        "pointer over the photo to paint — no mouse button needed. Releasing "
+        "the key stops the stroke and puts the tool away. Click a tool "
+        "button instead if you want it to stay armed\n"
         "• Eraser removes painted mask and the dodge/burn inside it, "
         "and unlike the paint brushes it is not held back by Edge Assist\n"
         "• With a brush tool armed, two-finger scroll changes Brush Size "
-        "(Ctrl+scroll still zooms)\n"
+        "(horizontal scroll changes Flow; Ctrl+scroll still zooms)\n"
         "• Brush Flow changes how opaque the brush preview looks",
         "While the Masks page is open:\n"
-        "• E or Esc closes the editor\n"
-        "• Hold P and sweep the pointer over the photo to paint into the "
-        "SELECTED mask — no mouse button needed. Releasing the key stops the "
-        "stroke. Click Paint instead if you want it to stay armed\n"
-        "• Hold X to erase coverage from that same mask. X means erase in "
-        "whichever brush system is forward, so on this page it trims the mask "
-        "rather than the dodge/burn\n"
+        "• E or Esc closes the editor (Esc first puts an armed brush away)\n"
+        "• P arms Add on the selected mask (creates one if needed); press P "
+        "again to put the brush away. Sweep or drag on the photo to paint\n"
+        "• X arms Erase the same way — press again to put it away\n"
+        "• Click Add / Erase to arm or disarm without a key\n"
         "• M shows or hides the coloured overlay of what is masked\n"
         "• Delete removes the selected mask\n"
         "• With a brush armed, two-finger scroll changes Brush Size "
-        "(Ctrl+scroll still zooms)\n"
+        "(horizontal scroll changes Flow; Ctrl+scroll still zooms)\n"
         "• To start a SEPARATE mask rather than adding to this one, "
-        "use Create new mask",
+        "use Create new mask → Brush",
     )
 
     def _on_panel_tab_changed(self, index: int) -> None:
@@ -3433,6 +3432,23 @@ class ImageAdjustPanelWidget(QWidget):
         # over to judge. Turned off both ways, so Global's dodge/burn mask
         # does not follow you into Masks either.
         self._set_mask_overlay_visible(False)
+
+        # One page, one brush system. Leaving Masks with Paint still armed
+        # left the blank brush cursor and stroke routing on Global; arriving
+        # with Dodge/Burn still armed does the same the other way.
+        if masks:
+            self.disarm_dodge_burn()
+        else:
+            self.disarm_mask_layer_tools()
+
+        # Crop's edge handles sit on the photo boundary. Leaving Crop armed
+        # while switching to Masks makes every edge drag look like the image
+        # is resizing instead of painting a mask. The Crop controls are on
+        # Global anyway, so put it away on arrival.
+        if masks:
+            crop_btn = getattr(self, "_crop_btn", None)
+            if crop_btn is not None and crop_btn.isChecked():
+                crop_btn.setChecked(False)  # emits crop_mode_changed(False)
 
         # The Masks page holds one section, so a user who had collapsed it
         # while it lived at the bottom of Global would land on a page that
@@ -4065,10 +4081,7 @@ class ImageAdjustPanelWidget(QWidget):
         not, and it decides whether the row adds coverage or removes it --
         too important to leave to an icon.
         """
-        base = comp.name or {
-            "linear": "Linear gradient",
-            "radial": "Radial gradient",
-        }.get(comp.kind, "Brush")
+        base = comp.name or "Brush"
         return f"− {base}" if comp.blend == "subtract" else f"+ {base}"
 
 
@@ -4144,11 +4157,11 @@ class ImageAdjustPanelWidget(QWidget):
         # does the naming the menu label was doing.
         #
         # What it must NOT go back to is the arrangement before that: a "New
-        # empty mask" button above these six. The gradients and the AI tools
-        # each create their own mask while the brush paints into the selected
-        # one, so that button was load-bearing for the brush alone and inert
-        # beside everything else. Brush here starts a NEW mask; growing the
-        # selected one is Add, under "This mask".
+        # empty mask" button above these. The AI tools each create their own
+        # mask while the brush paints into the selected one, so that button
+        # was load-bearing for the brush alone and inert beside everything
+        # else. Brush here starts a NEW mask; growing the selected one is
+        # Add, under "This mask".
         col.addWidget(self._mask_rule())
         self._mask_create_head = self._mask_section_head("Create new mask")
         col.addWidget(self._mask_create_head)
@@ -4246,16 +4259,21 @@ class ImageAdjustPanelWidget(QWidget):
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Add (hold P) — brush more coverage into the SELECTED mask.\n\n"
+                "Add (P) — brush more coverage into the SELECTED mask.\n\n"
+                "Press P or click this button to arm; press / click again to "
+                "put the brush away. Sweep or drag on the photo to paint.\n"
                 "Repeated strokes build toward full coverage.\n"
                 "To start a separate mask instead, use Create new mask → Brush.\n"
-                "Size, Flow, Feather and Edge Assist come from the Local section.",
+                "Size, Flow, Feather and Edge Assist are under Brush while painting.",
             ),
             (
                 self._mask_erase_btn,
-                "Erase (hold X) — remove coverage from the selected mask under "
+                "Erase (X) — remove coverage from the selected mask under "
                 "the brush.\n\n"
-                "Use it to trim a mask back where it went too far.",
+                "Press X or click this button to arm; press / click again to "
+                "put it away.\n"
+                "Use it to trim a mask back where it went too far.\n"
+                "Ignores Edge Assist so you can erase across subject edges.",
             ),
             (
                 self._mask_invert_btn,
@@ -4275,6 +4293,8 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_erase_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_erase_btn, on)
         )
+        self._mask_paint_btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
+        self._mask_erase_btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
         self._mask_invert_btn.toggled.connect(self._on_mask_invert_toggled)
         # Assembled after the AI/gradient rows below so the sections read in
         # working order: what you have, how to make one, what to do to it.
@@ -4288,6 +4308,7 @@ class ImageAdjustPanelWidget(QWidget):
         ai_row.setSpacing(6)
         self._mask_ai_subject_btn = QPushButton("Smart Object")
         self._mask_ai_sky_btn = QPushButton("Sky")
+        self._mask_ai_depth_btn = QPushButton("Depth")
         self._mask_ai_click_btn = QPushButton("AI Selection")
         for btn, tip in (
             (
@@ -4297,6 +4318,9 @@ class ImageAdjustPanelWidget(QWidget):
                 "returns ONE mask:\nif two people stand together they come "
                 "back in the same mask, not two.\nTo mask just one of them, "
                 "use AI Selection instead.\n\n"
+                "The slowest tool here — around ten seconds, and a large "
+                "download the first\ntime. What you get for the wait is the "
+                "cleanest edge of any of them.\n\n"
                 "Makes its own mask, which you can then paint or erase.",
             ),
             (
@@ -4305,6 +4329,17 @@ class ImageAdjustPanelWidget(QWidget):
                 "Masks the sky. If the photo has none, nothing is added and "
                 "it says so.\n\n"
                 "Makes its own mask, which you can then paint or erase.",
+            ),
+            (
+                self._mask_ai_depth_btn,
+                "Depth — one press.\n\n"
+                "Masks by distance instead of by subject: full strength on "
+                "the nearest\nthings, fading to nothing on the farthest. Use "
+                "it to lift a background,\nadd haze to a distance, or cool "
+                "the far half of a landscape.\n\n"
+                "This one is a fade, not a cutout — the whole photo is "
+                "masked, by varying\namounts. Invert it to grade the "
+                "background instead.",
             ),
             (
                 self._mask_ai_click_btn,
@@ -4327,42 +4362,11 @@ class ImageAdjustPanelWidget(QWidget):
             lambda: self.mask_ai_requested.emit("subject")
         )
         self._mask_ai_sky_btn.clicked.connect(lambda: self.mask_ai_requested.emit("sky"))
+        self._mask_ai_depth_btn.clicked.connect(
+            lambda: self.mask_ai_requested.emit("depth")
+        )
         self._mask_ai_click_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
-        )
-
-
-        # Gradient tools. Armed, not one-shot: the shape comes from a drag on
-        # the photo (Lightroom/darktable both work this way -- a gradient
-        # placed without seeing the image is a guess), so the button arms the
-        # drag and the canvas defines the geometry.
-        grad_row = QHBoxLayout()
-        grad_row.setSpacing(6)
-        self._mask_linear_btn = QPushButton("Linear")
-        self._mask_radial_btn = QPushButton("Radial")
-        for btn, tip in (
-            (
-                self._mask_linear_btn,
-                "Linear gradient — drag across the photo to set the direction "
-                "and how far the fade runs.\nDrag down from the top for a sky.",
-            ),
-            (
-                self._mask_radial_btn,
-                "Radial gradient — drag a box; the ellipse is inscribed in it.\n"
-                "Full strength at the centre, fading to the edge.",
-            ),
-        ):
-            btn.setObjectName("adjust_db_btn")
-            btn.setCheckable(True)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-            btn.setToolTip(tip)
-            grad_row.addWidget(btn, 1)  # joins Paint in "you draw it"
-        self._mask_linear_btn.toggled.connect(
-            lambda on: self._on_gradient_tool_toggled(self._mask_linear_btn, "linear", on)
-        )
-        self._mask_radial_btn.toggled.connect(
-            lambda on: self._on_gradient_tool_toggled(self._mask_radial_btn, "radial", on)
         )
         # The creation tools are driven by the Create menu now, but the
         # buttons stay as the arming state machine behind it: mutual
@@ -4376,7 +4380,7 @@ class ImageAdjustPanelWidget(QWidget):
         # create menu omits those entries there too.
         from raw_ai_masks import ai_masks_enabled
 
-        for _lay in (ai_row, grad_row):
+        for _lay in (ai_row,):
             while _lay.count():
                 item = _lay.takeAt(0)
                 w = item.widget()
@@ -4387,11 +4391,11 @@ class ImageAdjustPanelWidget(QWidget):
             for _btn in (
                 self._mask_ai_subject_btn,
                 self._mask_ai_sky_btn,
+                self._mask_ai_depth_btn,
                 self._mask_ai_click_btn,
             ):
                 _btn.setEnabled(False)
-        for _btn in (self._mask_linear_btn, self._mask_radial_btn,
-                     self._mask_ai_click_btn):
+        for _btn in (self._mask_ai_click_btn,):
             _btn.toggled.connect(lambda _on: self._sync_mask_armed_hint())
             _btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
 
@@ -4451,6 +4455,32 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(mirror, 1)
             brush_col.addLayout(row)
             self._mask_brush_sliders[label] = mirror
+
+        # Edge Assist is the fourth shared brush setting. Local's toggle lives
+        # on Global, so without a mirror here it was unreachable while masking
+        # even though mask stamps already honour dodge_burn_edge_assist().
+        edge_source = getattr(self, "_db_edge_btn", None)
+        self._mask_edge_btn = QPushButton("Edge Assist")
+        self._mask_edge_btn.setObjectName("adjust_db_show_mask_btn")
+        self._mask_edge_btn.setCheckable(True)
+        self._mask_edge_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_edge_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        if edge_source is not None:
+            self._mask_edge_btn.setChecked(edge_source.isChecked())
+            self._mask_edge_btn.setToolTip(edge_source.toolTip())
+            self._mask_edge_btn.toggled.connect(
+                lambda on, src=edge_source: self._mirror_brush_checked(src, on)
+            )
+            edge_source.toggled.connect(
+                lambda on, dst=self._mask_edge_btn: self._mirror_brush_checked(dst, on)
+            )
+        else:
+            self._mask_edge_btn.setChecked(True)
+            self._mask_edge_btn.setToolTip(
+                "Keep brush paint on the subject under the cursor."
+            )
+        brush_col.addWidget(self._mask_edge_btn)
+
         col.addWidget(brush_wrap)
         self._mask_brush_wrap = brush_wrap
         # Tool state, not part of the mask: it appears when a brush is in your
@@ -4516,7 +4546,8 @@ class ImageAdjustPanelWidget(QWidget):
 
         hint = QLabel(
             "Each mask applies its own adjustments only where painted. "
-            "Brush Size / Flow / Feather / Edge Assist come from the Local section."
+            "Brush Size / Flow / Feather / Edge Assist are under Brush "
+            "while Add or Erase is armed."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
@@ -4548,7 +4579,6 @@ class ImageAdjustPanelWidget(QWidget):
         # (see _sync_mask_controls_enabled).
         if stack is None:
             self.disarm_mask_layer_tools()
-            self.disarm_gradient_tools()
         self._rebuild_mask_list()
         # Rule 1 from the outset. overlay_hidden defaults to False, so a
         # freshly loaded stack would start with every mask marked visible --
@@ -4623,9 +4653,9 @@ class ImageAdjustPanelWidget(QWidget):
     def set_mask_layer_mode(self, mode: str | None) -> bool:
         """Arm a mask brush by name, or disarm with None.
 
-        Force-selects rather than toggling, because the hotkeys that call this
-        are momentary: a held key must always arm its own tool, and releasing
-        is what stops it. Returns whether a tool ended up armed.
+        Force-selects when ``mode`` names a tool (hotkey arming). Pass
+        ``None`` (or an unknown name) to disarm. Returns whether a tool
+        ended up armed.
         """
         wanted = (mode or "").strip().lower()
         for btn, name in self._mask_tool_buttons():
@@ -4636,6 +4666,19 @@ class ImageAdjustPanelWidget(QWidget):
         self.disarm_mask_layer_tools()
         return False
 
+    def toggle_mask_layer_mode(self, mode: str) -> bool:
+        """Arm ``mode`` if it is not already armed; otherwise disarm.
+
+        Used by the P / X hotkeys so a second press puts the brush away —
+        the same contract as clicking Add / Erase again.
+        """
+        wanted = (mode or "").strip().lower()
+        if wanted not in ("paint", "erase", "ai_click"):
+            return False
+        if self.mask_layer_mode() == wanted:
+            self.disarm_mask_layer_tools()
+            return False
+        return self.set_mask_layer_mode(wanted)
     def select_mask_index(self, index: int) -> None:
         if 0 <= index < self._mask_list.topLevelItemCount():
             self._mask_list.setCurrentItem(self._mask_list.topLevelItem(index))
@@ -4706,27 +4749,62 @@ class ImageAdjustPanelWidget(QWidget):
         discover that by failing; the button says so up front instead.
 
         AI Selection is never disabled: every click genuinely adds something.
+
+        Both the hidden arming button and the visible Create-section button
+        have to move together. The arming buttons are the state machine; the
+        Create buttons are what the user actually presses. Disabling only the
+        hidden one left the Create button live with no explanation.
         """
-        btn = {
+        arming = {
             "subject": getattr(self, "_mask_ai_subject_btn", None),
             "sky": getattr(self, "_mask_ai_sky_btn", None),
+            "depth": getattr(self, "_mask_ai_depth_btn", None),
         }.get(kind)
-        if btn is None:
+        create = getattr(self, "_mask_create_buttons", {}).get(kind)
+        if arming is None and create is None:
             return
         if not hasattr(self, "_ai_tool_tips"):
             self._ai_tool_tips = {}
-        self._ai_tool_tips.setdefault(kind, btn.toolTip())
-        btn.setEnabled(not used)
-        if used:
-            label = "Smart Object" if kind == "subject" else "Sky"
-            btn.setToolTip(
-                f"{label} — already masked in this photo.\n\n"
-                f"It would return exactly the same selection again. Select the "
-                f"existing\n{label} mask to adjust it, delete it to start over, "
-                f"or use AI Selection\nto pick a specific object instead."
+        label = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}[kind]
+        used_tip = (
+            f"{label} — already masked in this photo.\n\n"
+            f"It would return exactly the same selection again. Select the "
+            f"existing\n{label} mask to adjust it, delete it to start over, "
+            f"or use AI Selection\nto pick a specific object instead."
+        )
+        if arming is not None:
+            self._ai_tool_tips.setdefault(kind, arming.toolTip())
+            arming.setEnabled(not used)
+            arming.setToolTip(used_tip if used else self._ai_tool_tips[kind])
+        if create is not None:
+            create.setEnabled(not used)
+            create.setToolTip(
+                used_tip
+                if used
+                else self._MASK_CREATE_TIPS.get(kind, create.toolTip())
             )
-        else:
-            btn.setToolTip(self._ai_tool_tips.get(kind, btn.toolTip()))
+
+    def set_ai_mask_tools_enabled(self, enabled: bool) -> None:
+        """Enable/disable every AI mask control for a busy wait.
+
+        Covers both the hidden arming buttons and the visible Create
+        buttons. Callers that re-enable must then re-apply ``set_ai_tool_used``
+        for any one-shot tool whose mask already exists, or a cancelled wait
+        would leave a used tool live again.
+        """
+        for name in (
+            "_mask_ai_subject_btn",
+            "_mask_ai_sky_btn",
+            "_mask_ai_depth_btn",
+            "_mask_ai_click_btn",
+        ):
+            btn = getattr(self, name, None)
+            if btn is not None:
+                btn.setEnabled(enabled)
+        for kind in ("subject", "sky", "depth", "ai_click"):
+            btn = getattr(self, "_mask_create_buttons", {}).get(kind)
+            if btn is not None:
+                btn.setEnabled(enabled)
 
     def _mirror_brush_value(self, target, value: int) -> None:
         """Copy a brush value to its twin without triggering it back."""
@@ -4747,6 +4825,16 @@ class ImageAdjustPanelWidget(QWidget):
         # sliderReleased on _db_size/_db_strength/_db_feather, so it reached
         # nothing at all.
         self.dodge_burn_brush_changed.emit()
+
+    def _mirror_brush_checked(self, target, checked: bool) -> None:
+        """Copy a checkable brush toggle to its twin without echoing."""
+        if target is None or bool(target.isChecked()) == bool(checked):
+            return
+        target.blockSignals(True)
+        try:
+            target.setChecked(bool(checked))
+        finally:
+            target.blockSignals(False)
 
     _MASK_ICON_BOX = 34
 
@@ -4892,29 +4980,47 @@ class ImageAdjustPanelWidget(QWidget):
     # How each creation tool behaves once picked, and what to tell the user
     # it is waiting for. "" means the tool acts immediately and there is
     # nothing to wait for.
+    #
+    # AI Selection leads the AI group deliberately. It is the cheapest of them
+    # by an order of magnitude -- 0.8s to analyse the photo and ~0.2s per
+    # click, against 13s for Smart Object -- and it needs no extra download,
+    # since its 43 MB is already on disk for any of this to work while Smart
+    # Object pulls 214 MB on first press. Reaching for it first is right far
+    # more often than not, so it is the one placed under the reaching hand.
+    #
+    # Smart Object stays, and stays second rather than being dropped: it needs
+    # no aiming, it returns ONE mask spanning objects that would each need
+    # their own click, and it resolves fine structure that SAM rounds off.
+    # Measured on a real frame the two agree on WHAT to select (IoU 0.976) --
+    # the difference is edge quality, which is the whole product of a mask.
     _MASK_CREATE_ITEMS = (
-        ("brush", "Brush", "Paint the mask on the photo.", False),
-        ("linear", "Linear Gradient", "Drag across the photo to place the gradient.", False),
-        ("radial", "Radial Gradient", "Drag a box to place the ellipse.", False),
+        ("brush", "Brush", "New empty mask — then press P to paint.", False),
+        ("ai_click", "AI Selection", "Click what you want masked.", True),
         ("subject", "Smart Object", "", True),
         ("sky", "Sky", "", True),
-        ("ai_click", "AI Selection", "Click what you want masked.", True),
+        ("depth", "Depth", "", True),
     )
 
     # Longer form for the buttons, which have room for a tooltip.
     _MASK_CREATE_TIPS = {
-        "brush": "Brush — start a NEW mask and paint its coverage by hand.\n\n"
-                 "To grow the mask you already have, use Add under This mask.",
-        "linear": "Linear gradient — drag across the photo to set the direction "
-                  "and how far the fade runs.\nDrag down from the top for a sky.",
-        "radial": "Radial gradient — drag a box; the ellipse is inscribed in it.\n"
-                  "Full strength at the centre, fading to the edge.",
+        "brush": "Brush — start a NEW empty mask.\n\n"
+                 "Does not arm the paint brush — press P (or click Add) to "
+                 "paint coverage into it.\n"
+                 "To grow a mask you already have, select it and use Add.",
         "subject": "Smart Object — one press, no aiming.\n\n"
                    "Finds whatever stands out and masks it. It returns ONE mask: "
                    "if two people\nstand together they come back in the same one. "
-                   "To mask just one of them,\nuse AI Selection.",
+                   "To mask just one of them,\nuse AI Selection.\n\n"
+                   "The slowest tool here — around ten seconds, and a large "
+                   "download the first\ntime. What you get for the wait is the "
+                   "cleanest edge of any of them, so\nreach for it when the "
+                   "cutout has to survive a strong adjustment.",
         "sky": "Sky — one press.\n\nMasks the sky. If the photo has none, "
                "nothing is added and it says so.",
+        "depth": "Depth — one press.\n\nMasks by distance, not by subject: "
+                 "strongest on the nearest things,\nfading to nothing on the "
+                 "farthest. A fade rather than a cutout.\n\nInvert it to "
+                 "grade the background instead.",
         "ai_click": "AI Selection — click what you want masked.\n\n"
                     "Not a brush: each click is a point, and more clicks add to "
                     "the SAME mask.\nUse it when Smart Object picks the wrong "
@@ -4922,8 +5028,9 @@ class ImageAdjustPanelWidget(QWidget):
                     "The first click pauses briefly while the photo is analysed.",
     }
 
-    # The three that stay armed waiting for you to do something on the photo.
-    _MASK_ARMED_KINDS = ("linear", "radial", "ai_click")
+    # The one creation tool that stays armed waiting for you to act on the photo.
+    # Brush is NOT included: it only creates an empty mask; P / Add arms paint.
+    _MASK_ARMED_KINDS = ("ai_click",)
 
     def _make_mask_create_button(self, kind: str, label: str) -> QPushButton:
         """One creation tool as a button.
@@ -4943,17 +5050,12 @@ class ImageAdjustPanelWidget(QWidget):
         return btn
 
     def _mask_create_kind_armed(self, kind: str) -> bool:
-        btn = {
-            "linear": getattr(self, "_mask_linear_btn", None),
-            "radial": getattr(self, "_mask_radial_btn", None),
-            "ai_click": getattr(self, "_mask_ai_click_btn", None),
-        }.get(kind)
+        btn = {"ai_click": getattr(self, "_mask_ai_click_btn", None)}.get(kind)
         return bool(btn is not None and btn.isChecked())
 
     def _on_mask_create_clicked(self, kind: str) -> None:
         """Arm the tool, or put it away if it was already armed."""
         if kind in self._MASK_ARMED_KINDS and self._mask_create_kind_armed(kind):
-            self.disarm_gradient_tools()
             self.disarm_mask_layer_tools()
         else:
             self._on_mask_create(kind)
@@ -4981,20 +5083,16 @@ class ImageAdjustPanelWidget(QWidget):
         """Start a new mask with ``kind``.
 
         Only the brush needs a layer made for it here. Every other tool
-        creates its own on completion, so making one first would leave an
-        empty mask behind whenever the user armed a gradient and then
-        changed their mind.
+        creates its own on completion, so arming it must not leave an
+        empty mask behind if the user changes their mind.
+
+        Brush creates an empty mask and leaves the paint brush disarmed —
+        press P (or click Add) to paint. Auto-arming made the next P put
+        the brush away instead of starting a stroke.
         """
         self.disarm_mask_layer_tools()
-        self.disarm_gradient_tools()
         if kind == "brush":
             self.mask_add_requested.emit()
-            if self.active_mask_index() is None:
-                return  # host refused (no image open); nothing to arm
-            self._mask_paint_btn.setChecked(True)
-        elif kind in ("linear", "radial"):
-            btn = self._mask_linear_btn if kind == "linear" else self._mask_radial_btn
-            btn.setChecked(True)
         elif kind == "ai_click":
             self._mask_ai_click_btn.setChecked(True)
         else:
@@ -5006,21 +5104,12 @@ class ImageAdjustPanelWidget(QWidget):
         label = getattr(self, "_mask_armed_hint", None)
         if label is None:
             return
-        armed = None
-        for btn, kind in (
-            (getattr(self, "_mask_linear_btn", None), "linear"),
-            (getattr(self, "_mask_radial_btn", None), "radial"),
-            (getattr(self, "_mask_ai_click_btn", None), "ai_click"),
-        ):
-            if btn is not None and btn.isChecked():
-                armed = kind
-                break
-        if armed is None:
+        if not getattr(self, "_mask_ai_click_btn", None) or not self._mask_ai_click_btn.isChecked():
             label.setVisible(False)
             label.setText("")
             return
         hint = next(
-            (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == armed), ""
+            (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == "ai_click"), ""
         )
         label.setText(hint)
         label.setVisible(bool(hint))
@@ -5148,10 +5237,6 @@ class ImageAdjustPanelWidget(QWidget):
             # pipeline -- only one may be armed.
             if self.dodge_burn_mode() is not None:
                 self.set_dodge_burn_mode(None)
-            # Same reason in the other direction: a gradient drag also starts
-            # with a press on the photo.
-            if self.gradient_tool() is not None:
-                self.disarm_gradient_tools()
             # Rule 2: a coverage tool shows the mask it will change, and
             # only that one. AI Selection is excluded -- it makes a NEW mask
             # from a click rather than editing the selected one's coverage.
@@ -5160,48 +5245,30 @@ class ImageAdjustPanelWidget(QWidget):
         self._sync_mask_brush_visible()
         self.mask_layer_mode_changed.emit(self.mask_layer_mode())
 
-    def _on_gradient_tool_toggled(self, btn, kind: str, checked: bool) -> None:
-        """Exclusive with the other gradient tool and with the brush tools."""
-        if self._mask_block:
+    def refresh_mask_row_icon(self, index: int | None = None) -> None:
+        """Rebuild the list thumbnail after coverage changed (brush / AI).
+
+        Icons are only created in ``_rebuild_mask_list`` / Invert — painting
+        left a solid black square forever because Add starts from empty alpha.
+        """
+        stack = self._mask_stack
+        if stack is None or not getattr(stack, "layers", None):
+            return
+        idx = self.active_mask_index() if index is None else int(index)
+        if idx is None or idx < 0 or idx >= len(stack.layers):
+            return
+        item = self._mask_list.topLevelItem(idx)
+        if item is None:
+            return
+        layer = stack.layers[idx]
+        icon = self._mask_row_icon(layer)
+        if icon is None:
             return
         self._mask_block = True
         try:
-            if checked:
-                other = (
-                    self._mask_radial_btn if kind == "linear" else self._mask_linear_btn
-                )
-                other.setChecked(False)
-                # One brush pipeline, one armed tool: a gradient drag and a
-                # paint stroke both start with a press on the photo.
-                for b in (
-                    self._mask_paint_btn,
-                    self._mask_erase_btn,
-                    self._mask_ai_click_btn,
-                ):
-                    b.setChecked(False)
+            item.setIcon(0, icon)
         finally:
             self._mask_block = False
-        self.mask_gradient_tool_changed.emit(kind if checked else "")
-
-    def gradient_tool(self) -> str | None:
-        for btn, kind in (
-            (getattr(self, "_mask_linear_btn", None), "linear"),
-            (getattr(self, "_mask_radial_btn", None), "radial"),
-        ):
-            if btn is not None and btn.isChecked():
-                return kind
-        return None
-
-    def disarm_gradient_tools(self) -> None:
-        self._mask_block = True
-        try:
-            for name in ("_mask_linear_btn", "_mask_radial_btn"):
-                btn = getattr(self, name, None)
-                if btn is not None:
-                    btn.setChecked(False)
-        finally:
-            self._mask_block = False
-        self.mask_gradient_tool_changed.emit("")
 
     def _on_mask_invert_toggled(self, checked: bool) -> None:
         if self._mask_block:

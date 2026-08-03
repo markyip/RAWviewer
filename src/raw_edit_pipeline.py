@@ -258,6 +258,8 @@ def _process_linear_edit_tail(
     chroma_denoise: Optional[bool],
     cancel_check=None,
     progress_cb=None,
+    row_offset: int = 0,
+    full_height: int | None = None,
 ) -> np.ndarray:
     """WB -> exposure -> dodge/burn -> denoise -> PV2012 tone on a (possibly banded) buffer."""
     img = _apply_wb_tint(img, merged)
@@ -275,7 +277,9 @@ def _process_linear_edit_tail(
         from raw_dodge_burn import apply_dodge_burn
 
         stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-        img = apply_dodge_burn(img, mask, stops)
+        img = apply_dodge_burn(
+            img, mask, stops, row_offset=row_offset, full_height=full_height
+        )
 
     # Spot heal (cv2.inpaint): after local exposure so the fill samples the
     # already-exposed neighborhood; before denoise/tone.
@@ -283,15 +287,22 @@ def _process_linear_edit_tail(
     if heal_mask is not None:
         from raw_spot_heal import apply_spot_heal
 
-        img = apply_spot_heal(img, heal_mask)
+        img = apply_spot_heal(
+            img, heal_mask, row_offset=row_offset, full_height=full_height
+        )
 
-    # Mask Editing / Local Adjustments (Phase 0 perf spike): layered masked
+    # Mask Editing / Local Adjustments (Phase 0 perf rewrite): layered masked
     # adjustments composite after dodge/burn+heal, before denoise/tone, so
     # a masked exposure/contrast/WB change sees the same downstream
     # denoise/tone response as the equivalent global change would.
     mask_stack = _resolve_mask_layers(merged)
     if mask_stack is not None:
-        img = _apply_mask_layers(img, mask_stack)
+        img = _apply_mask_layers(
+            img,
+            mask_stack,
+            row_offset=row_offset,
+            full_height=full_height,
+        )
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
     nr_amount = float(merged.get("ColorNoiseReduction", 0.0))
@@ -401,7 +412,8 @@ def _process_linear_edit_buffer_banded(
     from raw_adjustments import band_ranges, banded_executor
 
     # 16px overlap pad handles bilateral / guided filter radii (up to r=12) and spot heal
-    bands = band_ranges(img.shape[0], n_workers, pad_px=16)
+    full_h = int(img.shape[0])
+    bands = band_ranges(full_h, n_workers, pad_px=16)
 
     def _process_band(band):
         y0, y1, pad_top, pad_bot = band
@@ -412,7 +424,12 @@ def _process_linear_edit_buffer_banded(
         # visible seam lines ~10px into each band's kept region.
         src = img[y0 - pad_top : y1 + pad_bot].copy()
         out = _process_linear_edit_tail(
-            src, merged, preview=preview, chroma_denoise=chroma_denoise
+            src,
+            merged,
+            preview=preview,
+            chroma_denoise=chroma_denoise,
+            row_offset=y0 - pad_top,
+            full_height=full_h,
         )
         return out[pad_top : pad_top + (y1 - y0)]
 
@@ -476,8 +493,10 @@ _PRE_TONE_KEYS = (
     *_TRANSFORM_KEYS,
 )
 
-# Live-drag (preview_lite) may denoise before warp so Transform-slider ticks
-# only re-run apply_geometry — see process_linear_edit_buffer_staged.
+# Live-drag (preview_lite) caches WB/exposure before warp so Transform-slider
+# ticks only re-run apply_geometry + post-geo local masks — see
+# process_linear_edit_buffer_staged. Local masks stay in _PRE_TONE_KEYS_NO_GEO
+# so painting still invalidates the pre_geom fingerprint via geo_key.
 _PRE_TONE_KEYS_NO_GEO = tuple(k for k in _PRE_TONE_KEYS if k not in _TRANSFORM_KEYS)
 
 # Every key uses_recovery_tone_map() and apply_pv2012_tone_rgb() read, so the
@@ -609,10 +628,14 @@ def process_linear_edit_buffer_staged(
             img = _linear_float_from_buffer(rgb_image)
             from raw_transform import apply_geometry
 
-            # preview_lite: apply WB/denoise on the uncropped frame once, then
+            # preview_lite: apply WB/exposure on the uncropped frame once, then
             # warp. Transform-slider ticks then only invalidate the cheap
-            # geometry stage instead of re-running denoise every angle step.
-            # Settle / export keep geometry-first order (correct for D&B).
+            # geometry stage. Local masks (D&B / heal / mask layers) always
+            # composite AFTER geometry — their buffers are authored in the
+            # transformed frame (anamorphic desqueeze included). Pre-warp
+            # compositing shifted painted regions during live rotate /
+            # perspective / anamorphic drags.
+            # Settle / export keep the same geometry-first order.
             if preview_lite:
                 pre_geo_key = _stage_key(merged, _PRE_TONE_KEYS_NO_GEO)
                 if (
@@ -624,17 +647,6 @@ def process_linear_edit_buffer_staged(
                     exp_val = float(merged.get("Exposure2012", 0.0))
                     if abs(exp_val) > 1e-4:
                         pre = pre * (2.0 ** exp_val)
-                    mask = _resolve_db_mask(merged)
-                    if mask is not None:
-                        from raw_dodge_burn import apply_dodge_burn
-
-                        stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
-                        pre = apply_dodge_burn(pre, mask, stops)
-                    heal_mask = _resolve_heal_mask(merged)
-                    if heal_mask is not None:
-                        from raw_spot_heal import apply_spot_heal
-
-                        pre = apply_spot_heal(pre, heal_mask)
                     # Skip denoise on lite transform path — largest cost after
                     # warp; settle_fast / full path still applies NR.
                     cache.stage_out["pre_geom"] = pre
@@ -647,13 +659,17 @@ def process_linear_edit_buffer_staged(
                     geom_out = apply_geometry(
                         cache.stage_out["pre_geom"], merged, preview=True
                     )
-                    # Mask layers composite AFTER geometry even on the lite
-                    # path (unlike dodge/burn's documented denoise-before-warp
-                    # tradeoff above): their alpha buffers are authored in the
-                    # transformed frame, matching the settle/full path -- pre-
-                    # warp compositing shifted masked regions during live
-                    # rotate/perspective drags. Invalidation is covered by
-                    # geo_key's pre_geo_key component (mask keys included).
+                    mask = _resolve_db_mask(merged)
+                    if mask is not None:
+                        from raw_dodge_burn import apply_dodge_burn
+
+                        stops = float(merged.get(_DB_STRENGTH_KEY, _DB_DEFAULT_STRENGTH))
+                        geom_out = apply_dodge_burn(geom_out, mask, stops)
+                    heal_mask = _resolve_heal_mask(merged)
+                    if heal_mask is not None:
+                        from raw_spot_heal import apply_spot_heal
+
+                        geom_out = apply_spot_heal(geom_out, heal_mask)
                     mask_stack = _resolve_mask_layers(merged)
                     if mask_stack is not None:
                         geom_out = _apply_mask_layers(geom_out, mask_stack)

@@ -599,7 +599,7 @@ def test_whole_stroke_snap_has_no_straight_cut():
     print(f"  OK   whole-stroke snap stays smooth (worst step {ratio:.1f}x mean)")
 
 
-# ------------------------------------------- mask brushes are momentary too
+# ------------------------------------------- mask brushes: tap to toggle
 
 
 class _MaskHost:
@@ -633,6 +633,9 @@ class _StubView:
     def begin_key_paint(self):
         self.began += 1
 
+    def begin_latched_paint(self):
+        self.began += 1
+
     def end_key_paint(self):
         self.ended += 1
 
@@ -652,30 +655,36 @@ def _mask_panel_and_host():
     return p, _MaskHost(p)
 
 
-def test_p_holds_to_paint_the_mask():
+def test_p_toggles_the_mask_brush():
+    """P arms Add; a second P puts it away. Release alone must not disarm."""
     p, h = _mask_panel_and_host()
     assert h._handle_brush_key_down("mask_paint") is True
     assert p.mask_layer_mode() == "paint", "P did not arm the mask brush"
-    assert h.gpu_view.began == 1, "P did not open the paint gate"
+    assert h.gpu_view.began >= 1, "P did not open the paint gate"
 
-    assert h._handle_brush_key_up("mask_paint") is True
-    assert p.mask_layer_mode() is None, "releasing P left the mask brush armed"
-    assert h.gpu_view.ended == 1
-    print("  OK   P holds to paint the mask, release puts it away")
+    assert h._handle_brush_key_up("mask_paint") is False, "P release claimed a hold"
+    assert p.mask_layer_mode() == "paint", "releasing P put the brush away"
+
+    assert h._handle_brush_key_down("mask_paint") is True
+    assert p.mask_layer_mode() is None, "second P left the mask brush armed"
+    assert h.gpu_view.ended >= 1
+    print("  OK   P toggles the mask brush; release does not put it away")
 
 
 def test_x_erases_whichever_system_is_in_play():
     p, h = _mask_panel_and_host()
 
-    # Masks tab forward -> X is the mask eraser.
+    # Masks tab forward -> X is the mask eraser (tap to toggle).
     assert h._masks_tab_is_forward()
     h._handle_brush_key_down("mask_erase")
     assert p.mask_layer_mode() == "erase"
     assert p.dodge_burn_mode() is None, "X armed dodge/burn while masking"
     h._handle_brush_key_up("mask_erase")
+    assert p.mask_layer_mode() == "erase", "X release must not disarm a mask brush"
+    h._handle_brush_key_down("mask_erase")
     assert p.mask_layer_mode() is None
 
-    # Global tab -> X is the dodge/burn eraser, as it always was.
+    # Global tab -> X is the dodge/burn eraser, as it always was (hold).
     p._panel_tabs.set_current(0)
     assert not h._masks_tab_is_forward()
     h._handle_brush_key_down("erase")
@@ -729,7 +738,7 @@ def main() -> int:
     test_focus_loss_abort_also_disarms()
     test_mask_overlay_togglable_with_nothing_armed()
     test_mask_toggle_stays_enabled_after_disarm()
-    test_p_holds_to_paint_the_mask()
+    test_p_toggles_the_mask_brush()
     test_x_erases_whichever_system_is_in_play()
     test_erase_key_release_follows_the_press_not_the_tab()
     test_erasing_with_no_mask_says_so()

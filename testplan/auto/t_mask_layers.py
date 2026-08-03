@@ -107,6 +107,34 @@ def main() -> int:
     check("erase leaves far corner unchanged", abs(float(erase_layer.alpha[2, 2]) - 0.8) < 1e-4)
     check("erase bumps version", erase_layer.version == 1)
 
+    # Mask erase must ignore edge assist (same contract as dodge/burn erase):
+    # otherwise paint that bled across an edge cannot be trimmed away.
+    split = np.zeros((100, 200), dtype=np.float32)
+    split[:, 100:] = 0.85
+    split[:, :100] = 0.15
+    painted = MaskLayer.empty(100, 200)
+    painted.alpha[:, :] = 0.9
+    gated = MaskLayer(painted.alpha.copy())
+    plain = MaskLayer(painted.alpha.copy())
+    # Centre just on the dark side; radius reaches well into the bright half.
+    for _ in range(8):
+        erase_mask_layer_brush(
+            gated, 90, 50, radius=50, strength=1.0, luminance=split, edge_assist=True
+        )
+        erase_mask_layer_brush(
+            plain, 90, 50, radius=50, strength=1.0, luminance=split, edge_assist=False
+        )
+    check(
+        "mask erase ignores edge assist (flag is inert)",
+        np.allclose(gated.alpha, plain.alpha),
+        f"maxdiff={float(np.abs(gated.alpha - plain.alpha).max()):.4f}",
+    )
+    check(
+        "mask erase reaches the far side of a hard edge",
+        float(gated.alpha[50, 120]) < 0.2,
+        f"far={float(gated.alpha[50, 120]):.4f}",
+    )
+
     # Edge-assist gating: a hard luminance boundary should block the brush
     # from bleeding across it, same contract as raw_dodge_burn's own test.
     luminance = np.zeros((100, 100), dtype=np.float32)

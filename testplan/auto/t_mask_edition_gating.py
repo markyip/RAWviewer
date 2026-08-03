@@ -5,8 +5,8 @@ so this gate saves no install size. What it guarantees is that a Standard user
 never triggers a 214 MB download by pressing a mask button.
 
 Both directions matter. Gating too little means Standard downloads BiRefNet;
-gating too much means Standard silently loses brush and gradients, which need
-no model at all.
+gating too much means Standard silently loses brush masking, which needs no
+model at all.
 """
 
 import os
@@ -39,7 +39,7 @@ p = P(); p.show(); p._panel_tabs.set_current(1)
 def shown(attr):
     b = getattr(p, attr, None)
     return bool(b is not None and b.parent() is not None and b.isVisible())
-# The creation tools are the six buttons in the Create new mask section,
+# The creation tools are the five buttons in the Create new mask section,
 # so that is where the edition gate has to hold. The buttons behind it stay as
 # the arming state machine and are deliberately unparented.
 _items = [b.text() for b in p._mask_create_buttons.values()]
@@ -55,16 +55,13 @@ print("@@" + json.dumps({
     "ready_subject": m.op_is_ready("subject"),
     "ensure_subject": m.ensure_op_available("subject"),
     "brush": shown("_mask_paint_btn"),
-    "linear": shown("_mask_linear_btn"),
-    "radial": shown("_mask_radial_btn"),
     "erase": shown("_mask_erase_btn"),
     "invert": shown("_mask_invert_btn"),
     "subject": offered("Smart Object"),
     "sky": offered("Sky"),
+    "depth": offered("Depth"),
     "click": offered("AI Selection"),
     "brush_item": offered("Brush"),
-    "linear_item": offered("Linear Gradient"),
-    "radial_item": offered("Radial Gradient"),
     "ai_btns_enabled": bool(p._mask_ai_subject_btn.isEnabled()),
     "export_ai": [x for x in _export if x.startswith("AI ")],
     "export_plain": [x for x in _export if not x.startswith("AI ")],
@@ -103,16 +100,22 @@ def main() -> int:
     check("Plus enables AI masks", plus["enabled"] is True)
     check("Plus offers Smart Object", plus["subject"])
     check("Plus offers Sky", plus["sky"])
+    check("Plus offers Depth", plus["depth"])
     check("Plus offers AI Selection", plus["click"])
 
     # --- Standard: no AI mask reaches the user, and none can download ---
     check("Standard disables AI masks", std["enabled"] is False)
     check("Standard hides Smart Object", not std["subject"])
     check("Standard hides Sky", not std["sky"])
+    check("Standard hides Depth", not std["depth"])
     check("Standard hides AI Selection", not std["click"])
     check(
         "Standard reports every AI op unavailable",
-        std["ops"] == {"subject": False, "sky": False, "click": False},
+        # Compared as "no op is available" rather than against a literal dict,
+        # so adding a fifth model cannot make this pass by omission -- the
+        # previous literal silently stopped covering Depth the moment it
+        # existed, which is the one thing this check must never do.
+        set(std["ops"]) == set(plus["ops"]) and not any(std["ops"].values()),
         str(std["ops"]),
     )
     check("Standard op_is_ready is False", std["ready_subject"] is False)
@@ -129,8 +132,7 @@ def main() -> int:
     )
 
     # --- Standard keeps every mask that needs no model ---
-    for name in ("brush_item", "linear_item", "radial_item"):
-        check(f"Standard offers {name}", std[name], "model-free mask must survive")
+    check("Standard offers brush_item", std["brush_item"], "model-free mask must survive")
     for name in ("brush", "erase", "invert"):
         check(f"Standard keeps {name}", std[name], "model-free mask must survive")
 

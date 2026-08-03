@@ -19,7 +19,11 @@ Checks:
   6. SamPredictor caches the encoder embedding per image_key (the property
      that makes click-to-mask interactive) and maps click coords through
      the longest-side resize.
-  7. The SAM decoder picks the highest-IoU candidate mask, not index 0.
+  7. The SAM decoder picks the highest-IoU candidate mask, not index 0,
+     and thresholds its logits rather than sigmoiding them.
+  8. Depth feeds patch-aligned dimensions and min-max normalizes its
+     output instead of sigmoiding it, and reports a flat map as nothing
+     found rather than as a half-strength full-frame mask.
 """
 import os
 import sys
@@ -245,6 +249,130 @@ def test_sam_decoder_picks_best_iou():
         aim._SESSIONS.update(saved)
 
 
+def test_sam_thresholds_logits_not_sigmoids_them():
+    """SAM's output is cut at 0, not squashed through a sigmoid.
+
+    Regression test for a real shipped bug. SAM emits a signed field
+    trained to be thresholded at zero -- measured [-12.3, +14.3] on a real
+    frame -- but _to_alpha sigmoids anything outside [0, 1] because that is
+    right for the matte models. The mask therefore never reached 1.0 even
+    at the centre of the subject, and 8.8% of the frame sat in a visibly
+    streaked half-transparent band.
+
+    The tell is a wide logit range: sigmoid(2.0) is 0.88, so a mask built
+    that way has interior pixels well below 1.0. Thresholding gives a
+    solid interior and confines soft pixels to the resize's antialiasing.
+    """
+    embedding = np.zeros((1, 256, 64, 64), dtype=np.float32)
+    enc = _StubSession(["images"], [embedding], input_shape=[1, 3, 1024, 1024])
+
+    # A logit field on SAM's real scale: strongly negative outside, mildly
+    # positive inside. Under a sigmoid the "inside" would read ~0.88.
+    masks = np.full((1, 1, 64, 64), -8.0, dtype=np.float32)
+    masks[0, 0, 16:48, 16:48] = 2.0
+    dec = _StubSession(
+        [
+            "image_embeddings", "point_coords", "point_labels",
+            "mask_input", "has_mask_input", "orig_im_size",
+        ],
+        [masks],
+    )
+
+    saved = dict(aim._SESSIONS)
+    try:
+        aim._SESSIONS["sam_encoder"] = enc
+        aim._SESSIONS["sam_decoder"] = dec
+        pred = aim.SamPredictor()
+        rgb = np.random.rand(64, 64, 3).astype(np.float32)
+        pred.set_image(rgb, image_key="k")
+        alpha = pred.predict([(32.0, 32.0)], [1], (64, 64))
+        check("sam thresholded returns alpha", alpha is not None)
+        if alpha is not None:
+            check(
+                "interior is fully opaque, not sigmoid(2.0)=0.88",
+                alpha[32, 32] > 0.99,
+                f"centre={alpha[32, 32]:.4f}",
+            )
+            check(
+                "exterior is fully clear",
+                alpha[2, 2] < 0.01,
+                f"corner={alpha[2, 2]:.4f}",
+            )
+            # Soft pixels are the resize's antialiasing only, not a ramp
+            # across the whole subject.
+            mush = float(np.mean((alpha > 0.05) & (alpha < 0.95)))
+            check("no half-transparent band", mush < 0.02, f"mush={mush:.4f}")
+    finally:
+        aim._SESSIONS.clear()
+        aim._SESSIONS.update(saved)
+
+
+def test_depth_feed_size():
+    """Both fed dims must be multiples of 14, longest side at the target.
+
+    The graph's own output shape is "14*floor(height/14)", so a feed that
+    is not a multiple silently comes back smaller than asked for and the
+    depth map lands misaligned against the frame.
+    """
+    for h, w in ((1100, 1650), (4484, 10228), (3000, 3000), (10, 4000)):
+        fh, fw = aim._depth_feed_size(h, w, 518)
+        check(
+            f"feed {h}x{w} is patch-aligned",
+            fh % 14 == 0 and fw % 14 == 0,
+            f"got {fh}x{fw}",
+        )
+        check(f"feed {h}x{w} longest side <= 518", max(fh, fw) <= 518, f"got {fh}x{fw}")
+        check(f"feed {h}x{w} is non-degenerate", min(fh, fw) >= 14, f"got {fh}x{fw}")
+
+    # Aspect ratio survives the rounding, within one patch of slack.
+    fh, fw = aim._depth_feed_size(1000, 2000, 518)
+    check("aspect preserved", abs((fw / fh) - 2.0) < 0.1, f"got {fw}/{fh}")
+
+
+def test_depth_normalization():
+    """Depth is min-max normalized, NOT sigmoided.
+
+    This is the one place the depth path must diverge from the matte
+    models: the graph emits relative inverse depth on an arbitrary
+    positive scale, and _to_alpha's sigmoid would crush the whole useful
+    range onto the flat top of the curve.
+    """
+    # A linear ramp on a 0..4.5 scale, the range real frames produce.
+    raw = np.linspace(0.0, 4.5, 32 * 32, dtype=np.float32).reshape(1, 32, 32)
+    stub = _StubSession(["pixel_values"], [raw], input_shape=[1, 3, "h", "w"])
+    saved = dict(aim._SESSIONS)
+    try:
+        aim._SESSIONS["depth"] = stub
+        rgb = np.random.rand(64, 96, 3).astype(np.float32)
+        alpha = aim.estimate_depth(rgb, (64, 96))
+        check("depth returns alpha", alpha is not None)
+        if alpha is not None:
+            check("depth alpha shape", alpha.shape == (64, 96), f"got {alpha.shape}")
+            check("depth alpha dtype", alpha.dtype == np.float32)
+            check(
+                "depth spans the full 0..1 range",
+                alpha.min() < 1e-4 and alpha.max() > 1.0 - 1e-4,
+                f"got [{alpha.min():.4f}, {alpha.max():.4f}]",
+            )
+            # The giveaway for a wrongly-applied sigmoid: sigmoid(4.5)=0.989
+            # and sigmoid(2.25)=0.905, so the midpoint would sit near 0.9
+            # instead of near 0.5.
+            mid = float(np.median(alpha))
+            check("midpoint is linear, not sigmoid", 0.4 < mid < 0.6, f"median={mid:.3f}")
+
+        # A flat depth map carries no gradient to grade by -- that must be
+        # reported as "nothing found", not returned as a constant 0.5 mask
+        # covering the whole frame.
+        flat = np.full((1, 32, 32), 2.0, dtype=np.float32)
+        aim._SESSIONS["depth"] = _StubSession(
+            ["pixel_values"], [flat], input_shape=[1, 3, "h", "w"]
+        )
+        check("flat depth returns None", aim.estimate_depth(rgb, (64, 96)) is None)
+    finally:
+        aim._SESSIONS.clear()
+        aim._SESSIONS.update(saved)
+
+
 def test_postprocess_helpers():
     alpha = np.zeros((32, 32), dtype=np.float32)
     alpha[8:24, 8:24] = 1.0
@@ -258,6 +386,18 @@ def test_postprocess_helpers():
     check("binarize is 0/1", set(np.unique(hard)).issubset({0.0, 1.0}))
 
 
+def test_op_download_mb_is_per_model():
+    """The wait dialog used to claim every first use was 214 MB."""
+    check("subject is the large one", aim.op_download_mb("subject") == 214)
+    check("sky is the compact one", aim.op_download_mb("sky") == 84)
+    check("depth is its own size", aim.op_download_mb("depth") == 94)
+    check(
+        "click sums encoder and decoder",
+        aim.op_download_mb("click") == 27 + 16,
+    )
+    check("unknown op is zero", aim.op_download_mb("nope") == 0)
+
+
 def main():
     print("AI mask generation (raw_ai_masks)")
     test_float_rgb()
@@ -268,7 +408,11 @@ def main():
     test_missing_model_degrades()
     test_sam_embedding_cache()
     test_sam_decoder_picks_best_iou()
+    test_sam_thresholds_logits_not_sigmoids_them()
+    test_depth_feed_size()
+    test_depth_normalization()
     test_postprocess_helpers()
+    test_op_download_mb_is_per_model()
 
     print("")
     if FAILURES:

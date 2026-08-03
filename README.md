@@ -36,7 +36,7 @@
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
 - **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
 - **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Plus edition also understands plain descriptions like `sunset on beach` — all offline.
-- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed, dragged as a gradient, or found for you. Every edit is saved to an XMP sidecar; your RAW is never modified.
+- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed by hand or found for you. Every edit is saved to an XMP sidecar; your RAW is never modified.
 
 <p align="center">
   <img src="docs/images/single-view.jpg" alt="Full-screen single-image view with film strip and star rating" width="900">
@@ -342,7 +342,7 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **Local masks** (brush, linear, radial, AI) | **Landed, stabilising** | Stacked mask layers with per-layer adjustments. Brush with Size / Flow / Feather; linear and radial gradients placed by dragging on the photo, with handles to reshape them afterwards; **Smart Object** and **Sky** find a mask in one press; **AI Selection** masks whatever you click. Every mask kind shares one colour overlay (`src/raw_mask_layers.py`, `src/raw_mask_shapes.py`, `src/raw_ai_masks.py`) |
+| **Local masks** (brush, AI) | **Landed, stabilising** | Stacked mask layers with per-layer adjustments. Brush has Size / Flow / Feather; **Smart Object** and **Sky** find a mask in one press; **AI Selection** masks whatever you click. Every mask kind shares one colour overlay (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`) |
 | **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export with an **AI Detail** slider. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable |
 | **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN as the final export stage, ~65s for a 32MP frame. Being a GAN it invents plausible detail rather than reconstructing it, so its strength is dialable toward a plain resize |
 | **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Profiles record the decode they were calibrated against and warn if it changes |

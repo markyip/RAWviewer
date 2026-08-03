@@ -13,8 +13,9 @@ arrives. Without that, cancelling and starting again would let the first
 run's mask land on top of the second's.
 
 The timeout deliberately does NOT apply while the weights are downloading.
-First use pulls 214 MB, which no sane timeout covers, and a timeout that
-made first use impossible would be worse than the hang it was added for.
+First use can pull a large model (Smart Object is about 214 MB), which no
+sane timeout covers, and a timeout that made first use impossible would be
+worse than the hang it was added for.
 """
 
 import os
@@ -162,12 +163,28 @@ def main() -> int:
         "the work already landed; a timeout message would be a lie",
     )
 
-    # --- downloading: no timeout, because 214 MB will not fit in 15s ---
+    # --- downloading: no timeout; size comes from the model, not a constant ---
     h5 = _Host()
     begin(h5, "subject", downloading=True)
     dlg5 = h5._ai_mask_dialog
-    check("the download says what it is doing", "download" in dlg5._message_label.text().lower())
-    check("and mentions it happens once", "once" in dlg5._message_label.text().lower())
+    text5 = dlg5._message_label.text()
+    check("the download says what it is doing", "download" in text5.lower())
+    check("and mentions it happens once", "once" in text5.lower())
+    check(
+        "Smart Object names its own size, not a shared constant",
+        "214 MB" in text5,
+        text5,
+    )
+
+    h5b = _Host()
+    begin(h5b, "depth", downloading=True)
+    text5b = h5b._ai_mask_dialog._message_label.text()
+    check(
+        "Depth names its own size",
+        "94 MB" in text5b and "214 MB" not in text5b,
+        text5b,
+    )
+    end(h5b)
 
     import inspect
 
@@ -175,7 +192,12 @@ def main() -> int:
     check(
         "no timer is armed while downloading",
         "if not downloading:" in src,
-        "a 15s timeout would make first use impossible",
+        "a timeout would make first use impossible",
+    )
+    check(
+        "download size is read from the model table",
+        "op_download_mb" in src,
+        "hardcoding one model's size for every tool lied about Depth",
     )
 
     # --- starting a second run never stacks two dialogs ---
