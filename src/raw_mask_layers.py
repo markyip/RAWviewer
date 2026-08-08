@@ -447,6 +447,11 @@ class MaskLayerStack:
     # Such a stack is an INCOMPLETE view of the user's data, so writing it back
     # would destroy the layers that did not fit -- serialize_stack refuses.
     truncated: bool = field(default=False, compare=False)
+    # Filled when truncated=True so the UI can say "loaded N of M" rather than
+    # a vague "too many masks". Zeroes when the stack loaded cleanly.
+    truncated_loaded: int = field(default=0, compare=False)
+    truncated_total: int = field(default=0, compare=False)
+    truncated_cap: int = field(default=0, compare=False)
     _composite_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _prefix_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 

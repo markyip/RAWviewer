@@ -22203,6 +22203,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             if hasattr(panel, "set_mask_layer_stack"):
                 panel.set_mask_layer_stack(self._mask_layer_stack)
+            self._notify_mask_stack_truncated(self._mask_layer_stack)
+            self._notify_depth_blur_behavior_change(self._mask_layer_stack, path)
             # Always clear the PREVIOUS file's mask objects synchronously,
             # even when this file has its own mask to decode -- the actual
             # decode happens async further below (off the UI thread), and
@@ -25746,6 +25748,70 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is not None and hasattr(panel, "set_mask_layer_stack"):
             panel.set_mask_layer_stack(stack)
+        self._notify_mask_stack_truncated(stack)
+
+    def _notify_mask_stack_truncated(self, stack) -> None:
+        """Tell the user when masks loaded incompletely (and stay read-only)."""
+        if stack is None or not getattr(stack, "truncated", False):
+            return
+        loaded = int(getattr(stack, "truncated_loaded", 0) or len(stack.layers or []))
+        total = int(getattr(stack, "truncated_total", 0) or 0)
+        cap = int(getattr(stack, "truncated_cap", 0) or 0)
+        if total > loaded:
+            msg = (
+                f"Loaded {loaded} of {total} masks (limit {cap}). "
+                f"Mask edits will not be saved — full set stays on disk. "
+                f"See the Masks tab, or set RAWVIEWER_MASK_LAYERS_MAX higher."
+            )
+        else:
+            msg = (
+                f"Loaded {loaded} masks (limit {cap}). "
+                f"Mask edits will not be saved until you unlock on the Masks tab."
+            )
+        self._show_status(msg, 8000)
+
+    def _notify_depth_blur_behavior_change(self, stack, path: str | None) -> None:
+        """One soft heads-up when a saved Depth+Blur edit will re-render.
+
+        A bug fix made Depth+Blur keep other adjustments as a gradient instead
+        of flattening them across the frame. Correct, but visible on work that
+        already had Blur on a Depth mask. Range masks are unaffected: their
+        alpha was baked into the sidecar at create time.
+        """
+        if stack is None or not getattr(stack, "layers", None):
+            return
+        has_depth_blur = False
+        for layer in stack.layers:
+            if (getattr(layer, "source", "") or "") != "depth":
+                continue
+            if abs(float((layer.adjustments or {}).get("Blur", 0.0))) > 1e-4:
+                has_depth_blur = True
+                break
+            for comp in getattr(layer, "components", None) or []:
+                if (getattr(comp, "source", "") or "") == "depth" and abs(
+                    float((getattr(comp, "adjustments", None) or {}).get("Blur", 0.0))
+                ) > 1e-4:
+                    # Groups keep adjustments on the group, not components —
+                    # still check in case an older serial put them there.
+                    has_depth_blur = True
+                    break
+            if has_depth_blur:
+                break
+        if not has_depth_blur:
+            return
+        seen = getattr(self, "_depth_blur_notice_paths", None)
+        if seen is None:
+            seen = self._depth_blur_notice_paths = set()
+        key = _norm_path(path) if path else ""
+        if not key or key in seen:
+            return
+        seen.add(key)
+        self._show_status(
+            "Depth + Blur now keeps a smooth depth falloff (a previous bug "
+            "could flatten other adjustments). Existing Depth+Blur edits may "
+            "look slightly different — that is the corrected render.",
+            7000,
+        )
 
     @staticmethod
     def _adjustments_match(a: dict, b: dict) -> bool:
@@ -25835,6 +25901,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             adj.pop(_ML_OBJ_KEY, None)
             ml_stack = getattr(self, "_mask_layer_stack", None)
+            masks_save_blocked = False
             try:
                 ml_serial = (
                     _serialize_mask_stack(ml_stack) if ml_stack is not None else ""
@@ -25853,6 +25920,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 if prior:
                     adj[_ML_KEY] = prior
                 ml_serial = prior or ""
+                masks_save_blocked = True
             else:
                 if ml_serial:
                     adj[_ML_KEY] = ml_serial
@@ -25888,7 +25956,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._invalidate_gallery_edited_memo(path)
         if not getattr(self, "_skip_editing_finished_side_effects", False):
             panel = getattr(self, "single_image_adjust_panel", None)
-            if panel is not None and hasattr(panel, "flash_saved"):
+            if masks_save_blocked:
+                self._show_status(
+                    "Saved other edits — masks left unchanged (incomplete load). "
+                    "See the banner on the Masks tab.",
+                    6000,
+                )
+                if panel is not None and hasattr(panel, "flash_saved"):
+                    panel.flash_saved(note="Saved · masks locked")
+                if panel is not None and hasattr(panel, "show_masks_tab"):
+                    # Surface the banner without yanking focus mid-drag if
+                    # the user is already elsewhere — only when Masks is idle.
+                    pass
+            elif panel is not None and hasattr(panel, "flash_saved"):
                 panel.flash_saved(cleared=cleared)
             elif hasattr(self, "status_bar"):
                 self.status_bar.showMessage(

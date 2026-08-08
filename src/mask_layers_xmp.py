@@ -418,6 +418,9 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
     layers = []
     slots_used = 0
     truncated = False
+    total_slots = sum(
+        _entry_slot_count(e) for e in entries if isinstance(e, dict)
+    )
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -468,14 +471,21 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
         # saved masks, and the stack is flagged so it can never be written back
         # over the file it came from (see serialize_stack).
         logger.error(
-            "RVMaskLayers has more than %s layer slots; loaded %s and marked "
+            "RVMaskLayers has more than %s layer slots; loaded %s of %s and marked "
             "the stack read-only so it cannot overwrite the sidecar",
             cap,
             slots_used,
+            total_slots,
         )
     if not layers:
         return None
-    return MaskLayerStack(layers=layers, truncated=truncated)
+    return MaskLayerStack(
+        layers=layers,
+        truncated=truncated,
+        truncated_loaded=slots_used if truncated else 0,
+        truncated_total=total_slots if truncated else 0,
+        truncated_cap=cap if truncated else 0,
+    )
 
 
 # Bounded memo for the render pipeline's read-only lookups, same shape and

@@ -69,11 +69,28 @@ def test_mask_load_is_deterministic_and_never_overwrites_after_truncation():
         f"{len(low.layers)} starved vs {len(high.layers)} plentiful",
     )
     check("a truncated stack is flagged", low.truncated)
+    check(
+        "truncated stacks report how many loaded",
+        int(getattr(low, "truncated_loaded", 0)) == MX._HARD_MAX_LAYERS
+        and int(getattr(low, "truncated_total", 0)) == MX._HARD_MAX_LAYERS + 6,
+        f"loaded={getattr(low, 'truncated_loaded', None)} "
+        f"total={getattr(low, 'truncated_total', None)}",
+    )
     try:
         serialize_stack(low)
         check("a truncated stack refuses to be written back", False)
     except MaskStackTruncated:
         check("a truncated stack refuses to be written back", True)
+
+    # Unlock path the UI offers: accept the incomplete stack and save it.
+    low.truncated = False
+    low.truncated_loaded = 0
+    low.truncated_total = 0
+    low.truncated_cap = 0
+    check(
+        "clearing truncated unlocks serialize",
+        bool(serialize_stack(low)),
+    )
 
     # And the ordinary case is untouched.
     ok = deserialize_stack(serialize_stack(MaskLayerStack([_layer(0), _layer(1)])))

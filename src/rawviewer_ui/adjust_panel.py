@@ -2519,12 +2519,15 @@ class ImageAdjustPanelWidget(QWidget):
         row.addWidget(btn)
         self._header_export_btn = btn
 
-    def flash_saved(self, *, cleared: bool = False) -> None:
+    def flash_saved(self, *, cleared: bool = False, note: str = "") -> None:
         """Quiet header acknowledgement after a sidecar write."""
         lbl = getattr(self, "_saved_lbl", None)
         if lbl is None:
             return
-        lbl.setText("Cleared" if cleared else "Saved")
+        if note:
+            lbl.setText(note)
+        else:
+            lbl.setText("Cleared" if cleared else "Saved")
         lbl.setVisible(True)
         timer = getattr(self, "_saved_flash_timer", None)
         if timer is None:
@@ -2532,7 +2535,7 @@ class ImageAdjustPanelWidget(QWidget):
             timer.setSingleShot(True)
             timer.timeout.connect(self._clear_saved_flash)
             self._saved_flash_timer = timer
-        timer.start(2200)
+        timer.start(3200 if note else 2200)
 
     def _clear_saved_flash(self) -> None:
         lbl = getattr(self, "_saved_lbl", None)
@@ -4703,6 +4706,38 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_list.ungroup_requested.connect(self.mask_ungroup_requested.emit)
         self._mask_stack_head = self._mask_section_head("Masks", "top paints last")
         col.addWidget(self._mask_stack_head)
+
+        # Shown only when the sidecar held more masks than the load cap.
+        # Without this, the incomplete stack looks normal and a later save
+        # silently refuses to write masks -- which reads as a broken save.
+        self._mask_truncated_banner = QWidget()
+        trunc_col = QVBoxLayout(self._mask_truncated_banner)
+        trunc_col.setContentsMargins(0, 2, 0, 4)
+        trunc_col.setSpacing(4)
+        self._mask_truncated_lbl = QLabel("")
+        self._mask_truncated_lbl.setWordWrap(True)
+        self._mask_truncated_lbl.setStyleSheet(
+            f"color: {theme.EMBER}; font-size: 11px; padding: 2px 0;"
+        )
+        trunc_col.addWidget(self._mask_truncated_lbl)
+        trunc_btns = QHBoxLayout()
+        trunc_btns.setSpacing(6)
+        self._mask_truncated_unlock_btn = QPushButton("Keep loaded masks & allow saving")
+        self._mask_truncated_unlock_btn.setObjectName("adjust_db_btn")
+        self._mask_truncated_unlock_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_truncated_unlock_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_truncated_unlock_btn.setToolTip(
+            "Permanently drop the masks that did not load, then allow this "
+            "photo's masks to be saved again.\n\n"
+            "The full set is still on disk until you confirm."
+        )
+        self._mask_truncated_unlock_btn.clicked.connect(self._on_mask_truncated_unlock)
+        trunc_btns.addWidget(self._mask_truncated_unlock_btn)
+        trunc_btns.addStretch(1)
+        trunc_col.addLayout(trunc_btns)
+        self._mask_truncated_banner.setVisible(False)
+        col.addWidget(self._mask_truncated_banner)
+
         col.addWidget(self._mask_list)
 
         # Every way to start a mask, all visible, one press each.
@@ -5206,6 +5241,70 @@ class ImageAdjustPanelWidget(QWidget):
             idx = self.active_mask_index()
             self.show_only_mask_overlay(idx if idx is not None else 0)
         self._sync_mask_create_buttons()
+        self._sync_mask_truncated_banner(stack)
+
+    def _sync_mask_truncated_banner(self, stack=None) -> None:
+        banner = getattr(self, "_mask_truncated_banner", None)
+        lbl = getattr(self, "_mask_truncated_lbl", None)
+        if banner is None or lbl is None:
+            return
+        if stack is None:
+            stack = self._mask_stack
+        truncated = bool(stack is not None and getattr(stack, "truncated", False))
+        if not truncated:
+            banner.setVisible(False)
+            lbl.clear()
+            return
+        loaded = int(getattr(stack, "truncated_loaded", 0) or len(stack.layers))
+        total = int(getattr(stack, "truncated_total", 0) or 0)
+        cap = int(getattr(stack, "truncated_cap", 0) or 0)
+        if total > loaded:
+            count = f"Loaded {loaded} of {total} masks"
+        else:
+            count = f"Loaded {loaded} masks"
+        limit = f" (limit {cap})" if cap else ""
+        lbl.setText(
+            f"{count}{limit}. The rest stay safe on disk — mask edits "
+            f"will not be saved until you raise the limit or keep only "
+            f"these. Set RAWVIEWER_MASK_LAYERS_MAX higher, then reopen."
+        )
+        banner.setVisible(True)
+
+    def _on_mask_truncated_unlock(self) -> None:
+        """User accepts dropping unloaded masks so saving can resume."""
+        stack = self._mask_stack
+        if stack is None or not getattr(stack, "truncated", False):
+            return
+        from PyQt6.QtWidgets import QMessageBox
+
+        loaded = int(getattr(stack, "truncated_loaded", 0) or len(stack.layers))
+        total = int(getattr(stack, "truncated_total", 0) or 0)
+        missing = max(0, total - loaded)
+        detail = (
+            f"Only the {loaded} masks shown will remain. "
+            f"{missing} mask(s) that did not load will be removed from "
+            f"this photo the next time you save."
+            if missing
+            else f"Only the {loaded} masks shown will remain on the next save."
+        )
+        reply = QMessageBox.warning(
+            self,
+            "Keep loaded masks only?",
+            detail + "\n\nThis cannot be undone from inside RAWviewer.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Ok,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Ok:
+            return
+        stack.truncated = False
+        stack.truncated_loaded = 0
+        stack.truncated_total = 0
+        stack.truncated_cap = 0
+        self._sync_mask_truncated_banner(stack)
+        # Force a save so the sidecar matches the unlocked (shorter) stack
+        # immediately — otherwise the next accidental Esc could leave the
+        # full serial on disk and the incomplete view in memory.
+        self._emit_preview_and_save()
 
     def mask_layer_stack(self):
         return self._mask_stack
