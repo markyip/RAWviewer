@@ -28,12 +28,26 @@ from raw_dodge_burn import resolve_mask_from_adj as _resolve_db_mask
 from raw_spot_heal import MASK_KEY as _HEAL_MASK_KEY
 from raw_spot_heal import MASK_OBJ_KEY as _HEAL_MASK_OBJ_KEY
 from raw_spot_heal import resolve_mask_from_adj as _resolve_heal_mask
+from raw_mask_layers import MASK_ACTIVE_INDEX_KEY as _MASK_ACTIVE_INDEX_KEY
 from raw_mask_layers import MASK_LAYERS_KEY as _MASK_LAYERS_KEY
 from raw_mask_layers import MASK_LAYERS_OBJ_KEY as _MASK_LAYERS_OBJ_KEY
 from raw_mask_layers import apply_mask_layers as _apply_mask_layers
 from raw_mask_layers import resolve_stack_from_adj as _resolve_mask_layers
 from raw_pv2012 import apply_pv2012_tone_rgb
 from raw_tone_curve import TONE_CURVE_SERIAL_KEY
+
+
+def _mask_active_index(merged: dict | None) -> int | None:
+    """Read ephemeral drag-time active-layer hint (never from XMP)."""
+    if not merged:
+        return None
+    raw = merged.get(_MASK_ACTIVE_INDEX_KEY)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _linear_float_from_buffer(rgb_image: np.ndarray) -> np.ndarray:
@@ -300,8 +314,13 @@ def _process_linear_edit_tail(
         img = _apply_mask_layers(
             img,
             mask_stack,
+            active_index=_mask_active_index(merged),
             row_offset=row_offset,
             full_height=full_height,
+            # Export gets the full-quality blur (raw_depth_blur allows a wider
+            # sigma and more bands there). This was hardcoded True, so the
+            # export path was unreachable dead code.
+            preview=preview,
         )
 
     do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
@@ -482,6 +501,7 @@ _PRE_TONE_KEYS = (
     "LuminanceNoiseReduction",
     "DenoiseMethod",
     _DB_MASK_KEY,
+    _MASK_ACTIVE_INDEX_KEY,
     _DB_MASK_OBJ_KEY,
     _DB_STRENGTH_KEY,
     _HEAL_MASK_KEY,
@@ -672,7 +692,11 @@ def process_linear_edit_buffer_staged(
                         geom_out = apply_spot_heal(geom_out, heal_mask)
                     mask_stack = _resolve_mask_layers(merged)
                     if mask_stack is not None:
-                        geom_out = _apply_mask_layers(geom_out, mask_stack)
+                        geom_out = _apply_mask_layers(
+                            geom_out,
+                            mask_stack,
+                            active_index=_mask_active_index(merged),
+                        )
                     cache.stage_out["geom"] = geom_out
                     cache.stage_keys["geom"] = geo_key
                 img = cache.stage_out["geom"]
@@ -699,7 +723,11 @@ def process_linear_edit_buffer_staged(
 
                 mask_stack = _resolve_mask_layers(merged)
                 if mask_stack is not None:
-                    img = _apply_mask_layers(img, mask_stack)
+                    img = _apply_mask_layers(
+                        img,
+                        mask_stack,
+                        active_index=_mask_active_index(merged),
+                    )
 
                 do_denoise = chroma_denoise if chroma_denoise is not None else chroma_denoise_enabled()
                 nr_amount = float(merged.get("ColorNoiseReduction", 0.0))

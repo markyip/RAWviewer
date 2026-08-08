@@ -175,7 +175,7 @@ class ThumbnailLabel(QLabel):
                 # Rating is a mark already decided about a photo -- dodge,
                 # same family as the edited badge (rule 4).
                 badge.setStyleSheet(
-                    f"color: {theme.DODGE}; font-size: 9px; font-weight: 700;"
+                    f"color: {theme.DODGE}; font-size: 10px; font-weight: 700;"
                     f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
                     " border-radius: 3px; padding: 1px 4px;"
                 )
@@ -209,7 +209,7 @@ class ThumbnailLabel(QLabel):
                 # Burst count is informational, not a status mark or an active
                 # state -- kept neutral (ink), not dodge or ember.
                 badge.setStyleSheet(
-                    f"color: {theme.INK}; font-size: 11px; font-weight: 700;"
+                    f"color: {theme.INK}; font-size: 12px; font-weight: 700;"
                     f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
                     f" border: 1px solid rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.25);"
                     " border-radius: 9px; padding: 0px 5px;"
@@ -241,7 +241,7 @@ class ThumbnailLabel(QLabel):
                 badge = QLabel("✎", self)
                 # Edited is a mark, not a live action -- dodge (rule 4).
                 badge.setStyleSheet(
-                    f"color: {theme.DODGE}; font-size: 12px; font-weight: 700;"
+                    f"color: {theme.DODGE}; font-size: 13px; font-weight: 700;"
                     f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.55);"
                     " border-radius: 8px;"
                 )

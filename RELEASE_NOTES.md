@@ -14,10 +14,11 @@ colour calibration, and a long list of speed work.
 ### 🎭 Local masks
 
 - **Masks have their own tab** in the Adjust panel, arranged by what each control acts on: the mask stack, the ways to make a mask, what you can do to the selected one, the brush, and that mask's own adjustments.
-- **Five ways to start a mask**, all visible in one section, one press each: **Brush**, **AI Selection**, **Smart Object**, **Sky**, **Depth** — listed in the order they appear, with AI Selection first because it is the fastest and needs no model of its own. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
+- **Seven ways to start a mask**, all visible in one section, one press each: **Brush**, **Luminance**, **Color**, **AI Selection**, **Smart Object**, **Sky**, **Depth**. Luminance / Color sample a tone or colour with a click; everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
 - **Masks can be grouped.** Drag one mask onto another and they combine into a single mask with one adjustment set; drag a part back out to separate it again. Both are undoable.
 - **Each mask carries its own adjustments**, grouped the way the Global tab groups them — **Light** (Exposure, Contrast), **Color** (Temp, Tint, Saturation, Vibrance) and **Detail** (Sharpness, Clarity, Dehaze, Defringe). The groups fold, and click a value readout to reset that slider, exactly as on Global.
-- **Add / Erase / Invert / Duplicate / Delete** act on the selected mask. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
+- **Add to this mask / Erase / Invert / Effect / Duplicate / Delete** act on the selected mask. **Effect** turns the adjustment off without deleting coverage (distinct from the eye, which only hides the tint). Invert has an <kbd>I</kbd> shortcut on the Masks tab. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
+- A quiet **Saved / Cleared** flash and an **Export** control in the Adjust header confirm sidecar writes and keep export reachable while masking.
 - **Mask rows show the mask**, not just a name: each row renders that mask's own shape, and an inverted mask draws — and says — what it actually covers.
 - **One overlay at a time.** Two coloured regions at once cannot be told apart, so showing one mask hides the others. Editing coverage (Add/Erase) shows the mask you are changing; moving an adjustment slider hides the tint so you can judge the effect on the photo. <kbd>M</kbd> overrides either.
 - **Invert covers the whole frame**, not just the part you painted — an inverted mask acts everywhere its original did not.
@@ -25,9 +26,11 @@ colour calibration, and a long list of speed work.
 ### 🤖 AI masks *(Plus)*
 
 - **Smart Object** and **AI Selection** are named for who is choosing — the app, or you. **Sky** masks the sky in one press.
+- **Smart Object uses the camera AF / focus point when present** as a prior: if several objects stand out, it keeps the blob nearest where the camera focused.
 - **AI Selection is a click tool, not a brush**: each click is a point, and more clicks add to the same mask. Selections come back solid inside and crisp at the edge. It leads the AI tools, being roughly ten times faster than Smart Object and needing no model download of its own.
 - **Smart Object takes the longest and gives the cleanest edge.** One press, no aiming, and it returns a single mask even when what stands out is several separate things. Reach for it when the cutout has to survive a strong adjustment; reach for AI Selection when you want a specific object, or want it now.
 - **Depth** masks by distance rather than by subject: full strength on the nearest things, fading to nothing on the farthest. Use it to lift a background, add haze to a distance, or cool the far half of a landscape. It is a fade, not a cutout — the whole frame is masked, by varying amounts — so invert it to grade the background instead. About a second on a typical frame.
+- **Blur / continuous depth of field:** each mask has **Amount** and **Focus** under Blur. On a **Depth** mask this is true continuous CoC — blur grows with distance from the Focus plane (default keeps the near subject sharp). On other masks it softens coverage, so Smart Object → Invert → Blur is the quick background-blur path.
 - **A progress dialog** for the wait, with Cancel and a timeout. First use downloads the model and is not timed out.
 - **Asking for a mask the photo already has selects the existing one** instead of stacking a duplicate, and a tool whose mask exists is disabled with an explanation.
 - **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind. An **AI Selection** click that selects nothing forgets that click and tells you, instead of leaving a mask covering nothing — and it refuses only genuinely empty selections, never small ones, so picking out one flower still works. **Depth** is never refused this way: it is a fade across the whole frame, so a distant scene with one near subject is a good depth mask, not an empty one.
@@ -56,6 +59,7 @@ colour calibration, and a long list of speed work.
 
 ### 🎨 Colour and lens
 
+- **Auto Tone** sets Exposure, Contrast, Highlights, Shadows, Whites and Blacks in one press, at the top of the Light section. It anchors the midtones and then stops short of clipping the highlights, so a night shot with a street lamp is not brightened into mud. It moves the real sliders — you can see exactly what it did, nudge any of them, or undo the lot with Ctrl+Z. It reads the *unedited* photo, so pressing it twice does not compound; on a photo that is already balanced it says so and changes nothing.
 - **Camera colour calibration from a ColorChecker**, with an interactive dialog, corner handles and auto-detect. Sample 24 patches to derive RGB curves, white-balance offsets and HSL deltas, bound to the camera's EXIF `Make`/`Model` so it applies to every future photo from that body.
 - **Profiles record the decode they were calibrated against** and say so if it changes — a profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
 - **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×), applied live in the preview and on export. Local masks, dodge & burn and heal stay aligned with the desqueezed frame — including preview, settle and Compare.
@@ -84,11 +88,17 @@ colour calibration, and a long list of speed work.
 ### 🖥️ Panel, gallery and shortcuts
 
 - **A keyboard cheat sheet** on the panel's "i" button, grouped by task and aware of whether you are browsing, editing or comparing.
+- **Hover a control and it tells you its key.** Copy and Paste now name their shortcut, and on macOS shortcuts are written the way Macs write them — <kbd>⌘C</kbd>, not "Ctrl+C", which named a key that exists and does something else.
+- **One typeface, everywhere, and slightly larger.** The app declared several different font stacks, and the most common one asked for a font that ships with neither macOS nor Windows — so it matched only as long as you did not happen to have that font installed, and split the interface across two typefaces if you did. There is now a single stack that resolves to each platform's own UI font, and the base size is a step up from the platform default.
+- **Drag the gallery scrollbar and it tells you the date.** A floating bubble follows the thumb showing when the photos you are passing were taken, so you can land on last October without waiting for a single thumbnail to decode — the capture date is known from EXIF long before any pixels are. It appears only while you are dragging the thumb, not on ordinary wheel or trackpad scrolling.
 - **Files this app writes appear in the gallery immediately** — no reopening the folder after an HDR merge, panorama or export.
 - **An edited photo's gallery tile refreshes** after you visit it in the editor, instead of showing the embedded JPEG forever.
 - **Apply to Burst Group** applies tone, colour and noise settings across a burst while preserving each photo's crop and local masks.
 - **<kbd>↓</kbd> discards only in single-image view**, not while editing, and Looks (LUT/XMP) can be renamed in place.
-- **Sections start collapsed** apart from Histogram and Light, and remember your arrangement for the rest of the session.
+- **The histogram stays put.** It, the panel header and the page tabs are pinned above the scrolling area, so the histogram is still there when you are working at the bottom of the panel — which is where you were looking every time you moved a slider. Fold it away if you want the height back.
+- **Drag the sections into the order you want.** Each section header on the Global page has a grip on the right — grab it and drag; the others move aside as you go. Right-click a header for Reset Order. **Your arrangement is saved between launches** and lives in app settings, so clearing the image cache does not touch it. (The Histogram is pinned rather than in that list, so it does not move.) **Your order is saved between launches** and lives in app settings, so clearing the image cache does not touch it.
+- **Sections start collapsed** apart from Histogram and Light, and remember which ones you opened for the rest of the session. Collapse state is deliberately per-session while the *order* persists: opening six sections to hunt for a slider is not an arrangement you chose, but the order is.
+- **Straightening no longer leaves a grid stuck over the photo.** The crop frame still shows what the rotation will cut, but the rule-of-thirds guides now belong to Crop mode alone — previously they stayed on screen from the moment you straightened until you set the rotation back to zero, with nothing offering to turn them off.
 - **Copy / Paste are hidden on the Masks tab** — they carry the global edit and never contained a mask, so on that page they looked like they would copy the mask and would not.
 - **The installer states edition capabilities plainly** (`Browse + Basic Adjustment`, `AI search + denoise`, `GPU RAW processing`).
 - **Release notes are shown in the update popup.**
@@ -187,7 +197,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - **Tone & color:** exposure/contrast/highlights/shadows/whites/blacks, point + parametric **tone curve** (RGB and per-channel), **HSL color mixer**, saturation/vibrance.
 - **White balance:** As Shot (from EXIF Kelvin when present), presets (Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash), eyedropper, and **Auto WB** estimation.
 - **Transform:** interactive **crop overlay** with aspect presets (Free / Original / 1:1 / 4:3 / 3:2 / 16:9), **straighten with Auto**, keystone perspective, optional lens correction.
-- **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal. Both work in Lite and Full.
+- **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal — small strokes stay on Telea, larger holes use Navier–Stokes then a light Telea clean-up. Both work in Lite and Full.
 - **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
 - **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
 - **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel.

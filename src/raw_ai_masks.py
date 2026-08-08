@@ -528,9 +528,59 @@ def _run_matte_model(kind: str, rgb: np.ndarray, target_hw: tuple) -> Optional[n
     return _to_alpha(outputs[0], target_hw)
 
 
-def segment_subject(rgb: np.ndarray, target_hw: tuple) -> Optional[np.ndarray]:
-    """One-click foreground matte (BiRefNet). None if unavailable."""
-    return _run_matte_model("subject", rgb, target_hw)
+def segment_subject(
+    rgb: np.ndarray,
+    target_hw: tuple,
+    focus_xy: Optional[tuple[float, float]] = None,
+) -> Optional[np.ndarray]:
+    """One-click foreground matte (BiRefNet). None if unavailable.
+
+    ``focus_xy`` is an optional (x, y) prior in ``target_hw`` pixel space —
+    typically the camera AF / SubjectArea centre. When the matte contains
+    several blobs (two people, subject + prop), keep the component nearest
+    that point so Smart Object follows capture intent rather than pure
+    saliency.
+    """
+    alpha = _run_matte_model("subject", rgb, target_hw)
+    if alpha is None:
+        return None
+    if focus_xy is not None:
+        alpha = _bias_matte_to_focus(alpha, focus_xy)
+    return alpha
+
+
+def _bias_matte_to_focus(
+    alpha: np.ndarray, focus_xy: tuple[float, float]
+) -> np.ndarray:
+    """Prefer the connected component nearest the AF point."""
+    import cv2
+
+    h, w = alpha.shape[:2]
+    fx = int(np.clip(round(float(focus_xy[0])), 0, max(0, w - 1)))
+    fy = int(np.clip(round(float(focus_xy[1])), 0, max(0, h - 1)))
+    bin_m = (alpha > 0.35).astype(np.uint8)
+    n_labels, labels, _stats, centroids = cv2.connectedComponentsWithStats(
+        bin_m, connectivity=8
+    )
+    if n_labels <= 2:
+        # Background only, or a single blob — nothing to choose between.
+        return alpha
+
+    focus_label = int(labels[fy, fx])
+    if focus_label == 0:
+        best_i, best_d = 1, float("inf")
+        for i in range(1, n_labels):
+            cx, cy = float(centroids[i][0]), float(centroids[i][1])
+            d = (cx - fx) * (cx - fx) + (cy - fy) * (cy - fy)
+            if d < best_d:
+                best_i, best_d = i, d
+        focus_label = best_i
+
+    keep = (labels == focus_label).astype(np.float32)
+    # Soft suppress other blobs so Add/brush can still recover them; the
+    # selected component keeps full strength.
+    out = alpha * (0.12 + 0.88 * keep)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 def segment_sky(rgb: np.ndarray, target_hw: tuple) -> Optional[np.ndarray]:

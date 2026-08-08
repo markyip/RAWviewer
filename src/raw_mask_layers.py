@@ -65,6 +65,10 @@ from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
 
 MASK_LAYERS_KEY = "_mask_layers_v1"  # XMP serial key, see mask_layers_xmp.py
 MASK_LAYERS_OBJ_KEY = "_mask_layers_obj"  # live MaskLayerStack; never write to XMP
+# Ephemeral preview hint: while a lite/drag tick edits layer i, the pipeline
+# passes this into apply_mask_layers(active_index=i) so prefix layers hit the
+# stack's _prefix_cache. Never serialize to XMP.
+MASK_ACTIVE_INDEX_KEY = "_mask_layers_active_index"
 
 # WB/Light keys are absolute targets (e.g. Temperature default 5500K = a
 # no-op), not deltas, matching the global crs: semantics -- a per-mask
@@ -81,6 +85,10 @@ SUPPORTED_ADJUSTMENT_KEYS = (
     "Sharpness",
     "Clarity2012",
     "Defringe",
+    # Local blur / continuous DOF (see raw_depth_blur.py). Not a Lightroom
+    # crs: key — RV-only, persisted in our mask-layer JSON.
+    "Blur",
+    "BlurFocus",
 )
 
 
@@ -98,11 +106,27 @@ def _all_fingerprint_keys() -> tuple:
     return SUPPORTED_ADJUSTMENT_KEYS + _hsl_keys()
 
 
+# Absolute defaults for keys that are not "delta from zero".
+_ADJUSTMENT_DEFAULTS = {
+    "BlurFocus": 100.0,
+}
+
+
+def _adj_value(adjustments: dict, key: str) -> float:
+    return float(adjustments.get(key, _ADJUSTMENT_DEFAULTS.get(key, 0.0)))
+
+
 # Neighborhood ops (blur/guided-filter based) need context outside the
 # tight alpha bbox or their result fringes at the crop boundary -- see
 # raw_spot_heal.py:191's "clean border of source pixels" comment, the
 # precedent this pads-then-crops pattern follows.
-_SPATIAL_ADJUSTMENT_KEYS = ("Dehaze", "Sharpness", "Clarity2012", "Defringe")
+_SPATIAL_ADJUSTMENT_KEYS = (
+    "Dehaze",
+    "Sharpness",
+    "Clarity2012",
+    "Defringe",
+    "Blur",
+)
 _SPATIAL_FILTER_PAD = 40
 
 # Bbox padding (px, at the mask's own resolution) for the tight alpha
@@ -112,6 +136,24 @@ _BBOX_PAD = 2
 
 def _needs_spatial_pad(adjustments: dict) -> bool:
     return any(abs(float(adjustments.get(k, 0.0))) > 1e-4 for k in _SPATIAL_ADJUSTMENT_KEYS)
+
+
+def _spatial_pad_px(adjustments: dict, *, preview: bool = True) -> int:
+    """Pad for neighborhood ops; Blur scales with amount.
+
+    ``preview`` must match what apply_mask_blur will be given: the export path
+    allows a larger sigma, and a pad computed for the preview cap would crop
+    the wider kernel's context back off and print a seam at the bbox edge.
+    """
+    if not _needs_spatial_pad(adjustments):
+        return 0
+    pad = _SPATIAL_FILTER_PAD
+    blur = abs(float(adjustments.get("Blur", 0.0)))
+    if blur > 1e-4:
+        from raw_depth_blur import blur_pad_px
+
+        pad = max(pad, blur_pad_px(blur, preview=preview))
+    return pad
 
 
 def _apply_layer_adjustments(img: np.ndarray, adjustments: dict) -> np.ndarray:
@@ -167,6 +209,8 @@ def _apply_layer_adjustments(img: np.ndarray, adjustments: dict) -> np.ndarray:
     if any(abs(float(adjustments.get(k, 0.0))) > 1e-4 for k in ("Sharpness", "Clarity2012", "Defringe")):
         out = apply_detail_enhancements(out, adjustments)
 
+    # Blur is applied in _composite_one_layer (needs the weight/depth map),
+    # not here — a uniform blur of the ROI would ignore continuous CoC.
     return out
 
 
@@ -382,7 +426,7 @@ class MaskLayer:
         """Cheap stage-cache key: shape + mutation version + adjustment values."""
         h, w = self.alpha.shape[:2]
         adj_sig = ",".join(
-            f"{k}={self.adjustments.get(k, 0.0):.4f}" for k in _all_fingerprint_keys()
+            f"{k}={_adj_value(self.adjustments, k):.4f}" for k in _all_fingerprint_keys()
         )
         enabled_sig = int(self.enabled)
         group_sig = ""
@@ -399,6 +443,10 @@ class MaskLayerStack:
     """Ordered list of MaskLayer, composited back-to-front."""
 
     layers: list = field(default_factory=list)
+    # Set when the loader could not fit every layer the sidecar contained.
+    # Such a stack is an INCOMPLETE view of the user's data, so writing it back
+    # would destroy the layers that did not fit -- serialize_stack refuses.
+    truncated: bool = field(default=False, compare=False)
     _composite_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
     _prefix_cache: Optional[tuple] = field(default=None, compare=False, repr=False)
 
@@ -454,6 +502,7 @@ def _composite_one_layer(
     *,
     row_offset: int = 0,
     full_height: int | None = None,
+    preview: bool = True,
 ) -> np.ndarray:
     """Blend one layer's adjustment into ``img``, limited to its alpha bbox.
 
@@ -495,7 +544,7 @@ def _composite_one_layer(
     # Local coords inside the strip buffer.
     ly0, ly1 = y0 - ro, y1 - ro
 
-    pad = _SPATIAL_FILTER_PAD if _needs_spatial_pad(layer.adjustments) else 0
+    pad = _spatial_pad_px(layer.adjustments, preview=preview)
     ey0, ey1 = max(0, ly0 - pad), min(h, ly1 + pad)
     ex0, ex1 = max(0, x0 - pad), min(w, x1 + pad)
 
@@ -507,7 +556,58 @@ def _composite_one_layer(
     alpha_full = layer.effective_alpha_at(fh, w)
     alpha_region = alpha_full[y0:y1, x0:x1]
     tight_region = img[ly0:ly1, x0:x1]
-    blended = tight_region * (1.0 - alpha_region[..., np.newaxis]) + adjusted_region * alpha_region[..., np.newaxis]
+
+    blur_amt = float(layer.adjustments.get("Blur", 0.0))
+    if abs(blur_amt) > 1e-4:
+        from raw_depth_blur import apply_mask_blur
+
+        # Depth layers store nearness in alpha (1=near). Continuous CoC uses
+        # that map + BlurFocus; Invert does not flip the depth axis — Focus
+        # is how you pick the sharp plane. Other masks use effective coverage
+        # as a soft blur weight (Smart Object + Invert → blur background).
+        continuous = (getattr(layer, "source", "") or "") == "depth"
+        if continuous:
+            depth_full = layer.alpha_at(fh, w)
+            weight = depth_full[y0:y1, x0:x1]
+            focus = _adj_value(layer.adjustments, "BlurFocus") / 100.0
+            # Two different weights, and conflating them was a bug. The BLUR
+            # is continuous and covers the whole bbox (far stays blurred even
+            # where nearness is 0), but every OTHER adjustment on this layer is
+            # still masked by alpha -- so blur the alpha-blended image rather
+            # than the fully-adjusted one.
+            #
+            # Blurring `adjusted_region` directly applied Exposure/Contrast/etc
+            # at full strength across the entire bbox: a Depth mask at +1 EV
+            # rendered as a correct gradient until you touched Blur, at which
+            # point it became a flat +1 EV. Turning on Blur silently changed
+            # what every other slider on the mask did.
+            wgt = np.clip(alpha_region, 0.0, 1.0)[..., np.newaxis]
+            base = tight_region * (1.0 - wgt) + adjusted_region * wgt
+            blended = apply_mask_blur(
+                base,
+                weight,
+                blur_amt,
+                continuous_depth=True,
+                focus=focus,
+                preview=preview,
+            )
+        else:
+            blurred = apply_mask_blur(
+                adjusted_region,
+                alpha_region,
+                blur_amt,
+                continuous_depth=False,
+                preview=preview,
+            )
+            # Variable blur already scaled by weight; still lerp so zero-
+            # coverage pixels stay exact (avoids band quantization noise).
+            wgt = np.clip(alpha_region, 0.0, 1.0)[..., np.newaxis]
+            blended = tight_region * (1.0 - wgt) + blurred * wgt
+    else:
+        blended = (
+            tight_region * (1.0 - alpha_region[..., np.newaxis])
+            + adjusted_region * alpha_region[..., np.newaxis]
+        )
 
     if (ly0, ly1, x0, x1) == (0, h, 0, w):
         return blended
@@ -616,13 +716,18 @@ def _composite_layers(
     *,
     row_offset: int = 0,
     full_height: int | None = None,
+    preview: bool = True,
 ) -> np.ndarray:
     out = img
     for layer in layers:
         if layer.is_empty:
             continue
         out = _composite_one_layer(
-            out, layer, row_offset=row_offset, full_height=full_height
+            out,
+            layer,
+            row_offset=row_offset,
+            full_height=full_height,
+            preview=preview,
         )
     return out
 
@@ -634,6 +739,7 @@ def apply_mask_layers(
     active_index: Optional[int] = None,
     row_offset: int = 0,
     full_height: int | None = None,
+    preview: bool = True,
 ) -> np.ndarray:
     """Composite every enabled, non-empty layer's adjustment onto ``img``.
 
@@ -681,7 +787,7 @@ def apply_mask_layers(
             if ref is not None and ref() is img:
                 return cached[1]
         out = _composite_layers(
-            img, stack.layers, row_offset=ro, full_height=fh
+            img, stack.layers, row_offset=ro, full_height=fh, preview=preview
         )
         try:
             stack._composite_cache = (cache_key, out, _weakref.ref(img))
@@ -704,7 +810,7 @@ def apply_mask_layers(
             prefix_out = cached_prefix[1]
     if prefix_out is None:
         prefix_out = _composite_layers(
-            img, prefix_layers, row_offset=ro, full_height=fh
+            img, prefix_layers, row_offset=ro, full_height=fh, preview=preview
         )
         try:
             stack._prefix_cache = (prefix_key, prefix_out, _weakref.ref(img))
@@ -716,4 +822,5 @@ def apply_mask_layers(
         stack.layers[active_index:],
         row_offset=ro,
         full_height=fh,
+        preview=preview,
     )

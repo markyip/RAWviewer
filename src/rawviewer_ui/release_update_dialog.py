@@ -63,9 +63,8 @@ class ReleaseUpdateDialog(QDialog):
         title_label.setStyleSheet("""
             QLabel {
                 color: #EDE7DD;
-                font-size: 17px;
+                font-size: 18px;
                 font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
             }
         """)
         main_layout.addWidget(title_label)
@@ -75,9 +74,8 @@ class ReleaseUpdateDialog(QDialog):
         message_label.setStyleSheet("""
             QLabel {
                 color: #96897A;
-                font-size: 13px;
+                font-size: 14px;
                 line-height: 1.45;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
             }
         """)
         main_layout.addWidget(message_label)
@@ -88,9 +86,8 @@ class ReleaseUpdateDialog(QDialog):
             whats_new_label.setStyleSheet("""
                 QLabel {
                     color: #D9691E;
-                    font-size: 12px;
+                    font-size: 13px;
                     font-weight: 600;
-                    font-family: 'Roboto', 'Segoe UI', sans-serif;
                 }
             """)
             main_layout.addWidget(whats_new_label)
@@ -110,9 +107,8 @@ class ReleaseUpdateDialog(QDialog):
             notes_label.setStyleSheet("""
                 QLabel {
                     color: #B7ADA0;
-                    font-size: 12px;
+                    font-size: 13px;
                     line-height: 1.5;
-                    font-family: 'Roboto', 'Segoe UI', sans-serif;
                 }
             """)
             notes_scroll = QScrollArea()
@@ -138,8 +134,7 @@ class ReleaseUpdateDialog(QDialog):
         note_label.setStyleSheet("""
             QLabel {
                 color: #665D50;
-                font-size: 12px;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
+                font-size: 13px;
             }
         """)
         main_layout.addWidget(note_label)
@@ -159,9 +154,8 @@ class ReleaseUpdateDialog(QDialog):
                 color: #96897A;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 20px;
             }
             QPushButton:hover {
@@ -186,9 +180,8 @@ class ReleaseUpdateDialog(QDialog):
                 color: #EDE7DD;
                 border: 1px solid #4A4A4A;
                 border-radius: 18px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 20px;
             }
             QPushButton:hover {

@@ -54,15 +54,14 @@ class HDRPanoramaDialog(QDialog):
             QDialog {{
                 background-color: {theme.VOID};
                 color: {theme.INK};
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             }}
             QLabel {{
                 color: {theme.INK};
-                font-size: 12px;
+                font-size: 13px;
             }}
             QGroupBox {{
                 font-weight: 600;
-                font-size: 12px;
+                font-size: 13px;
                 color: {theme.EMBER};
                 border: 1px solid {theme.LINE};
                 border-radius: 6px;
@@ -103,7 +102,10 @@ class HDRPanoramaDialog(QDialog):
 
         # Header Title
         header_lbl = QLabel(self.windowTitle())
-        header_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        # Not QFont("Segoe UI", ...): naming one family gives Qt no list to
+        # fall through, so on macOS it silently substitutes rather than
+        # reaching the platform UI font.
+        header_lbl.setFont(theme.ui_font(19, QFont.Weight.Bold))
         header_lbl.setStyleSheet(f"color: {theme.INK};")
         layout.addWidget(header_lbl)
 
@@ -196,7 +198,7 @@ class HDRPanoramaDialog(QDialog):
         )
         self.crop_cb = QCheckBox(crop_text, self)
         self.crop_cb.setChecked(True)
-        self.crop_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+        self.crop_cb.setStyleSheet(f"color: {theme.INK}; font-size: 13px;")
         opt_box.addWidget(self.crop_cb)
 
         align_text = (
@@ -206,7 +208,7 @@ class HDRPanoramaDialog(QDialog):
         )
         self.align_cb = QCheckBox(align_text, self)
         self.align_cb.setChecked(True)
-        self.align_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+        self.align_cb.setStyleSheet(f"color: {theme.INK}; font-size: 13px;")
         opt_box.addWidget(self.align_cb)
 
         if is_focus:
@@ -214,7 +216,7 @@ class HDRPanoramaDialog(QDialog):
                 "Correct parallax (local optical-flow align — slower, for handheld)", self
             )
             self.parallax_cb.setChecked(True)
-            self.parallax_cb.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+            self.parallax_cb.setStyleSheet(f"color: {theme.INK}; font-size: 13px;")
             opt_box.addWidget(self.parallax_cb)
 
             hint = QLabel(
@@ -223,7 +225,7 @@ class HDRPanoramaDialog(QDialog):
                 "handheld parallax between frames can leave soft edges."
             )
             hint.setWordWrap(True)
-            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 12px;")
             opt_box.addWidget(hint)
 
         layout.addLayout(opt_box)

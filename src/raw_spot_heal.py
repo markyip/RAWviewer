@@ -28,6 +28,8 @@ from raw_dodge_burn import DEFAULT_BRUSH_FEATHER
 MASK_KEY = "_spot_heal_mask_v1"
 MASK_OBJ_KEY = "_spot_heal_mask_obj"  # live HealMask; never write to XMP
 INPAINT_RADIUS = 5  # OpenCV inpaint neighborhood radius (pixels at buffer res)
+# Area (pixels) above which Navier-Stokes tends to keep edges better than Telea.
+_INPAINT_NS_AREA = 900
 
 
 def mask_stage_fingerprint(mask: "HealMask") -> str:
@@ -57,6 +59,10 @@ class HealMask:
     version: int = 0
     _inpaint_cache: object = field(default=None, repr=False, compare=False)
     _empty_cache: object = field(default=None, repr=False, compare=False)
+    # Mask-derived geometry (area, adaptive radius, method, bbox). Depends on
+    # the MASK only, never on the image, so it survives every slider tick and
+    # lets a cache hit skip the full-frame prelude -- see apply_spot_heal.
+    _geom_cache: object = field(default=None, repr=False, compare=False)
 
     @classmethod
     def empty(cls, h: int, w: int) -> "HealMask":
@@ -75,6 +81,7 @@ class HealMask:
         self.version = int(self.version) + 1
         self._inpaint_cache = None
         self._empty_cache = None
+        self._geom_cache = None
 
 
 def stamp_heal_brush(
@@ -186,39 +193,80 @@ def apply_spot_heal(
     # settles it: if the array the key was built from is gone, or is not
     # this array, the entry cannot match.
     import weakref as _weakref
+    import cv2
 
-    cache_key = (mask.version, h, w, radius, id(img), ro, fh)
+    # Everything the cache key needs is derived from the MASK, not the image,
+    # so memoise it and let a cache hit cost one dict lookup.
+    #
+    # This prelude -- a full-frame resize, a full-frame threshold, and a
+    # full-frame np.where that allocates two index arrays -- used to run
+    # BEFORE the cache check, so a hit still paid ~60-120 ms on a 24 MP base.
+    # That is exactly the cost the cache exists to remove: dragging Exposure
+    # with a heal stroke present re-derived the same mask geometry on every
+    # tick and then threw it away.
+    geom_key = (mask.version, h, w, ro, fh, radius)
+    geom = mask._geom_cache
+    coverage = None
+    bin_mask = None
+    if geom is not None and geom[0] == geom_key:
+        _, area, adaptive_radius, method_key, bounds = geom
+    else:
+        coverage_full = resize_mask_to(mask, fh, w)
+        if ro != 0 or fh != h:
+            coverage = coverage_full[ro : ro + h]
+        else:
+            coverage = coverage_full
+        bin_mask = ((coverage > 0.08).astype(np.uint8)) * 255
+        if not np.any(bin_mask):
+            mask._geom_cache = (geom_key, 0, radius, "telea", None)
+            return img
+
+        ys, xs = np.where(bin_mask > 0)
+        area = int(ys.size)
+        # Scale the FMM neighborhood with the hole: dust stays small-radius
+        # Telea; larger strokes need more context or they leave a soft blotch.
+        adaptive_radius = radius
+        method_key = "telea"
+        if area >= _INPAINT_NS_AREA:
+            adaptive_radius = max(radius, min(24, int(round(np.sqrt(area) * 0.35))))
+            method_key = "ns+telea"
+        bounds = (int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max()))
+        mask._geom_cache = (geom_key, area, adaptive_radius, method_key, bounds)
+
+    if not area or bounds is None:
+        return img
+
+    cache_key = (mask.version, h, w, adaptive_radius, method_key, id(img), ro, fh)
     cached = mask._inpaint_cache
     if cached is not None and cached[0] == cache_key:
         _ref = cached[2] if len(cached) > 2 else None
         if _ref is not None and _ref() is img:
             return cached[1]
 
-    import cv2
+    # Missed the inpaint cache, so the coverage buffers are needed after all.
+    if coverage is None:
+        coverage_full = resize_mask_to(mask, fh, w)
+        coverage = (
+            coverage_full[ro : ro + h] if (ro != 0 or fh != h) else coverage_full
+        )
+        bin_mask = ((coverage > 0.08).astype(np.uint8)) * 255
 
-    coverage_full = resize_mask_to(mask, fh, w)
-    if ro != 0 or fh != h:
-        coverage = coverage_full[ro : ro + h]
-    else:
-        coverage = coverage_full
-    bin_mask = ((coverage > 0.08).astype(np.uint8)) * 255
-    if not np.any(bin_mask):
-        return img
-
-    ys, xs = np.where(bin_mask > 0)
-    pad = max(radius * 3, 12)
-    y0 = max(0, int(ys.min()) - pad)
-    y1 = min(h, int(ys.max()) + pad + 1)
-    x0 = max(0, int(xs.min()) - pad)
-    x1 = min(w, int(xs.max()) + pad + 1)
+    ys_min, ys_max, xs_min, xs_max = bounds
+    pad = max(adaptive_radius * 3, 12)
+    y0 = max(0, ys_min - pad)
+    y1 = min(h, ys_max + pad + 1)
+    x0 = max(0, xs_min - pad)
+    x1 = min(w, xs_max + pad + 1)
     if y1 <= y0 or x1 <= x0:
         return img
 
     roi = img[y0:y1, x0:x1]
     cov_roi = coverage[y0:y1, x0:x1]
     bin_roi = bin_mask[y0:y1, x0:x1]
-    # Dilate inside the ROI so Telea has a clean border of source pixels.
-    bin_roi = cv2.dilate(bin_roi, np.ones((3, 3), np.uint8), iterations=1)
+    # Dilate inside the ROI so inpaint has a clean border of source pixels.
+    # Slightly wider for large holes so NS/Telea don't sample the hole rim.
+    dilate_iters = 2 if area >= _INPAINT_NS_AREA else 1
+    bin_roi = cv2.dilate(bin_roi, np.ones((3, 3), np.uint8), iterations=dilate_iters)
 
     # Normalise against the ROI, not the whole frame. Everything else here
     # already works on the ROI, and the full-frame version cost ~675 ms per
@@ -231,7 +279,16 @@ def apply_spot_heal(
     peak = max(peak, 1e-4)
     norm = np.clip(roi / peak, 0.0, 1.0)
     u8 = np.clip(np.power(norm, 1.0 / 2.2) * 255.0 + 0.5, 0, 255).astype(np.uint8)
-    healed_u8 = cv2.inpaint(u8, bin_roi, float(radius), cv2.INPAINT_TELEA)
+    # Small dust: Telea (fast FMM). Larger structured holes: NS first for
+    # edge continuity, then a light Telea pass to clean residual speckles.
+    # LaMa ONNX remains the longer-term swap for this seam (FEATURE_FEASIBILITY).
+    if method_key == "ns+telea":
+        healed_u8 = cv2.inpaint(u8, bin_roi, float(adaptive_radius), cv2.INPAINT_NS)
+        healed_u8 = cv2.inpaint(
+            healed_u8, bin_roi, float(max(2, radius)), cv2.INPAINT_TELEA
+        )
+    else:
+        healed_u8 = cv2.inpaint(u8, bin_roi, float(adaptive_radius), cv2.INPAINT_TELEA)
     healed = np.power(healed_u8.astype(np.float32) / 255.0, 2.2) * peak
 
     alpha = np.clip(cov_roi, 0.0, 1.0).astype(np.float32)

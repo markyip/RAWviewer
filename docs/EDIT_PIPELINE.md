@@ -543,7 +543,8 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 
 ## UI (`rawviewer_ui/adjust_panel.py`)
 
-- Floating panel (**E**), draggable card, scrollable content
+- Floating panel (**E**), draggable card. Two regions: a **pinned** block (header, shortcut hint, page tabs, Histogram) in `card_layout` above the `QScrollArea`, and the scrolling sections inside it. The histogram is pinned because it is what you read after every slider move; it keeps its collapse header, and follows the Global page by hand in `_on_panel_tab_changed` since it now sits outside both pages
+- **Global section order is user-arranged and persisted** — drag the grip on a section header (`_SectionGrip`); right-click offers Reset Order only. The grip is a separate widget that ACCEPTS its own presses rather than a drag gesture on the header, because the header's `mousePressEvent` is already click-to-collapse; `_apply_section_order` calls `layout.activate()` so the live reorder does not decide the next move against stale geometry. Laid out from `_section_order` (never from layout indices; `_camera_profile_row` shares `global_layout`), stored in QSettings under `adjust_panel/global_section_order`. `_sanitize_section_order` drops unknown keys and **appends** known-but-missing ones, so a section added in a later version still appears for a user with an older saved order. Contrast with `_SECTION_EXPANDED_SESSION`: collapse state is deliberately session-scoped, order is deliberately persisted — see the comment above `_GLOBAL_SECTION_ORDER_SETTING`
 - Sliders: immediate value readout in **blue** (`#90CAF9`); **80 ms** throttled preview; XMP on release
 - Click value label → reset single slider; **Reset** → all defaults + as-shot Temp
 - **Tone curve** graph + R/G/B channels + PV Shad/Dark/Light/High (`_SHOW_TONE_CURVE_UI = True`)
@@ -562,6 +563,36 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 > through the scene-linear pipeline (sRGB EOTF → process → encode), matching
 > the Adjust panel. The legacy gamma-space core remains only for internal
 > banded detail-enhance unit tests.
+
+### One-press estimators (`raw_auto_adjust.py`)
+
+Three AUTO buttons: **Auto WB** (Color / WB, beside the dropper), **Auto Tone**
+(top of Light) and **Auto straighten** (on the Straighten slider row). All
+three share one contract, and it is the reason they live outside the pipeline:
+
+- they **read the un-adjusted edit base** (`_adjust_preview_base_rgb`) and
+  **write existing slider values** — never pixels. The user sees which sliders
+  moved, refines them normally, and Ctrl+Z undoes the lot;
+- the values are **absolute, not deltas**, so applying is an overwrite and
+  pressing a button twice is a no-op rather than a compounding edit;
+- each **refuses rather than guesses** — `None` when the image gives no
+  reliable estimate, surfaced as a status message.
+
+`raw_tone_recovery.py` is deliberately *not* the donor for Auto Tone despite
+covering similar ground: it renders display pixels for the **P**-key preview,
+so there are no slider values behind it to record or write to a sidecar.
+
+Auto Tone specifics: measurements are taken in the **PV2012 perceptual space**
+(`raw_pv2012._scene_to_perceptual`) because that is the space the six Light
+sliders act in, and highlight thresholds are fractions of `_PERCEPTUAL_WHITE`
+(~0.813) rather than of 1.0 — see `raw_pv2012`'s own warning about highlight
+math measured against 1.0 collapsing into a no-op. Exposure is solved two ways
+and the smaller taken: a median anchor, and the EV at which the 99.5th
+percentile reaches white. Without that limiter a night scene with a bright
+lamp brightens into mud. Every ramp threshold was calibrated on 20 real CR3
+edit bases, **not** on synthetic histograms — a lognormal test image has no
+true blacks and no speculars, and tuning against one pins Whites/Blacks near
+their caps on frames that need neither (`testplan/auto/t_auto_tone.py`).
 
 ### Adjust zoom vs live-drag tiers
 
@@ -644,6 +675,7 @@ Written on slider / curve release and before export:
 | `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear`; identity tone-curve helpers |
 | `raw_effects.py` | Post-crop vignette (paint overlay + Midpoint) + dehaze |
 | `raw_dodge_burn.py` | Local dodge/burn mask + `DodgeBurnStrength` |
+| `raw_auto_adjust.py` | One-press estimators: Auto WB, Auto tone, Auto straighten (see below) |
 | `raw_lut.py` | Creative `.cube` LUT apply |
 | `raw_xmp_presets.py` | Managed XMP preset library (import / list / apply / remove) |
 | `display_brightness.py` | Best-effort macOS display brightness bump while Adjust is open |

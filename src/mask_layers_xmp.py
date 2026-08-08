@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import os
 import threading
 from typing import Optional
 
@@ -33,6 +35,93 @@ from raw_mask_layers import (
     MaskLayerStack,
     _hsl_keys,
 )
+
+logger = logging.getLogger(__name__)
+
+# --- Layer count / memory cap ----------------------------------------------
+#
+# Each mask keeps float32 alpha plus working RGB for its adjustments (~16–24
+# B/px at the half-res edit base). Unbounded N blows both RAM and the live-
+# preview budget. Cap shape matches docs/FEATURE_FEASIBILITY.md and focus
+# stacking's _MAX_FRAMES: byte budget from available RAM first, hard count
+# as a backstop. Env overrides:
+#   RAWVIEWER_MASK_LAYERS_MAX       hard count (default 24)
+#   RAWVIEWER_MASK_LAYERS_RAM_FRAC  fraction of available RAM (default 0.12)
+#   RAWVIEWER_MASK_LAYERS_BUDGET_MB fixed budget when RAM is unknown (default 1536)
+
+_HARD_MAX_LAYERS = 24
+_BYTES_PER_MASK_PX = 20  # mid of the 16–24 B/px estimate
+_DEFAULT_WORKING_PX = 6_000_000  # ~24 MP half-res
+_SERIAL_MAX_CHARS = 48 * 1024 * 1024  # refuse before json.loads
+_ALPHA_MAX_PIXELS = 40_000_000  # refuse a single absurd PNG
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _available_ram_bytes() -> Optional[int]:
+    try:
+        from image_cache import _safe_virtual_memory
+
+        return int(_safe_virtual_memory().available)
+    except Exception:
+        pass
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return None
+
+
+def max_mask_layers(
+    *,
+    available_bytes: Optional[int] = None,
+    frame_pixels: Optional[int] = None,
+) -> int:
+    """How many mask layers this machine can reasonably hold right now.
+
+    Byte-budget primary (fraction of available RAM / per-mask footprint at
+    the working resolution), hard count as backstop. Callers that know the
+    current edit-base size should pass ``frame_pixels`` so a 61 MP file gets
+    a tighter count than a 24 MP one.
+    """
+    hard = max(1, _env_int("RAWVIEWER_MASK_LAYERS_MAX", _HARD_MAX_LAYERS))
+    px = (
+        int(frame_pixels)
+        if frame_pixels is not None and int(frame_pixels) > 0
+        else _DEFAULT_WORKING_PX
+    )
+    per_mask = max(1, int(px) * _BYTES_PER_MASK_PX)
+
+    if available_bytes is None:
+        available_bytes = _available_ram_bytes()
+    if available_bytes is not None and available_bytes > 0:
+        frac = _env_float("RAWVIEWER_MASK_LAYERS_RAM_FRAC", 0.12)
+        frac = max(0.02, min(0.50, frac))
+        budget = int(available_bytes * frac)
+    else:
+        budget = max(1, _env_int("RAWVIEWER_MASK_LAYERS_BUDGET_MB", 1536)) * 1024 * 1024
+
+    by_bytes = max(1, budget // per_mask)
+    return max(1, min(hard, by_bytes))
 
 
 def _encode_alpha(alpha: np.ndarray) -> str:
@@ -92,9 +181,24 @@ def _decode_alpha(serial: str) -> Optional[np.ndarray]:
     try:
         import cv2
 
-        raw = base64.b64decode(serial.encode("ascii"))
+        # Reject before allocating: a base64 string longer than 4/3 of the
+        # pixel budget cannot decode into a legal alpha anyway.
+        if len(serial) > (_ALPHA_MAX_PIXELS * 4) // 3 + 1024:
+            logger.warning("mask alpha serial exceeds size budget; skipped")
+            return None
+        raw = base64.b64decode(serial.encode("ascii"), validate=False)
+        if len(raw) > _ALPHA_MAX_PIXELS * 2:
+            logger.warning("mask alpha PNG exceeds size budget; skipped")
+            return None
         u8 = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_GRAYSCALE)
         if u8 is None:
+            return None
+        if int(u8.shape[0]) * int(u8.shape[1]) > _ALPHA_MAX_PIXELS:
+            logger.warning(
+                "mask alpha %sx%s exceeds pixel budget; skipped",
+                u8.shape[1],
+                u8.shape[0],
+            )
             return None
         return (u8.astype(np.float32) / 255.0)
     except Exception:
@@ -105,6 +209,51 @@ def _all_keys() -> tuple:
     return SUPPORTED_ADJUSTMENT_KEYS + _hsl_keys()
 
 
+def _entry_slot_count(entry: dict) -> int:
+    """How many alpha buffers an entry costs toward the layer budget.
+
+    A group stores each component separately (plus a baked alpha we ignore
+    for counting — components dominate). A flat layer costs one.
+    """
+    raw_components = entry.get("components")
+    if isinstance(raw_components, list) and raw_components:
+        return max(1, sum(1 for c in raw_components if isinstance(c, dict)))
+    return 1
+
+
+class MaskStackTruncated(Exception):
+    """Raised rather than serializing a stack that was truncated on load.
+
+    Returning "" here would be catastrophic: the save path reads "" as "no
+    masks" and DELETES the sidecar key, which is precisely the data the
+    truncation already put at risk. Callers must leave the stored value alone.
+    """
+
+
+def _worth_storing(key: str, value) -> bool:
+    """Is this adjustment a departure from its default, and so worth writing?
+
+    "Non-zero" is NOT the same question, and treating them as one lost data.
+    BlurFocus defaults to 100 (raw_mask_layers._ADJUSTMENT_DEFAULTS), so a
+    user who pulled Focus all the way to the background (0) had that value
+    dropped as if it were untouched -- and on reload _adj_value handed back
+    the 100 default, flipping the sharp plane from far to near. The depth of
+    field inverted itself between sessions.
+    """
+    from raw_mask_layers import _ADJUSTMENT_DEFAULTS
+
+    default = float(_ADJUSTMENT_DEFAULTS.get(key, 0.0))
+    return abs(float(value) - default) > 1e-4
+
+
+def _storable_adjustments(adjustments: dict) -> dict:
+    return {
+        k: round(float(v), 4)
+        for k, v in adjustments.items()
+        if k in _all_keys() and _worth_storing(k, v)
+    }
+
+
 def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     """Encode as a JSON list; "" for None/empty (matches serialize_mask's contract)."""
     # Not stack.is_empty(): that reports empty when every layer is merely
@@ -113,6 +262,10 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
     # end still returns "" when nothing is.
     if stack is None or not stack.layers:
         return ""
+    if getattr(stack, "truncated", False):
+        raise MaskStackTruncated(
+            "refusing to write a mask stack that was truncated on load"
+        )
     entries = []
     for layer in stack.layers:
         # Keep empty layers. Skipping them meant Create→Brush never reached
@@ -127,11 +280,7 @@ def serialize_stack(stack: Optional[MaskLayerStack]) -> str:
         alpha_serial = _encode_alpha(_downscale_for_store(layer.alpha))
         if not alpha_serial:
             continue
-        adjustments = {
-            k: round(float(v), 4)
-            for k, v in layer.adjustments.items()
-            if k in _all_keys() and abs(float(v)) > 1e-4
-        }
+        adjustments = _storable_adjustments(layer.adjustments)
         entries.append(
             {
                 "alpha": alpha_serial,
@@ -193,11 +342,7 @@ def _serialize_group(layer: MaskLayer) -> Optional[dict]:
 
     return {
         "alpha": baked,
-        "adjustments": {
-            k: round(float(v), 4)
-            for k, v in layer.adjustments.items()
-            if k in _all_keys() and abs(float(v)) > 1e-4
-        },
+        "adjustments": _storable_adjustments(layer.adjustments),
         "name": layer.name,
         "enabled": bool(layer.enabled),
         "invert": bool(layer.invert),
@@ -241,16 +386,45 @@ def _deserialize_group(entry: dict, common: dict, raw_components: list):
 def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
     if not serial:
         return None
+    if len(serial) > _SERIAL_MAX_CHARS:
+        logger.warning(
+            "RVMaskLayers serial is %s chars (cap %s); refusing to load",
+            len(serial),
+            _SERIAL_MAX_CHARS,
+        )
+        return None
     try:
         entries = json.loads(serial)
     except Exception:
         return None
     if not isinstance(entries, list):
         return None
+
+    # Cap before decoding PNGs so a huge list cannot force work proportional
+    # to its length.
+    #
+    # DELIBERATELY the deterministic count cap, NOT max_mask_layers(): that one
+    # is a fraction of *currently available RAM*, so it made loading a sidecar
+    # nondeterministic. A 12-layer file opened on a busy machine kept the first
+    # few layers and dropped the rest; the next slider release then serialized
+    # the truncated stack straight back over the sidecar and the masks were
+    # gone for good. The same file on the same machine an hour later loaded
+    # fine. A memory budget is a sensible limit on masks you are CREATING and a
+    # data-loss bug on masks that already exist.
+    #
+    # This also removes the per-layer psutil query the old code did (the cap
+    # was recomputed inside the loop on every entry).
+    cap = max(1, _env_int("RAWVIEWER_MASK_LAYERS_MAX", _HARD_MAX_LAYERS))
     layers = []
+    slots_used = 0
+    truncated = False
     for entry in entries:
         if not isinstance(entry, dict):
             continue
+        slots = _entry_slot_count(entry)
+        if slots_used + slots > cap:
+            truncated = True
+            break
         adjustments = entry.get("adjustments") or {}
         if not isinstance(adjustments, dict):
             adjustments = {}
@@ -265,9 +439,17 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
 
         raw_components = entry.get("components")
         if isinstance(raw_components, list) and raw_components:
+            # Trim components to the remaining budget before building.
+            room = cap - slots_used
+            if len(raw_components) > room:
+                raw_components = [
+                    c for c in raw_components if isinstance(c, dict)
+                ][:room]
+                truncated = True
             group = _deserialize_group(entry, common, raw_components)
             if group is not None:
                 layers.append(group)
+                slots_used += max(1, len(group.components or []))
                 continue
             # Fall through on a malformed component list: the baked "alpha"
             # is still a faithful render of the group, so the mask survives
@@ -276,10 +458,24 @@ def deserialize_stack(serial: str) -> Optional[MaskLayerStack]:
         alpha = _decode_alpha(str(entry.get("alpha", "")))
         if alpha is None:
             continue
-        layers.append(MaskLayer(alpha, kind=str(entry.get("kind", "") or "brush"), **common))
+        layers.append(
+            MaskLayer(alpha, kind=str(entry.get("kind", "") or "brush"), **common)
+        )
+        slots_used += 1
+
+    if truncated:
+        # An error, not a warning: this is the only path that can lose a user's
+        # saved masks, and the stack is flagged so it can never be written back
+        # over the file it came from (see serialize_stack).
+        logger.error(
+            "RVMaskLayers has more than %s layer slots; loaded %s and marked "
+            "the stack read-only so it cannot overwrite the sidecar",
+            cap,
+            slots_used,
+        )
     if not layers:
         return None
-    return MaskLayerStack(layers=layers)
+    return MaskLayerStack(layers=layers, truncated=truncated)
 
 
 # Bounded memo for the render pipeline's read-only lookups, same shape and

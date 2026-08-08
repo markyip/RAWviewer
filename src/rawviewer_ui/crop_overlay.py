@@ -64,6 +64,11 @@ class CropOverlayItem(QGraphicsObject):
             self.setAcceptHoverEvents(False)
             self._drag_mode = None
             self._apply_hover_cursor("")
+        # Interactivity now decides what paint() draws (handles and thirds
+        # guides), so a change to it is a visual change and has to repaint.
+        # Without this the item keeps whatever it last drew until something
+        # else happens to dirty it.
+        self.update()
 
     def is_interactive(self) -> bool:
         return bool(getattr(self, "_interactive", True))
@@ -132,6 +137,20 @@ class CropOverlayItem(QGraphicsObject):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(crop)
 
+        if not self._interactive:
+            # Preview-only: the frame alone, showing what the geometry will cut.
+            #
+            # No rule-of-thirds guides here, and this early-out has to stay
+            # ABOVE them. This item is reused for the passive geometry-overlay
+            # preview, which stays on for as long as straighten/perspective is
+            # non-zero -- so drawing the guides unconditionally left a 3x3 grid
+            # over the photo from the moment the frame was straightened until
+            # the rotation was set back to zero, with nothing on screen
+            # explaining it or offering to turn it off. Thirds guides are a
+            # framing aid for someone actively dragging a crop; passive
+            # geometry preview is not that.
+            return
+
         # Rule-of-thirds guides inside the crop.
         guide = QPen(QColor(*theme.INK_RGB, 90))
         guide.setWidthF(1.0)
@@ -142,10 +161,6 @@ class CropOverlayItem(QGraphicsObject):
             y = crop.top() + crop.height() * i / 3.0
             painter.drawLine(QPointF(x, crop.top()), QPointF(x, crop.bottom()))
             painter.drawLine(QPointF(crop.left(), y), QPointF(crop.right(), y))
-
-        if not self._interactive:
-            # Preview-only: frame and guides, no grab affordances.
-            return
 
         # Corner handles.
         handle = QPen(QColor(theme.EMBER))

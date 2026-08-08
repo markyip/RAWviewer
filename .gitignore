@@ -73,6 +73,11 @@ test_*.py
 !testplan/**
 !testplan/auto/
 !testplan/auto/**
+# ...but not their bytecode. The un-ignore above is broad enough to override
+# the __pycache__/ and *.pyc rules at the top of this file, so running the
+# suite left a dozen .pyc files staged-ready in every status.
+testplan/**/__pycache__/
+testplan/**/*.pyc
 
 # Debug and development files
 debug_*.py

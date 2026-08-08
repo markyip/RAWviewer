@@ -23,11 +23,11 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "mobileclip_onnx"
 # Pinned SHA-256 must match the LFS object.
 if sys.platform.startswith("win"):
     DENOISE_MODEL_FILENAME = "scunet.onnx"
-    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
+    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/main/models/scunet.onnx"
     DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
 else:
     DENOISE_MODEL_FILENAME = "nafnet.onnx"
-    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/nafnet.onnx"
+    DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/main/models/nafnet.onnx"
     DENOISE_MODEL_SHA256 = "9fb510fdce45ff393ca2822886c6c23cd60c09d47df1229bd7d5f0a07c98f3e0"
 DOWNLOAD_RETRIES = 3
 RETRY_DELAY_SEC = 3

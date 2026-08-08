@@ -720,6 +720,26 @@ def test_erasing_with_no_mask_says_so():
     print("  OK   X with no mask explains instead of arming nothing")
 
 
+def test_painting_with_no_mask_says_paint_not_erase():
+    """P must not reuse the erase status line when there is nothing to paint."""
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget, reset_section_expanded_session
+
+    reset_section_expanded_session()
+    p = ImageAdjustPanelWidget()
+    p.show()
+    p._panel_tabs.set_current(1)
+    h = _MaskHost(p)
+    assert h._handle_brush_key_down("mask_paint") is False, (
+        "P armed paint with no way to create a mask"
+    )
+    assert h.status, "P failed silently with no mask"
+    msg = h.status[-1].lower()
+    assert "erase" not in msg, f"P showed erase wording: {h.status[-1]!r}"
+    assert "paint" in msg, f"P did not mention painting: {h.status[-1]!r}"
+    assert h.gpu_view.began == 0
+    print("  OK   P with no mask explains in paint wording")
+
+
 def test_sam_click_floor_is_absolute_not_a_frame_fraction():
     """A SAM click must be rejected for being EMPTY, never for being small.
 
@@ -784,6 +804,7 @@ def main() -> int:
     test_x_erases_whichever_system_is_in_play()
     test_erase_key_release_follows_the_press_not_the_tab()
     test_erasing_with_no_mask_says_so()
+    test_painting_with_no_mask_says_paint_not_erase()
     test_release_snap_leaves_no_rectangular_edge()
     test_release_snap_still_snaps_to_real_edges()
     test_feather_window_shape_and_bounds()

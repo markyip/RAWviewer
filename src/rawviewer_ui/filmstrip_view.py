@@ -170,7 +170,7 @@ class FilmStripBar(QFrame):
                 border: 2px solid transparent;
                 border-radius: 3px;
                 color: #888;
-                font-size: 10px;
+                font-size: 11px;
                 padding: 0px;
             }
             QLabel#filmstrip_cell_selected {
@@ -181,7 +181,7 @@ class FilmStripBar(QFrame):
             }
             QLabel#filmstrip_batch_badge {
                 color: #D9A441;
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 700;
                 background: transparent;
                 border: none;

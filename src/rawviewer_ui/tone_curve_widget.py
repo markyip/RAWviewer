@@ -213,7 +213,7 @@ class ToneCurveEditorRow(QWidget):
         layout.setSpacing(4)
 
         hint = QLabel("Drag points · click to add · double-click to remove")
-        hint.setStyleSheet("color: #707070; font-size: 9px;")
+        hint.setStyleSheet("color: #707070; font-size: 10px;")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -234,7 +234,7 @@ class ToneCurveEditorRow(QWidget):
             f"""
             QPushButton#tone_curve_linear_btn {{
                 color: {theme.EMBER};
-                font-size: 11px;
+                font-size: 12px;
                 border: 1px solid {theme.rgba(theme.EMBER_RGB, 90)};
                 border-radius: 4px;
                 background: {theme.rgba(theme.EMBER_RGB, 25)};

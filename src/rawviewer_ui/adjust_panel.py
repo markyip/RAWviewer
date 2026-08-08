@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Callable, Dict, Sequence
 
-from PyQt6.QtCore import QRectF, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, QSettings, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QBrush,
@@ -99,7 +99,7 @@ def _adjust_combo_stylesheet() -> str:
             border: 1px solid {theme.LINE};
             border-radius: 3px;
             color: {theme.INK};
-            font-size: 11px;
+            font-size: 12px;
             padding: 3px 8px;
             min-height: 18px;
         }}
@@ -126,7 +126,7 @@ def _adjust_combo_stylesheet() -> str:
             selection-background-color: {theme.rgba(theme.EMBER_RGB, 140)};
             selection-color: {theme.INK};
             outline: none;
-            font-size: 11px;
+            font-size: 12px;
             padding: 2px;
         }}
         QComboBox QAbstractItemView::item {{
@@ -182,6 +182,52 @@ def _qta_icon_safe(name: str, *, color: str) -> QIcon:
         return QIcon()
 
 
+def _apply_tool_icon(
+    btn: QPushButton,
+    name: str,
+    *,
+    color: str | None = None,
+    size: int = 12,
+) -> None:
+    """Leading glyph for a labelled tool button — text stays the name.
+
+    Matches Compare / WB / Burst: one quiet FA icon, same ink as the label,
+    and a no-op when qtawesome is missing so the button still reads.
+    """
+    icon = _qta_icon_safe(name, color=color or theme.INK_MUTED)
+    if icon.isNull():
+        return
+    btn.setIcon(icon)
+    btn.setIconSize(QSize(size, size))
+
+
+# Quiet glyphs for the Adjust tool rows. Kept as a table so create / edit /
+# Global brushes stay in one place and tests that assert button *text* are
+# unaffected (icons ride beside the label, they do not replace it).
+_MASK_CREATE_ICONS = {
+    "brush": "fa5s.paint-brush",
+    "ai_click": "fa5s.crosshairs",
+    "subject": "fa5s.magic",
+    "sky": "fa5s.cloud",
+    "depth": "fa5s.mountain",
+    "luma": "fa5s.adjust",
+    "color": "fa5s.eye-dropper",
+}
+_MASK_EDIT_ICONS = {
+    "paint": "fa5s.paint-brush",
+    "erase": "fa5s.eraser",
+    "invert": "fa5s.adjust",
+    "duplicate": "fa5s.copy",
+    "delete": "fa5s.times",
+}
+_LOCAL_BRUSH_ICONS = {
+    "dodge": "fa5s.sun",
+    "burn": "fa5s.fire",
+    "erase": "fa5s.eraser",
+    "heal": "fa5s.band-aid",
+}
+
+
 class AdjustValueLabel(QLabel):
     """Clickable value readout — resets the slider to its default."""
 
@@ -229,6 +275,63 @@ _SECTION_EXPANDED_SESSION: dict[str, bool] = {}
 def reset_section_expanded_session() -> None:
     """Forget this run's collapse state (tests; a genuinely fresh panel)."""
     _SECTION_EXPANDED_SESSION.clear()
+
+
+# The order the Global sections stand in, top to bottom. Unlike collapse state
+# above, this one IS persisted across restarts, and the difference is
+# deliberate rather than an inconsistency:
+#
+#   collapse state is something you fall into -- open six sections hunting for
+#   a slider and you did not choose that shape, so restoring it next launch
+#   restores a mess. ORDER is something you sit down and arrange, once, and
+#   having it reset every launch would make arranging it pointless.
+#
+# Stored in QSettings, which is also where the answer to "does clearing the
+# image cache lose this" comes from: it does not. Caches are separate storage,
+# and nothing in the app clears QSettings wholesale.
+_GLOBAL_SECTION_ORDER_SETTING = "adjust_panel/global_section_order"
+
+# Canonical order: the fallback, the Reset Order target, and the sequence new
+# sections are slotted into when a saved order predates them.
+_GLOBAL_SECTION_DEFAULT_ORDER = (
+    "light",
+    "color",
+    "curve",
+    "hsl",
+    "detail",
+    "noise",
+    "effects",
+    "local",
+    "lut",
+    "transform",
+    "anamorphic",
+)
+
+
+def _sanitize_section_order(saved) -> list:
+    """A saved order → a usable one, dropping junk and appending what is new.
+
+    Two failure modes this exists to survive, both of which produce a panel
+    with sections missing rather than an exception, which is why neither would
+    be obvious in testing:
+
+      * a key that no longer exists (a section was renamed or removed) --
+        dropped;
+      * a key that did not exist when the order was saved (a section was ADDED
+        in a later version) -- appended in canonical order, because a section
+        absent from the saved list would otherwise never be laid out at all.
+    """
+    known = list(_GLOBAL_SECTION_DEFAULT_ORDER)
+    if not isinstance(saved, (list, tuple)):
+        return known
+    seen = set()
+    order = []
+    for key in saved:
+        if isinstance(key, str) and key in known and key not in seen:
+            order.append(key)
+            seen.add(key)
+    order.extend(k for k in known if k not in seen)
+    return order
 
 
 class _FileDropFrame(QFrame):
@@ -308,7 +411,7 @@ class _LooksNameEdit(QLineEdit):
         self.setFrame(False)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.setStyleSheet(
-            f"QLineEdit {{ color: {theme.INK}; font-size: 11px; "
+            f"QLineEdit {{ color: {theme.INK}; font-size: 12px; "
             f"background: transparent; border: none; padding: 0; }}"
             f"QLineEdit:!read-only {{ background: {theme.VOID}; "
             f"border: 1px solid {theme.EMBER}; border-radius: 3px; padding: 0 2px; }}"
@@ -372,7 +475,7 @@ class _LooksRowWidget(QWidget):
 
         badge = QLabel(".cube" if kind == "cube" else ".xmp")
         badge.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 10px; background: transparent;"
+            f"color: {theme.INK_FAINT}; font-size: 11px; background: transparent;"
         )
         row.addWidget(badge)
 
@@ -388,7 +491,7 @@ class _LooksRowWidget(QWidget):
                 color: {theme.INK_MUTED};
                 border: none;
                 border-radius: 4px;
-                font-size: 14px;
+                font-size: 15px;
                 padding: 0;
             }}
             QPushButton:hover {{
@@ -604,7 +707,7 @@ class PanelTabBar(QWidget):
                     border: none;
                     border-bottom: 2px solid transparent;
                     color: {theme.INK_FAINT};
-                    font-size: 10px;
+                    font-size: 11px;
                     font-weight: 700;
                     letter-spacing: 1.6px;
                     padding: 9px 1px 8px 1px;
@@ -671,7 +774,7 @@ class PanelTabBar(QWidget):
                 color: {colour};
                 background: {theme.LINE_SOFT};
                 border-radius: 3px;
-                font-size: 9px;
+                font-size: 10px;
                 font-weight: 700;
                 letter-spacing: 0px;
                 padding: 1px 4px 1px 4px;
@@ -728,6 +831,84 @@ class PanelTabBar(QWidget):
         self.changed.emit(index)
 
 
+class _SectionGrip(QLabel):
+    """Drag handle for reordering a section.
+
+    A dedicated widget rather than a drag gesture on the header, because the
+    header already owns mouse-press for click-to-collapse
+    (``CollapsibleSection._on_header_pressed``). Teasing a drag out of that by
+    distance and timing would put the gesture people use constantly --
+    collapsing -- at risk to add one they use rarely. A grip has its own
+    events and cannot be confused with anything.
+
+    It accepts its presses rather than ignoring them, which is what stops the
+    press reaching the header underneath and toggling the section every time
+    someone grabs the handle.
+    """
+
+    grab_started = pyqtSignal()
+    grab_moved = pyqtSignal(int)  # global Y of the pointer
+    grab_ended = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("⣿", parent)
+        self.setObjectName("section_grip")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self.setToolTip(
+            "Drag to reorder this section.\n\n"
+            "Your arrangement is saved between launches. Right-click the "
+            "header to reset it."
+        )
+        self._dragging = False
+        self._restyle(False)
+
+    def _restyle(self, active: bool) -> None:
+        color = theme.EMBER if active else theme.INK_FAINT
+        self.setStyleSheet(
+            f"color: {color}; font-size: 11px; background: transparent;"
+            " border: none; letter-spacing: -1px;"
+        )
+
+    def enterEvent(self, event):
+        if not self._dragging:
+            self._restyle(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._dragging:
+            self._restyle(False)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            event.ignore()
+            return
+        self._dragging = True
+        self._restyle(True)
+        self.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        self.grab_started.emit()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if not self._dragging:
+            event.ignore()
+            return
+        self.grab_moved.emit(int(event.globalPosition().y()))
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if not self._dragging:
+            event.ignore()
+            return
+        self._dragging = False
+        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+        self._restyle(self.underMouse())
+        self.grab_ended.emit()
+        event.accept()
+
+
 class CollapsibleSection(QWidget):
     """A clean, Lightroom-style collapsible accordion section for PyQt6.
 
@@ -773,7 +954,7 @@ class CollapsibleSection(QWidget):
         self.arrow.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.arrow.setAutoFillBackground(False)
         self.arrow.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 10px; font-weight: bold;"
+            f"color: {theme.INK_FAINT}; font-size: 11px; font-weight: bold;"
             " background: transparent; border: none;"
         )
         header_layout.addWidget(self.arrow)
@@ -784,14 +965,21 @@ class CollapsibleSection(QWidget):
         self.title_lbl.setAutoFillBackground(False)
         self.title_lbl.setStyleSheet(f"""
             color: {theme.INK};
-            font-size: 10px;
+            font-size: 11px;
             font-weight: 700;
             letter-spacing: 1px;
             background: transparent;
             border: none;
         """)
         header_layout.addWidget(self.title_lbl, 1)
-        
+
+        # Reorder handle, created only for sections the user may rearrange
+        # (see enable_reorder_grip). Trailing rather than leading so it does
+        # not push the arrow and title out of line with the sections that
+        # have no grip.
+        self.grip: _SectionGrip | None = None
+        self._header_layout = header_layout
+
         # Enable clicking on header
         self.header.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.header.mousePressEvent = self._on_header_pressed
@@ -836,6 +1024,13 @@ class CollapsibleSection(QWidget):
         self.arrow.setText("▼" if self._expanded else "▶")
         if self._settings_key:
             _SECTION_EXPANDED_SESSION[self._settings_key] = self._expanded
+
+    def enable_reorder_grip(self) -> "_SectionGrip":
+        """Give this section a drag handle, once."""
+        if self.grip is None:
+            self.grip = _SectionGrip(self.header)
+            self._header_layout.addWidget(self.grip)
+        return self.grip
 
     def add_widget(self, widget: QWidget) -> None:
         self.content_layout.addWidget(widget)
@@ -1059,6 +1254,7 @@ class ImageAdjustPanelWidget(QWidget):
     # One-shot auto adjustments (see raw_auto_adjust.py); the host computes
     # from the edit base and writes the result back through the sliders.
     auto_wb_requested = pyqtSignal()
+    auto_tone_requested = pyqtSignal()
     auto_straighten_requested = pyqtSignal()
     dodge_burn_mode_changed = pyqtSignal(object)
     dodge_burn_clear_requested = pyqtSignal()
@@ -1164,16 +1360,16 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             QLabel#adjust_panel_title {{
                 color: {theme.INK};
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
             }}
             QLabel[class="adjust_slider_label"] {{
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
             }}
             QLabel[class="adjust_slider_value"] {{
                 color: {theme.EMBER};
-                font-size: 11px;
+                font-size: 12px;
                 min-width: 48px;
             }}
             QLabel[class="adjust_slider_value"]:hover {{
@@ -1181,7 +1377,7 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             QPushButton#adjust_reset_btn {{
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
                 border: none;
                 background: transparent;
                 padding: 2px 6px;
@@ -1191,7 +1387,7 @@ class ImageAdjustPanelWidget(QWidget):
             }}
             QPushButton#adjust_export_btn {{
                 color: {theme.INK};
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 600;
                 border: 1px solid {theme.rgba(theme.EMBER_RGB, 120)};
                 border-radius: 6px;
@@ -1224,7 +1420,7 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_db_clear_btn,
             QPushButton#adjust_db_show_mask_btn {{
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
                 border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
                 background: {theme.rgba(theme.INK_RGB, 12)};
@@ -1260,7 +1456,7 @@ class ImageAdjustPanelWidget(QWidget):
             QPushButton#adjust_auto_wb_btn {{
                 padding: 0px 4px;
                 color: {theme.INK};
-                font-size: 10px;
+                font-size: 11px;
                 font-weight: 600;
             }}
             QPushButton#adjust_wb_picker_btn:checked, QPushButton#adjust_auto_wb_btn:checked {{
@@ -1330,6 +1526,36 @@ class ImageAdjustPanelWidget(QWidget):
         vp = scroll.viewport()
         vp.setAutoFillBackground(True)
         vp.setStyleSheet(f"background-color: {theme.SURFACE};")
+
+        # Pinned region, ABOVE the scroll area: panel header, shortcut hint,
+        # the page tabs and the histogram. Everything here answers "where am I
+        # and what am I looking at", which is exactly the thing that must not
+        # scroll away while you work further down the panel -- the histogram
+        # especially, since it is what you check after every slider move.
+        #
+        # The tabs come with it because a tab bar that scrolls out of reach is
+        # worse than one that never moves, and the header because leaving it
+        # behind would put the pinned histogram above the panel's own title.
+        pinned = QWidget()
+        pinned.setObjectName("adjust_panel_pinned")
+        pinned.setAutoFillBackground(True)
+        pinned.setStyleSheet(
+            f"""
+            QWidget#adjust_panel_pinned {{
+                background-color: {theme.SURFACE};
+            }}
+            """
+        )
+        # Left/right margins match the scrolled content's so the pinned
+        # histogram lines up with the sections under it rather than sitting
+        # inset from them; no bottom margin, because the scroll area's own top
+        # margin provides that gap.
+        pinned_layout = QVBoxLayout(pinned)
+        pinned_layout.setContentsMargins(14, 10, 14, 0)
+        pinned_layout.setSpacing(6)
+        card_layout.addWidget(pinned)
+        self._pinned_header = pinned
+
         card_layout.addWidget(scroll)
         self._scroll_area = scroll
 
@@ -1346,20 +1572,34 @@ class ImageAdjustPanelWidget(QWidget):
         )
         scroll.setWidget(inner)
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(14, 10, 14, 10)
+        # Top margin is smaller than the pinned region's: the gap under the
+        # pinned block is the sum of the two.
+        layout.setContentsMargins(14, 6, 14, 10)
         layout.setSpacing(6)
 
         header = QHBoxLayout()
         title = QLabel("Adjust")
         title.setObjectName("adjust_panel_title")
         header.addWidget(title)
+        self._saved_lbl = QLabel("")
+        self._saved_lbl.setObjectName("adjust_saved_lbl")
+        self._saved_lbl.setStyleSheet(
+            f"color: {theme.INK_FAINT}; font-size: 11px; font-weight: 600; padding: 0 4px;"
+        )
+        self._saved_lbl.setVisible(False)
+        header.addWidget(self._saved_lbl)
         header.addStretch(1)
         self._build_compare_button(header)
+        self._build_header_export_button(header)
         copy_btn = QPushButton("Copy")
         copy_btn.setObjectName("adjust_reset_btn")  # share Reset's compact style
         copy_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         copy_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        copy_btn.setToolTip("Copy this image's edit settings (session clipboard)")
+        copy_btn.setToolTip(
+            theme.with_shortcut(
+                "Copy this image's edit settings (session clipboard)", "Ctrl", "C"
+            )
+        )
         copy_btn.clicked.connect(self._on_copy_settings_clicked)
         header.addWidget(copy_btn)
         self._copy_btn = copy_btn
@@ -1367,7 +1607,11 @@ class ImageAdjustPanelWidget(QWidget):
         self._paste_btn.setObjectName("adjust_reset_btn")
         self._paste_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._paste_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._paste_btn.setToolTip("Apply the copied edit settings to this image")
+        self._paste_btn.setToolTip(
+            theme.with_shortcut(
+                "Apply the copied edit settings to this image", "Ctrl", "V"
+            )
+        )
         self._paste_btn.setEnabled(_edit_settings_clipboard() is not None)
         self._paste_btn.clicked.connect(self._on_paste_settings_clicked)
         header.addWidget(self._paste_btn)
@@ -1375,9 +1619,14 @@ class ImageAdjustPanelWidget(QWidget):
         reset_btn.setObjectName("adjust_reset_btn")
         reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         reset_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        reset_btn.setToolTip(
+            "Reset every adjustment on this photo to its defaults, including "
+            "as-shot white balance.\n\n"
+            "Click a single slider's value to reset just that one."
+        )
         reset_btn.clicked.connect(self._on_reset_clicked)
         header.addWidget(reset_btn)
-        layout.addLayout(header)
+        pinned_layout.addLayout(header)
 
         # Set per page below: D/B/H are dodge, burn and heal, none of which
         # the Masks page has, and it was listing them at someone painting a
@@ -1390,11 +1639,11 @@ class ImageAdjustPanelWidget(QWidget):
         # detail lives in this label's tooltip, which is where someone who
         # actually wants it will look.
         hint.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 9px; letter-spacing: 0.2px;"
+            f"color: {theme.INK_FAINT}; font-size: 10px; letter-spacing: 0.2px;"
         )
         hint.setWordWrap(True)
         hint.setToolTip(self._HEADER_HINT_TIPS[0])
-        layout.addWidget(hint)
+        pinned_layout.addWidget(hint)
 
         # Camera calibration profile banner. A saved profile is applied
         # automatically to every image from the same body that has no XMP
@@ -1406,7 +1655,7 @@ class ImageAdjustPanelWidget(QWidget):
         cp_row.setSpacing(6)
         self._camera_profile_lbl = QLabel("")
         self._camera_profile_lbl.setStyleSheet(
-            f"color: {theme.EMBER}; font-size: 10px;"
+            f"color: {theme.EMBER}; font-size: 11px;"
         )
         self._camera_profile_lbl.setWordWrap(True)
         cp_row.addWidget(self._camera_profile_lbl, 1)
@@ -1449,7 +1698,7 @@ class ImageAdjustPanelWidget(QWidget):
         tabs_wrap_layout.setContentsMargins(0, 4, 0, 0)
         tabs_wrap_layout.setSpacing(0)
         tabs_wrap_layout.addWidget(self._panel_tabs)
-        layout.addWidget(tabs_wrap)
+        pinned_layout.addWidget(tabs_wrap)
 
         self._tab_page_global = QWidget()
         global_layout = QVBoxLayout(self._tab_page_global)
@@ -1507,19 +1756,49 @@ class ImageAdjustPanelWidget(QWidget):
         self.sect_anamorphic = CollapsibleSection("Anamorphic", settings_key="anamorphic")
         self.sect_lut = CollapsibleSection("Looks (.cube / .xmp)", settings_key="lut")
 
-        # Add Collapsible Sections to their tab pages
-        global_layout.addWidget(self.sect_histogram)
-        global_layout.addWidget(self.sect_light)
-        global_layout.addWidget(self.sect_color)
-        global_layout.addWidget(self.sect_curve)
-        global_layout.addWidget(self.sect_hsl)
-        global_layout.addWidget(self.sect_detail)
-        global_layout.addWidget(self.sect_noise)
-        global_layout.addWidget(self.sect_effects)
-        global_layout.addWidget(self.sect_local)
-        global_layout.addWidget(self.sect_lut)
-        global_layout.addWidget(self.sect_transform)
-        global_layout.addWidget(self.sect_anamorphic)
+        # Add Collapsible Sections to their tab pages.
+        #
+        # Histogram is the exception: it goes in the pinned region rather than
+        # the scrolled list, so it stays on screen while you work further down
+        # the panel. It keeps its collapse header -- pinning costs ~120px of
+        # panel height, and someone who does not want to spend it can still
+        # fold it away.
+        pinned_layout.addWidget(self.sect_histogram)
+
+        # Global sections are laid out from a LIST rather than by twelve
+        # addWidget calls, because the user can rearrange them (right-click a
+        # section header) and the arrangement is saved. The list is the single
+        # source of truth for what order means; nothing here may assume a
+        # section's position.
+        self._global_layout = global_layout
+        self._global_sections = {
+            "light": self.sect_light,
+            "color": self.sect_color,
+            "curve": self.sect_curve,
+            "hsl": self.sect_hsl,
+            "detail": self.sect_detail,
+            "noise": self.sect_noise,
+            "effects": self.sect_effects,
+            "local": self.sect_local,
+            "lut": self.sect_lut,
+            "transform": self.sect_transform,
+            "anamorphic": self.sect_anamorphic,
+        }
+        self._section_order = _sanitize_section_order(self._load_section_order())
+        self._apply_section_order()
+        self._section_drag_key = None
+        for key, sect in self._global_sections.items():
+            sect.header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            sect.header.customContextMenuRequested.connect(
+                lambda _pos, k=key: self._on_section_context_menu(k)
+            )
+            # Drag the grip to reorder. That is the ONLY way to rearrange --
+            # the header's right-click menu offers Reset Order and nothing
+            # else, deliberately.
+            grip = sect.enable_reorder_grip()
+            grip.grab_started.connect(lambda k=key: self._begin_section_drag(k))
+            grip.grab_moved.connect(lambda y, k=key: self._drag_section_to(k, y))
+            grip.grab_ended.connect(self._end_section_drag)
 
         # Masks page. Dodge & burn stays on Global for now: it is a signed
         # exposure map, not a layer in the mask stack, and moving it would
@@ -1554,7 +1833,7 @@ class ImageAdjustPanelWidget(QWidget):
                     color: #96897A;
                     border: 1px solid #404040;
                     padding: 6px 12px;
-                    font-size: 11px;
+                    font-size: 12px;
                 }
                 QPushButton:checked {
                     background: #404040;
@@ -1624,7 +1903,7 @@ class ImageAdjustPanelWidget(QWidget):
                     color: #96897A;
                     border: 1px solid #404040;
                     padding: 4px 10px;
-                    font-size: 10px;
+                    font-size: 11px;
                 }
                 QPushButton:checked {
                     background: #404040;
@@ -1666,6 +1945,11 @@ class ImageAdjustPanelWidget(QWidget):
 
         # WB situation presets (Daylight/Cloudy/…) sit above Temp/Tint.
         self._build_wb_preset_row(self.sect_color)
+        # Auto tone sits above the six sliders it sets, for the same reason the
+        # WB presets sit above Temp/Tint: it is the one-press version of the
+        # rows beneath it. Both are built before the slider loop below, which
+        # is what appends those rows.
+        self._build_auto_tone_row(self.sect_light)
 
         # Loop through sliders and assign to sections
         for spec in SLIDER_SPECS:
@@ -1708,7 +1992,7 @@ class ImageAdjustPanelWidget(QWidget):
             row.setSpacing(6)
             name_lbl = QLabel(spec.label)
             name_lbl.setProperty("class", "adjust_slider_label")
-            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
             name_lbl.setFixedWidth(82)
             name_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             row.addWidget(name_lbl)
@@ -1765,7 +2049,7 @@ class ImageAdjustPanelWidget(QWidget):
 
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
-            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
             val_lbl.setFixedWidth(52)
             val_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1789,7 +2073,7 @@ class ImageAdjustPanelWidget(QWidget):
         method_row = QHBoxLayout()
         method_row.setSpacing(6)
         method_lbl = QLabel("Chroma NR")
-        method_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        method_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         method_lbl.setMinimumWidth(78)
         method_row.addWidget(method_lbl)
         
@@ -1805,7 +2089,7 @@ class ImageAdjustPanelWidget(QWidget):
         chroma_amt_row = QHBoxLayout()
         chroma_amt_row.setSpacing(6)
         chroma_amt_lbl = QLabel("Chroma Amount")
-        chroma_amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        chroma_amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         chroma_amt_lbl.setMinimumWidth(78)
         chroma_amt_row.addWidget(chroma_amt_lbl)
         self._chroma_nr_amount_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -1817,7 +2101,7 @@ class ImageAdjustPanelWidget(QWidget):
         )
         self._chroma_nr_amount_value = AdjustValueLabel()
         self._chroma_nr_amount_value.setProperty("class", "adjust_slider_value")
-        self._chroma_nr_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._chroma_nr_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
         self._chroma_nr_amount_value.setFixedWidth(52)
         self._chroma_nr_amount_value.setText(str(int(CHROMA_NR_ON_VALUE)))
         self._chroma_nr_amount_slider.valueChanged.connect(self._on_chroma_nr_amount_changed)
@@ -1838,11 +2122,11 @@ class ImageAdjustPanelWidget(QWidget):
         lbl_vbox.setContentsMargins(0, 0, 0, 0)
         
         lens_label = QLabel("Lens correction")
-        lens_label.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        lens_label.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         lbl_vbox.addWidget(lens_label)
         
         self._lens_profile_lbl = QLabel("")
-        self._lens_profile_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        self._lens_profile_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         self._lens_profile_lbl.setWordWrap(True)
         lbl_vbox.addWidget(self._lens_profile_lbl)
         
@@ -1887,7 +2171,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_row = QHBoxLayout()
         db_row.setSpacing(6)
         db_mode_lbl = QLabel("Mode")
-        db_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_mode_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_mode_lbl.setMinimumWidth(78)
         db_row.addWidget(db_mode_lbl)
         self._dodge_btn = QPushButton("Dodge (D)")
@@ -1934,6 +2218,10 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
             db_row.addWidget(btn, 1)
+        _apply_tool_icon(self._dodge_btn, _LOCAL_BRUSH_ICONS["dodge"])
+        _apply_tool_icon(self._burn_btn, _LOCAL_BRUSH_ICONS["burn"])
+        _apply_tool_icon(self._erase_btn, _LOCAL_BRUSH_ICONS["erase"])
+        _apply_tool_icon(self._heal_btn, _LOCAL_BRUSH_ICONS["heal"])
         self._dodge_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._dodge_btn, on))
         self._burn_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._burn_btn, on))
         self._erase_btn.toggled.connect(lambda on: self._on_dodge_burn_toggled(self._erase_btn, on))
@@ -1946,7 +2234,7 @@ class ImageAdjustPanelWidget(QWidget):
         clear_row = QHBoxLayout()
         clear_row.setSpacing(6)
         clear_lbl = QLabel("Clear")
-        clear_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        clear_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         clear_lbl.setMinimumWidth(78)
         clear_row.addWidget(clear_lbl)
 
@@ -1972,7 +2260,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_actions_row = QHBoxLayout()
         db_actions_row.setSpacing(6)
         db_actions_lbl = QLabel("Options")
-        db_actions_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_actions_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_actions_lbl.setMinimumWidth(78)
         db_actions_row.addWidget(db_actions_lbl)
 
@@ -1986,6 +2274,7 @@ class ImageAdjustPanelWidget(QWidget):
             "Always available, with or without a tool armed -- arming one just\n"
             "turns it on for you. Shortcut: M"
         )
+        _apply_tool_icon(self._db_show_mask_btn, "fa5.eye")
         self._db_show_mask_btn.toggled.connect(self._on_mask_btn_toggled)
         db_actions_row.addWidget(self._db_show_mask_btn, 1)
 
@@ -2002,13 +2291,14 @@ class ImageAdjustPanelWidget(QWidget):
             "Shared by Dodge/Burn and Mask Add; not used by Heal or Erase "
             "(either brush system)."
         )
+        _apply_tool_icon(self._db_edge_btn, "fa5s.vector-square")
         db_actions_row.addWidget(self._db_edge_btn, 1)
         db_container_layout.addLayout(db_actions_row)
 
         db_size_row = QHBoxLayout()
         db_size_row.setSpacing(6)
         db_size_lbl = QLabel("Brush Size")
-        db_size_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_size_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_size_lbl.setMinimumWidth(78)
         db_size_row.addWidget(db_size_lbl)
         self._db_size_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2029,7 +2319,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_strength_row = QHBoxLayout()
         db_strength_row.setSpacing(6)
         db_strength_lbl = QLabel("Brush Flow")
-        db_strength_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_strength_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_strength_lbl.setMinimumWidth(78)
         db_strength_row.addWidget(db_strength_lbl)
         self._db_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2055,7 +2345,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_feather_row = QHBoxLayout()
         db_feather_row.setSpacing(6)
         db_feather_lbl = QLabel("Brush Feather")
-        db_feather_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_feather_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_feather_lbl.setMinimumWidth(78)
         db_feather_row.addWidget(db_feather_lbl)
         self._db_feather_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2083,7 +2373,7 @@ class ImageAdjustPanelWidget(QWidget):
         db_mask_str_row.setContentsMargins(0, 0, 0, 0)
         db_mask_str_row.setSpacing(6)
         db_mask_str_lbl = QLabel("Effect Strength")
-        db_mask_str_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        db_mask_str_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         db_mask_str_lbl.setMinimumWidth(78)
         db_mask_str_row.addWidget(db_mask_str_lbl)
         self._db_mask_strength_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2100,7 +2390,7 @@ class ImageAdjustPanelWidget(QWidget):
         )
         self._db_mask_strength_value = AdjustValueLabel()
         self._db_mask_strength_value.setProperty("class", "adjust_slider_value")
-        self._db_mask_strength_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._db_mask_strength_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
         self._db_mask_strength_value.setFixedWidth(52)
         self._db_mask_strength_value.setText(f"{DB_DEFAULT_STRENGTH:.2f}")
         self._db_mask_strength_slider.valueChanged.connect(self._on_db_mask_strength_changed)
@@ -2127,7 +2417,7 @@ class ImageAdjustPanelWidget(QWidget):
                 border: 1px solid {theme.LINE};
                 border-radius: 6px;
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
                 font-weight: 500;
                 padding: 4px 8px;
             }}
@@ -2167,7 +2457,7 @@ class ImageAdjustPanelWidget(QWidget):
                 border: 1px solid {theme.EMBER};
                 border-radius: 6px;
                 color: {theme.EMBER};
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 600;
                 padding: 4px 8px;
             }}
@@ -2211,6 +2501,45 @@ class ImageAdjustPanelWidget(QWidget):
         row.addWidget(btn)
         self._compare_btn = btn
 
+    def _build_header_export_button(self, row: QHBoxLayout) -> None:
+        """Compact Export control present on both Global and Masks.
+
+        The large Export button stays on Global only (finishing is not the
+        next move while painting a mask). This header twin shares the same
+        menu so Masks can still finish without switching pages.
+        """
+        btn = QPushButton()
+        btn.setObjectName("adjust_compare_btn")
+        btn.setFixedSize(22, 22)
+        btn.setIconSize(QSize(13, 13))
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setToolTip("Export baked image — same formats as the Export button on Global.")
+        _apply_tool_icon(btn, "fa5s.file-export", color=theme.INK_MUTED, size=13)
+        row.addWidget(btn)
+        self._header_export_btn = btn
+
+    def flash_saved(self, *, cleared: bool = False) -> None:
+        """Quiet header acknowledgement after a sidecar write."""
+        lbl = getattr(self, "_saved_lbl", None)
+        if lbl is None:
+            return
+        lbl.setText("Cleared" if cleared else "Saved")
+        lbl.setVisible(True)
+        timer = getattr(self, "_saved_flash_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._clear_saved_flash)
+            self._saved_flash_timer = timer
+        timer.start(2200)
+
+    def _clear_saved_flash(self) -> None:
+        lbl = getattr(self, "_saved_lbl", None)
+        if lbl is not None:
+            lbl.clear()
+            lbl.setVisible(False)
+
     def _on_compare_toggled(self, checked: bool) -> None:
         self._sync_compare_icon(checked)
         self.compare_toggled.emit(bool(checked))
@@ -2244,7 +2573,7 @@ class ImageAdjustPanelWidget(QWidget):
         row = QHBoxLayout()
         row.setSpacing(6)
         lbl = QLabel("WB")
-        lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         lbl.setFixedWidth(82)
         row.addWidget(lbl)
         combo = QComboBox()
@@ -2266,6 +2595,217 @@ class ImageAdjustPanelWidget(QWidget):
         sect.add_layout(row)
         self._wb_preset_combo = combo
         self._wb_preset_block = False
+
+    # --- Global section order ------------------------------------------
+    #
+    # Reorder via right-click on a section header rather than drag-and-drop.
+    # The header already owns mouse-press for click-to-collapse (see
+    # CollapsibleSection._on_header_pressed), so a drag gesture would have to
+    # be teased apart from a click by distance and timing -- and getting that
+    # wrong breaks collapsing, which people use constantly, to add reordering,
+    # which they do once. A context menu costs neither.
+
+    def _settings(self) -> QSettings:
+        return QSettings("RAWviewer", "RAWviewer")
+
+    def _load_section_order(self) -> list:
+        import json
+
+        try:
+            raw = self._settings().value(_GLOBAL_SECTION_ORDER_SETTING, "")
+            if not raw:
+                return []
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode("utf-8", errors="ignore")
+            if isinstance(raw, (list, tuple)):
+                return list(raw)
+            return json.loads(raw)
+        except Exception:
+            return []
+
+    def _save_section_order(self) -> None:
+        import json
+
+        try:
+            self._settings().setValue(
+                _GLOBAL_SECTION_ORDER_SETTING, json.dumps(list(self._section_order))
+            )
+        except Exception:
+            pass
+
+    def _apply_section_order(self) -> None:
+        """Lay the Global sections out in ``self._section_order``.
+
+        removeWidget before addWidget, deliberately: QBoxLayout.addWidget on a
+        widget the layout already holds appends a SECOND entry rather than
+        moving the first, so re-adding without removing duplicates every
+        section on the second call.
+
+        Widgets in ``global_layout`` that are not sections -- the camera
+        profile banner -- are never touched, so they keep their position
+        instead of being pushed around by index arithmetic.
+        """
+        layout = getattr(self, "_global_layout", None)
+        if layout is None:
+            return
+        for key in self._section_order:
+            sect = self._global_sections.get(key)
+            if sect is None:
+                continue
+            layout.removeWidget(sect)
+            layout.addWidget(sect)
+        # Export is in this same layout but is NOT a section, and re-adding the
+        # sections above appends them to the end -- i.e. after it. Without this
+        # it stays wherever it was first added and every section lands beneath
+        # it, so the first drag teleported a 40px Export button to the top of
+        # the page. Re-append it so it stays last however the sections move.
+        export_btn = getattr(self, "_export_btn", None)
+        if export_btn is not None and layout.indexOf(export_btn) != -1:
+            layout.removeWidget(export_btn)
+            layout.addWidget(export_btn)
+        # Recompute geometry NOW rather than at the next event-loop pass.
+        # _drag_section_to picks its target by comparing the pointer against
+        # section midpoints, and it runs many times per drag -- if the widgets
+        # still report the positions they held before this call, the next move
+        # decides against a stale layout and the sections jitter back and
+        # forth under the cursor.
+        layout.activate()
+
+    def _visible_section_order(self) -> list:
+        """Order with build-time-hidden sections dropped.
+
+        Tone Curve / HSL / Local / Masks can be compiled out
+        (``_SHOW_TONE_CURVE_UI`` and friends). Moving a section past one of
+        those must not cost a press that appears to do nothing, so the menu
+        steps over them.
+        """
+        return [
+            k
+            for k in self._section_order
+            if (s := self._global_sections.get(k)) is not None and not s.isHidden()
+        ]
+
+    def _set_visible_section_order(self, visible: list) -> None:
+        """Write a reordered VISIBLE list back over the full order.
+
+        Hidden sections keep their slots rather than being swept to the end:
+        turning a compiled-out section back on should put it back where it
+        was, not wherever the splice happened to leave it.
+        """
+        slots = [i for i, k in enumerate(self._section_order) if k in visible]
+        for slot, k in zip(slots, visible):
+            self._section_order[slot] = k
+
+    def _begin_section_drag(self, key: str) -> None:
+        self._section_drag_key = key
+
+    def _drag_section_to(self, key: str, global_y: int) -> None:
+        """Live-reorder while the grip is held.
+
+        Reorders as you move rather than showing an insertion line and
+        committing on release: the sections ARE the preview, and a drop
+        indicator would be a second, less honest depiction of the same thing.
+
+        The target is chosen by which section's vertical midpoint the pointer
+        has passed, which is what makes the swap happen when the dragged
+        header visually overtakes its neighbour rather than at the moment it
+        first touches it.
+        """
+        if self._section_drag_key != key:
+            return
+        visible = self._visible_section_order()
+        if key not in visible:
+            return
+        pos = visible.index(key)
+        target = pos
+        for i, k in enumerate(visible):
+            sect = self._global_sections.get(k)
+            if sect is None or i == pos:
+                continue
+            top = sect.mapToGlobal(sect.rect().topLeft()).y()
+            mid = top + sect.height() // 2
+            if i < pos and global_y < mid:
+                target = min(target, i)
+            elif i > pos and global_y > mid:
+                target = max(target, i)
+        if target == pos:
+            return
+        visible.insert(target, visible.pop(pos))
+        self._set_visible_section_order(visible)
+        self._apply_section_order()
+
+    def _end_section_drag(self) -> None:
+        if self._section_drag_key is None:
+            return
+        self._section_drag_key = None
+        # Saved once on release, not on every move: a drag crosses many
+        # positions and only the one it ends on is a decision.
+        self._save_section_order()
+
+    def _reset_section_order(self) -> None:
+        self._section_order = list(_GLOBAL_SECTION_DEFAULT_ORDER)
+        self._apply_section_order()
+        self._save_section_order()
+
+    def _on_section_context_menu(self, key: str) -> None:
+        """Right-click a header: Reset Order only.
+
+        Move Up / Move Down used to live here and were removed once the grip
+        shipped -- two ways to do the same reordering, one of them strictly
+        slower. Reset Order stays because it is not reordering: without it,
+        undoing an arrangement would mean dragging every section back by hand
+        to an order the user would have to remember.
+        """
+        if key not in self._global_sections:
+            return
+        menu = QMenu(self)
+        reset = menu.addAction("Reset Order")
+        reset.setEnabled(list(self._section_order) != list(_GLOBAL_SECTION_DEFAULT_ORDER))
+        reset.triggered.connect(self._reset_section_order)
+        menu.exec(QCursor.pos())
+
+    def _build_auto_tone_row(self, sect: CollapsibleSection) -> None:
+        """One-press Auto Tone above the six Light sliders it writes."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        lbl = QLabel("Auto")
+        lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+        lbl.setFixedWidth(82)
+        row.addWidget(lbl)
+        btn = QPushButton("AUTO TONE")
+        # Shares the Auto WB / Auto straighten object name so all three
+        # one-press estimators look like one another rather than like three
+        # separately-styled buttons.
+        btn.setObjectName("adjust_auto_wb_btn")
+        btn.setFixedHeight(20)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.setToolTip(
+            "Auto tone — set Exposure, Contrast, Highlights, Shadows, Whites "
+            "and Blacks from the image.\n\n"
+            "Reads the unedited photo, so pressing it twice changes nothing "
+            "the second time. Every slider it moves stays yours to refine, "
+            "and Ctrl+Z undoes the lot."
+        )
+        btn.clicked.connect(lambda: self.auto_tone_requested.emit())
+        row.addWidget(btn, 1)
+        sect.add_layout(row)
+        self._auto_tone_btn = btn
+
+    def apply_auto_tone(self, values: dict) -> None:
+        """Overwrite the six Light sliders from an estimate, and save.
+
+        An overwrite, not a merge, and for the same reason
+        ``apply_picked_white_balance`` overwrites Temperature/Tint: the
+        estimator measured the UNEDITED base, so its numbers are absolute. A
+        merge would leave a Blacks from a previous press fighting an estimate
+        that already accounts for it.
+        """
+        current = self.get_adjustments()
+        for key, value in values.items():
+            current[key] = float(value)
+        self.set_adjustments(current)
+        self._emit_preview_and_save()
 
     def _on_wb_preset_changed(self, _index: int) -> None:
         if getattr(self, "_wb_preset_block", False):
@@ -2597,7 +3137,7 @@ class ImageAdjustPanelWidget(QWidget):
         col.addLayout(row)
 
         hint = QLabel("Only for footage shot through an anamorphic adapter.")
-        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         hint.setWordWrap(True)
         col.addWidget(hint)
 
@@ -2631,7 +3171,7 @@ class ImageAdjustPanelWidget(QWidget):
             "(default Rec.709 = after gamma; Linear = scene-linear); "
             ".xmp applies once like pasting a look."
         )
-        tip.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 10px;")
+        tip.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
         tip.setWordWrap(True)
         sect.add_widget(tip)
 
@@ -2663,7 +3203,7 @@ class ImageAdjustPanelWidget(QWidget):
                 background: transparent;
                 border: none;
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
                 outline: none;
             }}
             QListWidget::item {{
@@ -2689,7 +3229,7 @@ class ImageAdjustPanelWidget(QWidget):
         amt_row = QHBoxLayout()
         amt_row.setSpacing(6)
         amt_lbl = QLabel("LUT Amount")
-        amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         amt_lbl.setMinimumWidth(78)
         amt_row.addWidget(amt_lbl)
         self._lut_amount_slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2698,7 +3238,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._lut_amount_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._lut_amount_slider.setToolTip("Strength of the active .cube LUT (ignored for .xmp)")
         self._lut_amount_value = QLabel("100")
-        self._lut_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+        self._lut_amount_value.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
         self._lut_amount_value.setMinimumWidth(28)
         self._lut_amount_slider.valueChanged.connect(self._on_lut_amount_changed)
         self._lut_amount_slider.sliderReleased.connect(self._emit_preview_and_save)
@@ -2709,7 +3249,7 @@ class ImageAdjustPanelWidget(QWidget):
         space_row = QHBoxLayout()
         space_row.setSpacing(6)
         space_lbl = QLabel("LUT Space")
-        space_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        space_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         space_lbl.setMinimumWidth(78)
         space_row.addWidget(space_lbl)
         from raw_lut import LUT_SPACE_LINEAR, LUT_SPACE_REC709
@@ -3028,7 +3568,7 @@ class ImageAdjustPanelWidget(QWidget):
         color_row = QHBoxLayout()
         color_row.setSpacing(6)
         color_lbl = QLabel("Color")
-        color_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+        color_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         color_lbl.setFixedWidth(82)
         color_row.addWidget(color_lbl)
         self._hsl_color_combo = QComboBox()
@@ -3045,7 +3585,7 @@ class ImageAdjustPanelWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(6)
             name_lbl = QLabel(label)
-            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
             name_lbl.setFixedWidth(82)
             row.addWidget(name_lbl)
             slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -3062,7 +3602,7 @@ class ImageAdjustPanelWidget(QWidget):
             row.addWidget(slider, 1)
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
-            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+            val_lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
             val_lbl.setFixedWidth(52)
             val_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3293,10 +3833,10 @@ class ImageAdjustPanelWidget(QWidget):
             if name:
                 if on:
                     lbl.setText(f"{name} (Applied)")
-                    lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 10px; font-weight: 500;")
+                    lbl.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px; font-weight: 500;")
                 else:
                     lbl.setText(name)
-                    lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+                    lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
 
     def set_lens_correction_available(self, available: bool, profile_name: str = "") -> None:
         """Show/hide the toggle and display the matched lens profile name."""
@@ -3374,7 +3914,7 @@ class ImageAdjustPanelWidget(QWidget):
     # mask about three tools that page does not have.
     _HEADER_HINTS = (
         "E closes · hold D / B / X / H = Dodge / Burn / Erase / Heal · scroll = size",
-        "E closes · P = Add · X = Erase · again to put away · M shows mask · scroll = size",
+        "E closes · P = Add · X = Erase · I = Invert · again to put away · M shows mask · scroll = size",
     )
 
     _HEADER_HINT_TIPS = (
@@ -3408,6 +3948,13 @@ class ImageAdjustPanelWidget(QWidget):
         masks = index == 1
         self._tab_page_global.setVisible(not masks)
         self._tab_page_masks.setVisible(masks)
+
+        # The histogram is pinned outside both pages, so page visibility does
+        # not carry it. It reads the global render and there is nothing on the
+        # Masks page it describes, so it follows Global by hand.
+        sect_hist = getattr(self, "sect_histogram", None)
+        if sect_hist is not None and self.histogram_widget is not None:
+            sect_hist.setVisible(not masks)
 
         hint = getattr(self, "_header_hint", None)
         if hint is not None:
@@ -4023,6 +4570,16 @@ class ImageAdjustPanelWidget(QWidget):
                 ("Defringe", "Defringe", 0, 100, 1.0),
             ),
         ),
+        (
+            "Blur",
+            (
+                # Continuous depth of field on Depth masks; soft region blur
+                # on every other mask (Smart Object + Invert → background).
+                ("Blur", "Amount", 0, 100, 1.0),
+                # 100 = sharp near / soft far (Depth alpha convention).
+                ("BlurFocus", "Focus", 0, 100, 1.0),
+            ),
+        ),
     )
 
     _MASK_SLIDER_SPECS = tuple(
@@ -4043,14 +4600,14 @@ class ImageAdjustPanelWidget(QWidget):
         row.setSpacing(8)
         label = QLabel(title.upper())
         label.setStyleSheet(
-            f"color: {theme.INK}; font-size: 9px; font-weight: 700; "
+            f"color: {theme.INK}; font-size: 10px; font-weight: 700; "
             "letter-spacing: 1.4px;"
         )
         row.addWidget(label)
         row.addStretch(1)
         if note:
             hint = QLabel(note)
-            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 9px;")
+            hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
             row.addWidget(hint)
         return wrap
 
@@ -4116,7 +4673,7 @@ class ImageAdjustPanelWidget(QWidget):
                 border: 1px solid {theme.LINE};
                 border-radius: 4px;
                 color: {theme.INK};
-                font-size: 11px;
+                font-size: 12px;
             }}
             QTreeWidget::item {{
                 padding: 3px 4px 3px 7px;
@@ -4187,7 +4744,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_armed_hint = QLabel("")
         self._mask_armed_hint.setWordWrap(True)
         self._mask_armed_hint.setStyleSheet(
-            f"color: {theme.EMBER}; font-size: 10px; padding: 1px 2px;"
+            f"color: {theme.EMBER}; font-size: 11px; padding: 1px 2px;"
         )
         self._mask_armed_hint.setVisible(False)
         col.addWidget(self._mask_armed_hint)
@@ -4200,7 +4757,7 @@ class ImageAdjustPanelWidget(QWidget):
         # copy but not of the reason to make one: re-aiming a mask you already
         # have is much less work than painting a second one from nothing, and
         # both useful cases start from the copy either way.
-        self._mask_dup_btn = QPushButton("⧉")
+        self._mask_dup_btn = QPushButton()
         self._mask_dup_btn.setObjectName("adjust_mask_delete_btn")  # same quiet chrome
         self._mask_dup_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._mask_dup_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -4209,16 +4766,22 @@ class ImageAdjustPanelWidget(QWidget):
             "Duplicate this mask — same coverage and the same adjustments,\n"
             "as a separate mask you can then re-aim or re-tune."
         )
+        _apply_tool_icon(
+            self._mask_dup_btn, _MASK_EDIT_ICONS["duplicate"], color=theme.INK_FAINT, size=13
+        )
         self._mask_dup_btn.clicked.connect(self._on_mask_duplicate_clicked)
 
-        self._mask_del_btn = QPushButton("✕")
+        self._mask_del_btn = QPushButton()
         self._mask_del_btn.setObjectName("adjust_mask_delete_btn")
         self._mask_del_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._mask_del_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self._mask_del_btn.setFixedWidth(34)
-        # The button is a glyph with no room for "(Delete)", so the key goes
-        # in the tooltip -- the only one of these four where it has to.
+        # Icon-only: the key goes in the tooltip — the only one of these
+        # where the label has no room for "(Delete)".
         self._mask_del_btn.setToolTip("Delete this mask (Delete)")
+        _apply_tool_icon(
+            self._mask_del_btn, _MASK_EDIT_ICONS["delete"], color=theme.INK_FAINT, size=13
+        )
         # Weight follows consequence: Erase and Invert are reversible and read
         # as ordinary buttons; deleting throws work away, so it stays neutral
         # until you reach for it and only then turns the palette's one red.
@@ -4229,7 +4792,7 @@ class ImageAdjustPanelWidget(QWidget):
                 border: 1px solid {theme.LINE};
                 border-radius: 5px;
                 color: {theme.INK_FAINT};
-                font-size: 13px;
+                font-size: 14px;
             }}
             QPushButton#adjust_mask_delete_btn:hover {{
                 color: {theme.HIST_R};
@@ -4253,13 +4816,13 @@ class ImageAdjustPanelWidget(QWidget):
         # SELECTED mask, and it sits beside Erase, which shrinks it. Called
         # Paint it read as a way to start a mask -- which is what it used to
         # be, before Create new mask took that over.
-        self._mask_paint_btn = QPushButton("Add (P)")
+        self._mask_paint_btn = QPushButton("Add to this mask (P)")
         self._mask_erase_btn = QPushButton("Erase (X)")
-        self._mask_invert_btn = QPushButton("Invert")
+        self._mask_invert_btn = QPushButton("Invert (I)")
         for btn, tip in (
             (
                 self._mask_paint_btn,
-                "Add (P) — brush more coverage into the SELECTED mask.\n\n"
+                "Add to this mask (P) — brush more coverage into the SELECTED mask.\n\n"
                 "Press P or click this button to arm; press / click again to "
                 "put the brush away. Sweep or drag on the photo to paint.\n"
                 "Repeated strokes build toward full coverage.\n"
@@ -4277,7 +4840,7 @@ class ImageAdjustPanelWidget(QWidget):
             ),
             (
                 self._mask_invert_btn,
-                "Invert — apply this mask's adjustments everywhere EXCEPT its "
+                "Invert (I) — apply this mask's adjustments everywhere EXCEPT its "
                 "covered area.\n\n"
                 "Mask the subject, then invert to adjust the background instead.",
             ),
@@ -4287,6 +4850,9 @@ class ImageAdjustPanelWidget(QWidget):
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
             btn.setToolTip(tip)
+        _apply_tool_icon(self._mask_paint_btn, _MASK_EDIT_ICONS["paint"])
+        _apply_tool_icon(self._mask_erase_btn, _MASK_EDIT_ICONS["erase"])
+        _apply_tool_icon(self._mask_invert_btn, _MASK_EDIT_ICONS["invert"])
         self._mask_paint_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_paint_btn, on)
         )
@@ -4296,6 +4862,20 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_paint_btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
         self._mask_erase_btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
         self._mask_invert_btn.toggled.connect(self._on_mask_invert_toggled)
+
+        self._mask_effect_btn = QPushButton("Effect")
+        self._mask_effect_btn.setObjectName("adjust_db_btn")
+        self._mask_effect_btn.setCheckable(True)
+        self._mask_effect_btn.setChecked(True)
+        self._mask_effect_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_effect_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._mask_effect_btn.setToolTip(
+            "Effect — apply this mask's adjustments.\n\n"
+            "Off disables the adjustment while keeping the mask in the list "
+            "(unlike the eye, which only hides the coloured overlay)."
+        )
+        _apply_tool_icon(self._mask_effect_btn, "fa5s.power-off")
+        self._mask_effect_btn.toggled.connect(self._on_mask_effect_toggled)
         # Assembled after the AI/gradient rows below so the sections read in
         # working order: what you have, how to make one, what to do to it.
 
@@ -4337,6 +4917,8 @@ class ImageAdjustPanelWidget(QWidget):
                 "the nearest\nthings, fading to nothing on the farthest. Use "
                 "it to lift a background,\nadd haze to a distance, or cool "
                 "the far half of a landscape.\n\n"
+                "Raise Blur on this mask for continuous depth of field "
+                "(Focus picks the sharp plane).\n\n"
                 "This one is a fade, not a cutout — the whole photo is "
                 "masked, by varying\namounts. Invert it to grade the "
                 "background instead.",
@@ -4368,6 +4950,21 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_ai_click_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
         )
+        # Hidden arming buttons for Luminance / Color range (same pattern as
+        # AI Selection): create-grid buttons mirror their checked state.
+        self._mask_luma_btn = QPushButton("Luminance")
+        self._mask_color_btn = QPushButton("Color")
+        for _btn in (self._mask_luma_btn, self._mask_color_btn):
+            _btn.setObjectName("adjust_db_btn")
+            _btn.setCheckable(True)
+            _btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            _btn.setVisible(False)
+        self._mask_luma_btn.toggled.connect(
+            lambda on: self._on_mask_tool_toggled(self._mask_luma_btn, on)
+        )
+        self._mask_color_btn.toggled.connect(
+            lambda on: self._on_mask_tool_toggled(self._mask_color_btn, on)
+        )
         # The creation tools are driven by the Create menu now, but the
         # buttons stay as the arming state machine behind it: mutual
         # exclusion, mask_layer_mode(), disarm_*, set_ai_tool_used and the
@@ -4395,7 +4992,11 @@ class ImageAdjustPanelWidget(QWidget):
                 self._mask_ai_click_btn,
             ):
                 _btn.setEnabled(False)
-        for _btn in (self._mask_ai_click_btn,):
+        for _btn in (
+            self._mask_ai_click_btn,
+            self._mask_luma_btn,
+            self._mask_color_btn,
+        ):
             _btn.toggled.connect(lambda _on: self._sync_mask_armed_hint())
             _btn.toggled.connect(lambda _on: self._sync_mask_create_buttons())
 
@@ -4410,6 +5011,7 @@ class ImageAdjustPanelWidget(QWidget):
         tools_row.addWidget(self._mask_paint_btn, 1)
         tools_row.addWidget(self._mask_erase_btn, 1)
         tools_row.addWidget(self._mask_invert_btn, 1)
+        tools_row.addWidget(self._mask_effect_btn, 1)
         tools_row.addWidget(self._mask_dup_btn)
         tools_row.addWidget(self._mask_del_btn)
         col.addLayout(tools_row)
@@ -4436,7 +5038,7 @@ class ImageAdjustPanelWidget(QWidget):
             row = QHBoxLayout()
             row.setSpacing(6)
             lbl = QLabel(label)
-            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+            lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
             lbl.setMinimumWidth(78)
             row.addWidget(lbl)
             mirror = AdjustSlider(Qt.Orientation.Horizontal)
@@ -4479,6 +5081,7 @@ class ImageAdjustPanelWidget(QWidget):
             self._mask_edge_btn.setToolTip(
                 "Keep brush paint on the subject under the cursor."
             )
+        _apply_tool_icon(self._mask_edge_btn, "fa5s.vector-square")
         brush_col.addWidget(self._mask_edge_btn)
 
         col.addWidget(brush_wrap)
@@ -4521,13 +5124,28 @@ class ImageAdjustPanelWidget(QWidget):
                 row = QHBoxLayout()
                 row.setSpacing(6)
                 lbl = QLabel(label)
-                lbl.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+                lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
                 lbl.setMinimumWidth(78)
                 row.addWidget(lbl)
                 slider = AdjustSlider(Qt.Orientation.Horizontal)
                 slider.setRange(lo, hi)
-                slider.setValue(0)
+                # Focus defaults to near-sharp (100); every other mask adj is 0.
+                slider.setValue(100 if key == "BlurFocus" else 0)
                 slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                if key == "Blur":
+                    slider.setToolTip(
+                        "Blur — softens the masked region.\n\n"
+                        "On a Depth mask this is continuous depth of field: "
+                        "blur grows with distance from Focus.\n"
+                        "On other masks it softens coverage (Invert a Smart "
+                        "Object to blur the background)."
+                    )
+                elif key == "BlurFocus":
+                    slider.setToolTip(
+                        "Focus — sharp plane for Depth blur.\n\n"
+                        "100 = nearest sharp (default). Lower to pull focus "
+                        "toward the background. Only affects Depth masks."
+                    )
                 slider.valueChanged.connect(
                     lambda _v, k=key: self._on_mask_slider_changed(k)
                 )
@@ -4535,7 +5153,7 @@ class ImageAdjustPanelWidget(QWidget):
                 row.addWidget(slider, 1)
                 val = AdjustValueLabel()
                 val.setProperty("class", "adjust_slider_value")
-                val.setStyleSheet(f"color: {theme.EMBER}; font-size: 11px;")
+                val.setStyleSheet(f"color: {theme.EMBER}; font-size: 12px;")
                 val.setFixedWidth(52)
                 val.setText("0")
                 val.clicked.connect(lambda k=key: self._reset_mask_slider(k))
@@ -4550,7 +5168,7 @@ class ImageAdjustPanelWidget(QWidget):
             "while Add or Erase is armed."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        hint.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         params_col.addWidget(hint)
         col.addWidget(self._mask_params_wrap)
 
@@ -4560,7 +5178,7 @@ class ImageAdjustPanelWidget(QWidget):
         )
         self._mask_empty_hint.setWordWrap(True)
         self._mask_empty_hint.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 10px;"
+            f"color: {theme.INK_FAINT}; font-size: 11px;"
         )
         col.addWidget(self._mask_empty_hint)
 
@@ -4629,6 +5247,8 @@ class ImageAdjustPanelWidget(QWidget):
             (self._mask_paint_btn, "paint"),
             (self._mask_erase_btn, "erase"),
             (self._mask_ai_click_btn, "ai_click"),
+            (self._mask_luma_btn, "luma"),
+            (self._mask_color_btn, "color"),
         )
 
     def mask_layer_mode(self) -> str | None:
@@ -5001,6 +5621,8 @@ class ImageAdjustPanelWidget(QWidget):
     # the difference is edge quality, which is the whole product of a mask.
     _MASK_CREATE_ITEMS = (
         ("brush", "Brush", "New empty mask — then press P to paint.", False),
+        ("luma", "Luminance", "Click a tone to mask that brightness band.", False),
+        ("color", "Color", "Click a colour to mask similar pixels.", False),
         ("ai_click", "AI Selection", "Click what you want masked.", True),
         ("subject", "Smart Object", "", True),
         ("sky", "Sky", "", True),
@@ -5013,10 +5635,23 @@ class ImageAdjustPanelWidget(QWidget):
                  "Does not arm the paint brush — press P (or click Add) to "
                  "paint coverage into it.\n"
                  "To grow a mask you already have, select it and use Add.",
+        "luma": "Luminance — click a tone on the photo.\n\n"
+                "Masks pixels of similar brightness (soft band around the "
+                "sampled tone).\n"
+                "Useful for skies, skin midtones, or lifting shadows without "
+                "painting.\n"
+                "Refine afterwards with Add / Erase.",
+        "color": "Color — click a colour on the photo.\n\n"
+                 "Masks pixels near that sample in RGB.\n"
+                 "Good for a jacket, foliage, or a painted wall.\n"
+                 "Refine afterwards with Add / Erase.",
         "subject": "Smart Object — one press, no aiming.\n\n"
-                   "Finds whatever stands out and masks it. It returns ONE mask: "
-                   "if two people\nstand together they come back in the same one. "
-                   "To mask just one of them,\nuse AI Selection.\n\n"
+                   "Finds whatever stands out and masks it. When the camera "
+                   "recorded an AF / focus point, that point biases which "
+                   "object is kept if several stand out.\n\n"
+                   "It returns ONE mask: if two people stand together they "
+                   "come back in the same one. To mask just one of them, "
+                   "use AI Selection.\n\n"
                    "The slowest tool here — around ten seconds, and a large "
                    "download the first\ntime. What you get for the wait is the "
                    "cleanest edge of any of them, so\nreach for it when the "
@@ -5025,8 +5660,12 @@ class ImageAdjustPanelWidget(QWidget):
                "nothing is added and it says so.",
         "depth": "Depth — one press.\n\nMasks by distance, not by subject: "
                  "strongest on the nearest things,\nfading to nothing on the "
-                 "farthest. A fade rather than a cutout.\n\nInvert it to "
-                 "grade the background instead.",
+                 "farthest. A fade rather than a cutout.\n\n"
+                 "Raise Blur on this mask for continuous depth of field "
+                 "(Focus picks the sharp plane; default keeps the near "
+                 "subject sharp).\n"
+                 "Invert it to grade the background with other sliders "
+                 "instead.",
         "ai_click": "AI Selection — click what you want masked.\n\n"
                     "Not a brush: each click is a point, and more clicks add to "
                     "the SAME mask.\nUse it when Smart Object picks the wrong "
@@ -5034,9 +5673,9 @@ class ImageAdjustPanelWidget(QWidget):
                     "The first click pauses briefly while the photo is analysed.",
     }
 
-    # The one creation tool that stays armed waiting for you to act on the photo.
+    # Creation tools that stay armed waiting for a click on the photo.
     # Brush is NOT included: it only creates an empty mask; P / Add arms paint.
-    _MASK_ARMED_KINDS = ("ai_click",)
+    _MASK_ARMED_KINDS = ("ai_click", "luma", "color")
 
     def _make_mask_create_button(self, kind: str, label: str) -> QPushButton:
         """One creation tool as a button.
@@ -5050,13 +5689,20 @@ class ImageAdjustPanelWidget(QWidget):
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn.setToolTip(self._MASK_CREATE_TIPS.get(kind, ""))
+        icon_name = _MASK_CREATE_ICONS.get(kind)
+        if icon_name:
+            _apply_tool_icon(btn, icon_name)
         if kind in self._MASK_ARMED_KINDS:
             btn.setCheckable(True)
         btn.clicked.connect(lambda _c=False, k=kind: self._on_mask_create_clicked(k))
         return btn
 
     def _mask_create_kind_armed(self, kind: str) -> bool:
-        btn = {"ai_click": getattr(self, "_mask_ai_click_btn", None)}.get(kind)
+        btn = {
+            "ai_click": getattr(self, "_mask_ai_click_btn", None),
+            "luma": getattr(self, "_mask_luma_btn", None),
+            "color": getattr(self, "_mask_color_btn", None),
+        }.get(kind)
         return bool(btn is not None and btn.isChecked())
 
     def _on_mask_create_clicked(self, kind: str) -> None:
@@ -5101,6 +5747,10 @@ class ImageAdjustPanelWidget(QWidget):
             self.mask_add_requested.emit()
         elif kind == "ai_click":
             self._mask_ai_click_btn.setChecked(True)
+        elif kind == "luma":
+            self._mask_luma_btn.setChecked(True)
+        elif kind == "color":
+            self._mask_color_btn.setChecked(True)
         else:
             self.mask_ai_requested.emit(kind)
         self._sync_mask_armed_hint()
@@ -5110,13 +5760,16 @@ class ImageAdjustPanelWidget(QWidget):
         label = getattr(self, "_mask_armed_hint", None)
         if label is None:
             return
-        if not getattr(self, "_mask_ai_click_btn", None) or not self._mask_ai_click_btn.isChecked():
-            label.setVisible(False)
-            label.setText("")
-            return
-        hint = next(
-            (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == "ai_click"), ""
-        )
+        mode = self.mask_layer_mode()
+        hint = ""
+        if mode == "ai_click":
+            hint = next(
+                (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == "ai_click"), ""
+            )
+        elif mode in ("luma", "color"):
+            hint = next(
+                (h for k, _l, h, _ai in self._MASK_CREATE_ITEMS if k == mode), ""
+            )
         label.setText(hint)
         label.setVisible(bool(hint))
 
@@ -5141,7 +5794,7 @@ class ImageAdjustPanelWidget(QWidget):
         # Create stays available with no masks yet -- it is the only way to
         # get the first one, and the empty hint points at it.
         for btn in (self._mask_del_btn, self._mask_dup_btn, self._mask_paint_btn,
-                    self._mask_erase_btn, self._mask_invert_btn):
+                    self._mask_erase_btn, self._mask_invert_btn, self._mask_effect_btn):
             btn.setEnabled(has_layer)
         for slider in self._mask_sliders.values():
             slider.setEnabled(has_layer)
@@ -5157,12 +5810,19 @@ class ImageAdjustPanelWidget(QWidget):
         layer = self._active_mask_layer()
         self._mask_block = True
         try:
+            defaults = {"BlurFocus": 100.0}
             for key, _label, _lo, _hi, div in self._MASK_SLIDER_SPECS:
                 slider = self._mask_sliders[key]
-                val = 0.0 if layer is None else float(layer.adjustments.get(key, 0.0))
+                if layer is None:
+                    val = float(defaults.get(key, 0.0))
+                else:
+                    val = float(layer.adjustments.get(key, defaults.get(key, 0.0)))
                 slider.setValue(int(round(val * div)))
                 self._update_mask_value_label(key)
             self._mask_invert_btn.setChecked(bool(layer.invert) if layer is not None else False)
+            effect = getattr(self, "_mask_effect_btn", None)
+            if effect is not None:
+                effect.setChecked(bool(layer.enabled) if layer is not None else True)
         finally:
             self._mask_block = False
 
@@ -5171,7 +5831,10 @@ class ImageAdjustPanelWidget(QWidget):
         div = spec[4]
         v = self._mask_sliders[key].value() / div
         lbl = self._mask_value_labels[key]
-        lbl.setText(f"{v:+.2f}" if div != 1.0 else f"{v:+.0f}")
+        if key in ("Blur", "BlurFocus", "Sharpness", "Defringe"):
+            lbl.setText(f"{v:.0f}" if div == 1.0 else f"{v:.2f}")
+        else:
+            lbl.setText(f"{v:+.2f}" if div != 1.0 else f"{v:+.0f}")
 
     def _on_mask_row_changed(self, _row: int) -> None:
         if self._mask_block:
@@ -5304,6 +5967,25 @@ class ImageAdjustPanelWidget(QWidget):
         # Invert changes coverage, not just the render, so the overlay has to
         # be rebuilt too -- _emit_preview_and_save only re-renders the photo.
         self.mask_coverage_changed.emit()
+
+    def _on_mask_effect_toggled(self, checked: bool) -> None:
+        """Enable/disable the selected mask's *adjustment* (not the overlay)."""
+        if self._mask_block:
+            return
+        layer = self._active_mask_layer()
+        if layer is None:
+            return
+        layer.enabled = bool(checked)
+        layer.touch()
+        self._emit_preview_and_save()
+
+    def toggle_mask_invert(self) -> bool:
+        """Keyboard Invert (I): flip the selected mask. True if handled."""
+        btn = getattr(self, "_mask_invert_btn", None)
+        if btn is None or not btn.isEnabled():
+            return False
+        btn.toggle()
+        return True
 
     def _on_mask_slider_changed(self, key: str) -> None:
         if self._mask_block:
@@ -5507,21 +6189,18 @@ class ImageAdjustPanelWidget(QWidget):
         self._schedule_live_preview()
 
     def _reset_mask_slider(self, key: str) -> None:
-        """Click a mask slider's value readout to zero it, as in Light/Colour.
+        """Click a mask slider's value readout to restore its default.
 
-        Every mask adjustment is a delta applied inside the mask, so the
-        default is 0 for all of them -- there is no per-key default table to
-        consult the way _reset_slider needs one.
-
-        _mask_block stays OFF deliberately: setValue fires
-        _on_mask_slider_changed, which is what writes the layer and refreshes
-        the readout. Blocking it would move the handle and leave the mask
-        holding its old value.
+        Most mask adjustments are deltas whose default is 0. BlurFocus is an
+        absolute plane (near=100) so reset lands there, not at zero.
         """
         slider = self._mask_sliders.get(key)
-        if slider is None or slider.value() == 0:
+        if slider is None:
             return
-        slider.setValue(0)
+        default = 100 if key == "BlurFocus" else 0
+        if slider.value() == default:
+            return
+        slider.setValue(default)
         self._emit_preview_and_save()
 
     def _reset_slider(self, key: str) -> None:
@@ -5604,6 +6283,9 @@ class ImageAdjustPanelWidget(QWidget):
         btn = getattr(self, "_export_btn", None)
         if btn is not None:
             btn.setEnabled(bool(enabled))
+        header = getattr(self, "_header_export_btn", None)
+        if header is not None:
+            header.setEnabled(bool(enabled))
 
     def set_is_raw_file(self, is_raw: bool) -> None:
         """Update export options based on whether the active image is RAW or raster (JPEG/WebP)."""
@@ -5628,7 +6310,7 @@ class ImageAdjustPanelWidget(QWidget):
                 border-radius: 8px;
                 padding: 4px;
                 color: {theme.INK};
-                font-size: 12px;
+                font-size: 13px;
             }}
             QMenu::item {{
                 padding: 6px 20px 6px 12px;
@@ -5669,7 +6351,10 @@ class ImageAdjustPanelWidget(QWidget):
 
             ai_allowed = ai_export_enabled()
         except Exception:
-            ai_allowed = True
+            # Fail closed: an import/profile error must not surface Plus-only
+            # export entries on Standard. ai_export_enabled itself already
+            # treats an unknown profile as Plus for dev checkouts.
+            ai_allowed = False
         try:
             from onnx_scunet import scunet_model_path
 
@@ -5725,10 +6410,17 @@ class ImageAdjustPanelWidget(QWidget):
                 lambda _checked=False, f=fmt: self._request_export(f, False, False),
             )
         export_btn.setMenu(export_menu)
+        header_export = getattr(self, "_header_export_btn", None)
+        if header_export is not None:
+            header_export.setMenu(export_menu)
+            header_export.setEnabled(export_btn.isEnabled())
+            header_export.setToolTip(export_btn.toolTip())
         if is_raw:
             export_btn.setToolTip("Export baked image (TIFF / JPEG / WebP)")
         else:
             export_btn.setToolTip("Export baked image (JPEG / WebP)")
+        if header_export is not None:
+            header_export.setToolTip(export_btn.toolTip())
 
 
 

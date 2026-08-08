@@ -9,12 +9,73 @@ from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
 from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
 from PyQt6.QtGui import QPixmap, QImage, QFont, QTransform
 
+try:
+    import rawviewer_ui.theme as theme
+except ModuleNotFoundError:
+    import theme as theme
 from rawviewer_ui.widgets import ThumbnailLabel
 from image_cache import LRUCache
 from image_load_manager import get_image_load_manager, Priority
 from common_image_loader import is_raw_file
 
 logger = logging.getLogger(__name__)
+
+
+class _ScrollDateBubble(QLabel):
+    """Floating "when was this taken" readout, shown while dragging the scrollbar.
+
+    Dragging the thumb through a few thousand photos otherwise gives no idea
+    where you have landed until you let go and the thumbnails decode. The
+    capture date is already known from EXIF long before any pixels are, so it
+    can answer immediately.
+
+    Only while DRAGGING THE THUMB -- not on wheel or trackpad scrolling, which
+    move a screen at a time and where a bubble over the photos would be noise.
+
+    Parented to the scroll area's viewport rather than the gallery widget: the
+    gallery is the scrolled content and is taller than the window, so a child
+    of it would scroll away with the photos instead of hovering over them.
+    """
+
+    _MARGIN_RIGHT = 14
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.setObjectName("scroll_date_bubble")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            f"""
+            QLabel#scroll_date_bubble {{
+                background-color: {theme.rgba(theme.VOID_RGB, 235)};
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 13px;
+                font-weight: 600;
+            }}
+            """
+        )
+        self.hide()
+
+    def show_for(self, text: str, *, center_y: int) -> None:
+        if not text:
+            self.hide()
+            return
+        self.setText(text)
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        x = max(0, parent.width() - self.width() - self._MARGIN_RIGHT)
+        # Clamped so the bubble stays fully on screen at the very top and
+        # bottom of the range, where the thumb's centre is within half a
+        # bubble of the edge.
+        y = max(0, min(parent.height() - self.height(), center_y - self.height() // 2))
+        self.move(x, y)
+        self.raise_()
+        self.show()
 
 
 def _focus_gallery_switch_logs() -> bool:
@@ -2554,17 +2615,93 @@ class JustifiedGallery(QWidget):
 
         sb.setValue(new_val)
 
+    # --- capture-date bubble while dragging the scrollbar ------------------
+
+    def set_capture_date_provider(self, provider) -> None:
+        """Install ``path -> datetime | None`` used by the scroll date bubble.
+
+        Injected rather than looked up here: capture times live in the image
+        cache on the main window, and the gallery has no business reaching
+        into it. With no provider the bubble simply never appears, which is
+        the right behaviour for any host that has no dates to give.
+        """
+        self._capture_date_provider = provider
+
+    def _scroll_date_text(self) -> str:
+        """Capture date of the photo at the top of the viewport, if known."""
+        provider = getattr(self, "_capture_date_provider", None)
+        if provider is None:
+            return ""
+        scroll = getattr(self, "_scroll_area", None)
+        if scroll is None:
+            return ""
+        try:
+            idx = self._layout_index_at_scroll_y(
+                int(scroll.verticalScrollBar().value())
+            )
+            if idx is None:
+                return ""
+            item = self._gallery_layout_items[idx]
+            path = item.get("file_path")
+            if not path:
+                return ""
+            when = provider(path)
+            if when is None:
+                return ""
+            # Month and year, with the day: dragging covers months per
+            # centimetre, so a timestamp would be false precision and would
+            # change on every pixel of travel.
+            return when.strftime("%d %b %Y")
+        except Exception:
+            return ""
+
+    def _update_scroll_date_bubble(self) -> None:
+        if not getattr(self, "_is_scrollbar_dragging", False):
+            return
+        scroll = getattr(self, "_scroll_area", None)
+        if scroll is None:
+            return
+        text = self._scroll_date_text()
+        bubble = getattr(self, "_scroll_date_bubble", None)
+        if bubble is None:
+            if not text:
+                return
+            bubble = _ScrollDateBubble(scroll.viewport())
+            self._scroll_date_bubble = bubble
+        if not text:
+            bubble.hide()
+            return
+        # Track the thumb: the bubble belongs beside the thing being dragged,
+        # not pinned to a corner the eye is not on.
+        sb = scroll.verticalScrollBar()
+        span = max(1, sb.maximum() - sb.minimum())
+        frac = (sb.value() - sb.minimum()) / span
+        bubble.show_for(text, center_y=int(frac * scroll.viewport().height()))
+
+    def _hide_scroll_date_bubble(self) -> None:
+        bubble = getattr(self, "_scroll_date_bubble", None)
+        if bubble is not None:
+            bubble.hide()
+
     def _on_slider_pressed(self):
         self._is_scrollbar_dragging = True
+        self._update_scroll_date_bubble()
 
     def _on_slider_released(self):
         self._is_scrollbar_dragging = False
+        self._hide_scroll_date_bubble()
         # Immediately load around the new thumb position (no extra debounce)
         self._on_scroll_settled()
 
     def _on_scroll(self, value):
         now = time.time()
-        
+
+        # Follows the thumb during a drag. Cheap enough to run per tick: it is
+        # a binary search over the layout rects plus a dict lookup, and no
+        # thumbnail work is involved.
+        if getattr(self, "_is_scrollbar_dragging", False):
+            self._update_scroll_date_bubble()
+
         # Pause background indexing once per scroll burst (not every valueChanged tick).
         if self.parent_viewer is not None and not self._scroll_indexing_paused:
             if hasattr(self.parent_viewer, "_pause_semantic_indexing_deferred"):
@@ -4745,7 +4882,7 @@ class JustifiedGallery(QWidget):
                 color: rgba(255, 255, 255, 220);
                 border-radius: 4px;
                 padding: 8px 16px;
-                font-size: 12px;
+                font-size: 13px;
             }
         """)
         font = QFont()
@@ -4796,7 +4933,7 @@ class JustifiedGallery(QWidget):
         style = """
             QLabel {
                 color: #a8a8a8;
-                font-size: 15px;
+                font-size: 16px;
                 background-color: transparent;
                 padding: 24px;
             }

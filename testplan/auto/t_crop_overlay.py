@@ -76,6 +76,52 @@ def main() -> int:
     # Edge hit still resolves, but only interactive mode will accept a press.
     check("edge hit test still finds the border", item._hit_test(QPointF(0, 150)) == "l")
 
+    # --- the passive geometry preview must not draw a thirds grid ---------
+    #
+    # This item is reused for the geometry-overlay preview, which stays on for
+    # as long as straighten/perspective is non-zero. Drawing the rule-of-thirds
+    # guides unconditionally left a 3x3 grid over the photo from the moment the
+    # frame was straightened until the rotation was zeroed again, with nothing
+    # on screen explaining it or offering to turn it off.
+    #
+    # Painted rather than asserted on a flag: the bug was the ORDER of two
+    # statements inside paint(), which no amount of state inspection would
+    # catch.
+    from PyQt6.QtGui import QImage, QPainter
+
+    def _interior_ink(interactive: bool) -> int:
+        """Non-transparent pixels strictly inside the crop, ignoring the frame."""
+        item.set_image_size(300, 300)
+        item.set_insets(0.0, 0.0, 0.0, 0.0)
+        item.set_aspect_ratio(None)
+        item.set_interactive(interactive)
+        img = QImage(300, 300, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        item.paint(p, None, None)
+        p.end()
+        # Inset well past the border frame and the corner handles.
+        margin = 40
+        return sum(
+            1
+            for y in range(margin, 300 - margin)
+            for x in range(margin, 300 - margin)
+            if (img.pixel(x, y) >> 24) != 0
+        )
+
+    ink_preview = _interior_ink(False)
+    ink_crop = _interior_ink(True)
+    check(
+        "passive preview draws no thirds grid",
+        ink_preview == 0,
+        f"{ink_preview} interior pixels painted",
+    )
+    check(
+        "explicit crop mode still draws the thirds grid",
+        ink_crop > 0,
+        f"{ink_crop} interior pixels painted",
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

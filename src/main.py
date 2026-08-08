@@ -2104,7 +2104,16 @@ class _AIMaskWorker(QRunnable):
     feel immediate (see MainWindow._on_mask_ai_click).
     """
 
-    def __init__(self, token: int, file_path: str, kind: str, rgb, target_hw, signals):
+    def __init__(
+        self,
+        token: int,
+        file_path: str,
+        kind: str,
+        rgb,
+        target_hw,
+        signals,
+        focus_xy=None,
+    ):
         super().__init__()
         self.token = token
         self.file_path = file_path
@@ -2112,6 +2121,7 @@ class _AIMaskWorker(QRunnable):
         self.rgb = rgb
         self.target_hw = target_hw
         self.signals = signals
+        self.focus_xy = focus_xy
 
     def run(self) -> None:
         alpha = None
@@ -2121,7 +2131,9 @@ class _AIMaskWorker(QRunnable):
             if self.kind == "sky":
                 alpha = raw_ai_masks.segment_sky(self.rgb, self.target_hw)
             elif self.kind == "subject":
-                alpha = raw_ai_masks.segment_subject(self.rgb, self.target_hw)
+                alpha = raw_ai_masks.segment_subject(
+                    self.rgb, self.target_hw, focus_xy=self.focus_xy
+                )
             elif self.kind == "depth":
                 alpha = raw_ai_masks.estimate_depth(self.rgb, self.target_hw)
             elif self.kind == "sam_encode":
@@ -2733,6 +2745,34 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         safe_print("  [RAWImageViewer] Starting initialization...", flush=True)
         super().__init__()
         safe_print("  [RAWImageViewer] QMainWindow.__init__() completed", flush=True)
+
+        # One application-wide UI font, set here rather than repeated in every
+        # dialog's stylesheet. Widgets inherit it unless a QSS rule names a
+        # family, so this is what makes "the app uses one typeface" true by
+        # default instead of by fifteen agreeing declarations -- see
+        # theme.FONT_STACK for why the ones that disagreed were a latent bug.
+        #
+        # Size comes from the platform's own default rather than a hardcoded
+        # point size: the two platforms disagree about what a comfortable base
+        # is, and overriding that is how an app ends up looking correct on the
+        # machine it was built on and cramped everywhere else.
+        try:
+            import theme as _theme
+            from PyQt6.QtGui import QFont as _QFont
+
+            _app = _qt_app()
+            if _app is not None:
+                _f = _app.font()
+                _f.setFamilies(list(_theme.FONT_FAMILIES))
+                # Slightly larger base, as requested. Applied as a delta to the
+                # platform default so both platforms move by the same visible
+                # amount from their own comfortable starting point.
+                _pt = _f.pointSizeF()
+                if _pt > 0:
+                    _f.setPointSizeF(_pt + _theme.FONT_BASE_BUMP_PT)
+                _app.setFont(_f)
+        except Exception:
+            pass
 
         # Configure vertical scrollbars to jump directly to absolute cursor position when clicked
         try:
@@ -5474,7 +5514,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._compare_complete_banner = QLabel("", container)
         self._compare_complete_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._compare_complete_banner.setStyleSheet(
-            f"color: {theme.INK}; font-size: 15px; font-weight: 500; background: rgba(0,0,0,0.55);"
+            f"color: {theme.INK}; font-size: 16px; font-weight: 500; background: rgba(0,0,0,0.55);"
             " padding: 12px 18px; border-radius: 8px;"
         )
         self._compare_complete_banner.hide()
@@ -5630,6 +5670,86 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             capture_times = {}
         return capture_times or {}
+
+    def _gallery_capture_date(self, path: str):
+        """Capture datetime for one photo, for the gallery's scroll date bubble.
+
+        Called once per scrollbar tick while the thumb is dragged, so it reads
+        a per-folder dict built once rather than hitting the EXIF cache per
+        call. A path it does not know simply has no date, and the bubble stays
+        hidden for it rather than blocking the drag to go and find one.
+
+        The map is rebuilt on a folder change, and re-attempted when it came
+        back empty or when an unknown path turns up -- both of which happen
+        normally and neither of which may be cached as "no dates here".
+        """
+        import datetime
+
+        if not path:
+            return None
+        folder = getattr(self, "current_folder", None)
+        if getattr(self, "_gallery_capture_date_missing_folder", None) != folder:
+            # Misses are per-folder; carrying them across would suppress the
+            # retry for a path that a different folder happened to lack, and
+            # would grow without bound over a session.
+            self._gallery_capture_date_missing = set()
+            self._gallery_capture_date_missing_folder = folder
+        cached_folder = getattr(self, "_gallery_capture_date_folder", None)
+        if cached_folder != folder or not hasattr(self, "_gallery_capture_date_map"):
+            raw = {}
+            try:
+                if folder:
+                    raw = self.image_cache.get_capture_times_for_folder_sort(folder) or {}
+                if not raw:
+                    raw = self._capture_times_for_paths(
+                        list(getattr(self, "image_files", []) or [])[:4096]
+                    )
+            except Exception:
+                raw = {}
+            parsed = {}
+            for p, value in (raw or {}).items():
+                when = None
+                try:
+                    if isinstance(value, (int, float)):
+                        when = datetime.datetime.fromtimestamp(float(value))
+                    elif isinstance(value, str) and value:
+                        # Stored ISO, but older rows used "YYYY:MM:DD hh:mm:ss".
+                        try:
+                            when = datetime.datetime.fromisoformat(value)
+                        except ValueError:
+                            when = datetime.datetime.strptime(
+                                value, "%Y:%m:%d %H:%M:%S"
+                            )
+                except Exception:
+                    when = None
+                if when is not None:
+                    parsed[_norm_path(p)] = when
+            if not parsed:
+                # Do NOT cache an empty result. The first call can land before
+                # EXIF indexing has written any rows, and caching {} against
+                # this folder would retire the date bubble for the rest of the
+                # session -- it would never appear again even once every date
+                # was known. Retrying costs one cache read per drag.
+                self._gallery_capture_date_map = {}
+                self._gallery_capture_date_folder = None
+                return None
+            self._gallery_capture_date_map = parsed
+            self._gallery_capture_date_folder = folder
+        key = _norm_path(path)
+        cached = self._gallery_capture_date_map.get(key)
+        if cached is None:
+            # Either a photo written into the open folder after the map was
+            # built (HDR merge, panorama, export all appear in the gallery
+            # immediately) or one that genuinely carries no capture date.
+            #
+            # Retry ONCE per unseen path, remembering the misses. Invalidating
+            # on every miss instead would rebuild the whole folder map on each
+            # scroll tick for any dateless photo -- during a drag, per tick.
+            missed = self._gallery_capture_date_missing
+            if key not in missed:
+                missed.add(key)
+                self._gallery_capture_date_folder = None
+        return cached
 
     def _rebuild_burst_groups(self) -> None:
         if not self._is_burst_grouping_enabled():
@@ -8884,7 +9004,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 border: 1px solid {theme.LINE};
                 border-radius: 4px;
                 padding: 4px 8px;
-                font-size: 12px;
+                font-size: 13px;
             }}
         """)
         
@@ -9074,7 +9194,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Use modern folder icon (📁) instead of old style (🗁)
         self.image_label.setText(self._no_image_loaded_help_text())
         self.image_label.setStyleSheet(
-            "QLabel { color: #666; font-size: 14px; background-color: transparent; }")
+            "QLabel { color: #666; font-size: 15px; background-color: transparent; }")
         self.image_label.setMinimumSize(400, 300)
         self.image_label.setMouseTracking(True)
         cast(Any, self.image_label).mousePressEvent = self.image_mouse_press_event
@@ -9123,6 +9243,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.auto_wb_requested.connect(
                 self._on_auto_wb_requested
+            )
+            self.single_image_adjust_panel.auto_tone_requested.connect(
+                self._on_auto_tone_requested
             )
             self.single_image_adjust_panel.auto_straighten_requested.connect(
                 self._on_auto_straighten_requested
@@ -9352,7 +9475,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 color: {theme.INK};
                 border-top: 1px solid {theme.RAISED};
                 padding: 10px 12px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 400;
             }}
             QStatusBar::item {{
@@ -9638,7 +9761,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.sort_toggle_button.setStyleSheet(f"""
             QPushButton {{
                 color: {theme.INK_MUTED};
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 500;
                 padding: 0px 10px;
                 margin: 0px;
@@ -9745,7 +9868,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.gallery_search_status_label.setStyleSheet(f"""
             QLabel {{
                 color: {theme.INK_MUTED};
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 500;
                 padding: 0px 0px 0px 2px;
             }}
@@ -9768,7 +9891,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 border: 1px solid {theme.LINE};
                 border-radius: 6px;
                 padding: 0px 28px 0px 10px;
-                font-size: 13px;
+                font-size: 14px;
                 min-height: 0px;
                 max-height: 28px;
                 outline: none;
@@ -9868,7 +9991,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.shortcuts_hint_button.setStyleSheet(f"""
             QPushButton {{
                 color: {theme.INK_FAINT};
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 600;
                 padding: 0px;
                 border: none;
@@ -9893,7 +10016,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         _counter_label_style = f"""
             QLabel {{
                 color: {theme.INK_MUTED};
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 400;
                 padding: 0px {_counter_right_pad}px 0px 0px;
                 letter-spacing: 0.25px;
@@ -13598,7 +13721,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.raw_toggle_button.setStyleSheet(raw_btn_base + f"""
                 QPushButton {{
                     color: {theme.INK_MUTED};
-                    font-size: 13px;
+                    font-size: 14px;
                     font-weight: 500;
                 }}
                 QPushButton:hover {{
@@ -13614,7 +13737,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     color: {theme.INK};
                     background-color: {theme.EMBER};
                     border-radius: 4px;
-                    font-size: 16px;
+                    font-size: 17px;
                     font-weight: 700;
                 }}
                 QPushButton:hover {{
@@ -13689,7 +13812,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             btn.setStyleSheet(base + f"""
                 QPushButton {{
                     color: {theme.INK_MUTED};
-                    font-size: 13px;
+                    font-size: 14px;
                     font-weight: 700;
                 }}
                 QPushButton:hover {{
@@ -13705,7 +13828,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             btn.setStyleSheet(base + f"""
                 QPushButton {{
                     color: {theme.INK_FAINT};
-                    font-size: 13px;
+                    font-size: 14px;
                     font-weight: 500;
                 }}
                 QPushButton:hover {{
@@ -14773,6 +14896,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             saved_row_height = int(settings.value("gallery_row_height", 220))
             saved_row_height = max(220, min(500, saved_row_height))
             justified_gallery.TARGET_ROW_HEIGHT = saved_row_height
+        except Exception:
+            pass
+
+        # Capture dates for the scrollbar-drag date bubble. Injected because
+        # the times live in this window's image cache, not in the gallery.
+        try:
+            justified_gallery.set_capture_date_provider(self._gallery_capture_date)
         except Exception:
             pass
 
@@ -18391,7 +18521,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             btn.setStyleSheet(f"""
                 QPushButton {{
                     color: {theme.INK_MUTED};
-                    font-size: 11px;
+                    font-size: 12px;
                     font-weight: 600;
                     padding: 0px;
                     border: none;
@@ -18417,7 +18547,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             btn.setStyleSheet("""
                 QPushButton {
                     color: rgba(136, 136, 136, 0);
-                    font-size: 11px;
+                    font-size: 12px;
                     font-weight: 600;
                     padding: 0px;
                     border: none;
@@ -21911,7 +22041,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         msg.setWordWrap(True)
         msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         msg.setStyleSheet(
-            f"color: {theme.INK}; font-size: 14px; font-weight: 600; background: transparent;"
+            f"color: {theme.INK}; font-size: 15px; font-weight: 600; background: transparent;"
         )
         layout.addWidget(msg)
 
@@ -21920,7 +22050,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             info.setWordWrap(True)
             info.setAlignment(Qt.AlignmentFlag.AlignCenter)
             info.setStyleSheet(
-                f"color: {theme.INK_MUTED}; font-size: 12px; background: transparent;"
+                f"color: {theme.INK_MUTED}; font-size: 13px; background: transparent;"
             )
             layout.addWidget(info)
 
@@ -22918,13 +23048,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     "Open an image in the editor before adding a mask.", 3000
                 )
             return
+        from mask_layers_xmp import max_mask_layers
         from raw_mask_layers import MaskLayer, MaskLayerStack
 
         stack = getattr(self, "_mask_layer_stack", None)
+        mh, mw = mask_shape
+        cap = max_mask_layers(frame_pixels=int(mh) * int(mw))
+        if stack is not None and len(stack.layers) >= cap:
+            self._show_status(
+                f"Mask limit reached ({cap}). Delete one to add another.",
+                4000,
+            )
+            return
         if stack is None:
             stack = MaskLayerStack()
             self._mask_layer_stack = stack
-        mh, mw = mask_shape
         stack.layers.append(
             MaskLayer.empty(mh, mw, name=f"Mask {len(stack.layers) + 1}")
         )
@@ -22946,16 +23084,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         only coverage tool that took two presses -- Subject, Sky, Depth and
         AI Selection all create their own layer. Returns True if a layer is
         available to paint into.
+
+        When masks already exist but none is selected, select the last one
+        rather than spawning another empty mask -- the Add button is disabled
+        in that state, and P must agree with it.
         """
         panel = getattr(self, "single_image_adjust_panel", None)
         if panel is None:
             return False
         stack = getattr(self, "_mask_layer_stack", None)
-        if stack is not None and stack.layers and panel.active_mask_index() is not None:
-            return True
+        if stack is not None and stack.layers:
+            idx = panel.active_mask_index()
+            if idx is not None and 0 <= int(idx) < len(stack.layers):
+                return True
+            panel.select_mask_index(len(stack.layers) - 1)
+            idx = panel.active_mask_index()
+            return idx is not None and 0 <= int(idx) < len(stack.layers)
         self._on_mask_layer_add()
         stack = getattr(self, "_mask_layer_stack", None)
-        return bool(stack is not None and stack.layers)
+        idx = panel.active_mask_index() if panel is not None else None
+        return bool(
+            stack is not None
+            and stack.layers
+            and idx is not None
+            and 0 <= int(idx) < len(stack.layers)
+        )
 
     def _on_mask_group_requested(self, src_index: int, dst_index: int) -> None:
         """Drag one mask onto another: fold the source in as a component.
@@ -23149,8 +23302,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         stack = getattr(self, "_mask_layer_stack", None)
         if panel is None or stack is None or not (0 <= index < len(stack.layers)):
             return
+        from mask_layers_xmp import max_mask_layers
         from raw_mask_layers import MaskLayer
 
+        shape = self._dodge_burn_mask_shape()
+        px = int(shape[0]) * int(shape[1]) if shape is not None else None
+        cap = max_mask_layers(frame_pixels=px)
+        if len(stack.layers) >= cap:
+            self._show_status(
+                f"Mask limit reached ({cap}). Delete one to duplicate.",
+                4000,
+            )
+            return
         src = stack.layers[index]
         copy = MaskLayer(
             src.alpha.copy(),
@@ -23245,6 +23408,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._show_status(_AI_MASK_BUSY_TEXT.get(kind, f"Finding {kind}..."), 0)
         self._begin_ai_mask_busy(kind, downloading=not ready)
 
+        focus_xy = None
+        if kind == "subject":
+            focus_xy = self._ai_mask_focus_xy(mask_shape)
+
         signals = _AIMaskSignals()
         signals.finished.connect(self._on_ai_mask_finished)
         self._ai_mask_signals = signals  # keep alive
@@ -23255,8 +23422,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             rgb,
             mask_shape,
             signals,
+            focus_xy=focus_xy,
         )
         _get_bg_thread_pool().start(worker)
+
+    def _ai_mask_focus_xy(self, target_hw) -> tuple[float, float] | None:
+        """Map camera AF / SubjectArea centre into mask-buffer pixel space."""
+        path = str(getattr(self, "current_file_path", "") or "")
+        if not path or target_hw is None:
+            return None
+        try:
+            th, tw = int(target_hw[0]), int(target_hw[1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        if th < 4 or tw < 4:
+            return None
+        try:
+            from exif_subject_area import pixmap_ltwh_focus_hint
+
+            orientation = 1
+            cached_exif = self.image_cache.get_exif(path) if hasattr(self, "image_cache") else None
+            if cached_exif:
+                orientation = int(cached_exif.get("orientation", 1) or 1)
+            hint = pixmap_ltwh_focus_hint(path, tw, th, orientation)
+            if hint is None:
+                return None
+            ltwh, _src = hint
+            l, t, w, h = ltwh
+            return (float(l) + 0.5 * float(w), float(t) + 0.5 * float(h))
+        except Exception:
+            return None
 
     def _begin_ai_mask_busy(self, kind: str, *, downloading: bool) -> None:
         """Put a dialog up for the wait, and arm the timeout.
@@ -23513,6 +23708,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return None
         import numpy as np
 
+        from mask_layers_xmp import max_mask_layers
         from raw_mask_layers import MaskLayer, MaskLayerStack
 
         stack = getattr(self, "_mask_layer_stack", None)
@@ -23520,13 +23716,26 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             stack = MaskLayerStack()
             self._mask_layer_stack = stack
 
+        h, w = int(alpha.shape[0]), int(alpha.shape[1])
+        cap = max_mask_layers(frame_pixels=h * w)
+        if len(stack.layers) >= cap:
+            self._show_status(
+                f"Mask limit reached ({cap}). Delete one before adding another.",
+                4000,
+            )
+            return None
+
         layer = MaskLayer(
             np.ascontiguousarray(alpha, dtype=np.float32), name=name, source=source
         )
         # Turn the overlay on for a mask the user did not paint: they cannot
         # judge what a model selected without seeing it, and hunting for the
-        # Mask button first is a step nobody should have to take.
-        if panel is not None and hasattr(panel, "request_mask_overlay_visible"):
+        # Mask button first is a step nobody should have to take. Force, not
+        # request: request_mask_overlay_visible respects _mask_user_hidden
+        # (M off), which would leave a freshly generated AI mask invisible.
+        if panel is not None and hasattr(panel, "force_mask_overlay_visible"):
+            panel.force_mask_overlay_visible()
+        elif panel is not None and hasattr(panel, "request_mask_overlay_visible"):
             panel.request_mask_overlay_visible()
         layer.touch()
         stack.layers.append(layer)
@@ -23538,6 +23747,80 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # action is moving a slider, so leave the brushes disarmed.
         self._on_adjust_panel_editing_finished(panel.get_adjustments())
         return layer
+
+    def _on_mask_range_click(self, pt, mode: str) -> bool:
+        """Sample luminance or colour under the click → new range mask layer."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        mask_shape = self._dodge_burn_mask_shape()
+        rgb = self._ai_mask_source_rgb()
+        if panel is None or mask_shape is None or rgb is None:
+            self._show_status("Open an image before using range masks.", 3000)
+            return False
+        try:
+            from raw_range_masks import (
+                color_range_alpha,
+                luminance_range_alpha,
+                sample_luminance_at,
+                sample_rgb_at,
+                to_display_rgb,
+            )
+        except Exception:
+            self._show_status("Range masks unavailable.", 3000)
+            return False
+
+        # Once, here: the range thresholds are display-referred, the edit base
+        # is scene-linear, and the sample and the band MUST be measured in the
+        # same buffer. Converting inside each helper would encode the frame
+        # twice and still leave the sample free to disagree with the band.
+        rgb = to_display_rgb(rgb)
+
+        mh, mw = mask_shape
+        mx, my = self._map_adjust_display_point_to_buffer(pt, mw, mh)
+        # Map sample into the AI/source buffer if it differs from mask shape.
+        sh, sw = int(rgb.shape[0]), int(rgb.shape[1])
+        sx = float(mx) * (sw / float(mw)) if mw else float(mx)
+        sy = float(my) * (sh / float(mh)) if mh else float(my)
+
+        if mode == "luma":
+            center = sample_luminance_at(rgb, sx, sy)
+            if center is None:
+                return True
+            alpha = luminance_range_alpha(rgb, center=center)
+            name, source = "Luminance", "luma_range"
+        else:
+            sample = sample_rgb_at(rgb, sx, sy)
+            if sample is None:
+                return True
+            alpha = color_range_alpha(rgb, sample)
+            name, source = "Color", "color_range"
+
+        if alpha.shape != (mh, mw):
+            from raw_mask_layers import resize_alpha_to
+
+            alpha = resize_alpha_to(alpha, mh, mw)
+
+        import numpy as np
+
+        coverage = float(np.count_nonzero(alpha > 0.10)) / float(max(1, alpha.size))
+        if coverage < 0.002:
+            self._show_status("Nothing near that sample to mask.", 3000)
+            return True
+
+        # Honour the return value. _add_mask_layer_from_alpha returns None when
+        # the stack is already at the layer limit -- it has just told the user
+        # "Mask limit reached", and the success line below would overwrite that
+        # with a confirmation for a layer that does not exist, while the tool
+        # disarmed as though it had worked.
+        added = self._add_mask_layer_from_alpha(alpha, name=name, source=source)
+        if added is None:
+            return True
+        panel.disarm_mask_layer_tools()
+        self._show_status(
+            f"{name} mask added ({coverage * 100:.0f}% of the frame). "
+            "Use Add / Erase to refine it.",
+            3500,
+        )
+        return True
 
     def _on_mask_ai_click(self, pt) -> bool:
         """Handle a canvas click while the AI Click tool is armed.
@@ -23860,6 +24143,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if is_end:
                 self._on_mask_ai_click(pt)
             return
+        if mode in ("luma", "color"):
+            if is_end:
+                self._on_mask_range_click(pt, mode)
+            return
         mask_shape = self._dodge_burn_mask_shape()
         stack = getattr(self, "_mask_layer_stack", None)
         idx = panel.active_mask_index()
@@ -24046,9 +24333,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # key would silently do nothing on a photo with no masks yet.
         if want == "paint" and panel.mask_layer_mode() != "paint":
             if not self.ensure_mask_layer_for_painting():
+                self._show_status(
+                    "No mask to paint yet — open a photo in Adjust, then press P again.",
+                    2500,
+                )
                 return False
         if panel.active_mask_index() is None:
-            self._show_status("No mask to erase yet — paint one first.", 2500)
+            if want == "paint":
+                self._show_status(
+                    "Select a mask to paint, or use Create → Brush.",
+                    2500,
+                )
+            else:
+                self._show_status("No mask to erase yet — paint one first.", 2500)
             return False
 
         if hasattr(panel, "show_masks_tab"):
@@ -25199,7 +25496,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 adj.pop(HEAL_MASK_KEY, None)
                 adj.pop(HEAL_MASK_OBJ_KEY, None)
 
-        from raw_mask_layers import MASK_LAYERS_KEY, MASK_LAYERS_OBJ_KEY
+        from raw_mask_layers import MASK_LAYERS_KEY, MASK_LAYERS_OBJ_KEY, MASK_ACTIVE_INDEX_KEY
 
         stack = getattr(self, "_mask_layer_stack", None)
         if stack is not None and not stack.is_empty():
@@ -25208,11 +25505,24 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # _stage_key fingerprints the live object directly; drop any
             # stale XMP serial so it can't shadow the live edit.
             adj.pop(MASK_LAYERS_KEY, None)
+            # Lite/drag ticks only: reuse prefix composite for layers before
+            # the selected one. Settle (full_quality) omits this key so the
+            # full stack cache is written/read correctly.
+            if bool(getattr(self, "_mask_layers_use_active_index", False)):
+                panel = getattr(self, "single_image_adjust_panel", None)
+                idx = panel.active_mask_index() if panel is not None else None
+                if idx is not None:
+                    adj[MASK_ACTIVE_INDEX_KEY] = int(idx)
+                else:
+                    adj.pop(MASK_ACTIVE_INDEX_KEY, None)
+            else:
+                adj.pop(MASK_ACTIVE_INDEX_KEY, None)
         else:
             if MASK_LAYERS_KEY in adj or MASK_LAYERS_OBJ_KEY in adj:
                 adj = dict(adj)
                 adj.pop(MASK_LAYERS_KEY, None)
                 adj.pop(MASK_LAYERS_OBJ_KEY, None)
+                adj.pop(MASK_ACTIVE_INDEX_KEY, None)
         return adj
 
     def _apply_adjust_panel_preview(self, *, full_quality: bool = False) -> None:
@@ -25227,9 +25537,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if adj is None:
             return
         try:
+            # Drag/lite path: prefix-cache inactive mask layers. Settle clears
+            # the hint so the full composite cache is authoritative.
+            self._mask_layers_use_active_index = not full_quality
             adj = self._dodge_burn_overlay_adj(adj)
         except Exception:
             pass
+        finally:
+            self._mask_layers_use_active_index = False
         self._sync_geometry_overlay_with_adj(adj)
         if getattr(self, "_crop_preview_uncropped", False):
             adj = self._crop_keys_zeroed(adj)
@@ -25511,6 +25826,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else:
                 adj.pop(HEAL_MASK_KEY, None)
 
+            from mask_layers_xmp import MaskStackTruncated
             from mask_layers_xmp import serialize_stack as _serialize_mask_stack
             from raw_mask_layers import (
                 MASK_LAYERS_KEY as _ML_KEY,
@@ -25519,11 +25835,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             adj.pop(_ML_OBJ_KEY, None)
             ml_stack = getattr(self, "_mask_layer_stack", None)
-            ml_serial = _serialize_mask_stack(ml_stack) if ml_stack is not None else ""
-            if ml_serial:
-                adj[_ML_KEY] = ml_serial
+            try:
+                ml_serial = (
+                    _serialize_mask_stack(ml_stack) if ml_stack is not None else ""
+                )
+            except MaskStackTruncated:
+                # The loaded stack was not all of this photo's masks, so what
+                # is in memory must not be written over what is on disk. Keep
+                # the stored serial exactly as it was -- including NOT popping
+                # the key, since popping is itself the deletion we are avoiding.
+                logger.error(
+                    "Mask stack for %s was truncated on load; leaving the "
+                    "sidecar's masks untouched",
+                    getattr(self, "current_file_path", "?"),
+                )
+                prior = (old_adj or {}).get(_ML_KEY)
+                if prior:
+                    adj[_ML_KEY] = prior
+                ml_serial = prior or ""
             else:
-                adj.pop(_ML_KEY, None)
+                if ml_serial:
+                    adj[_ML_KEY] = ml_serial
+                else:
+                    adj.pop(_ML_KEY, None)
 
             # Nothing actually changed? Then do not write, and above all do
             # not invalidate. editing_finished fires on opening and closing
@@ -25552,11 +25886,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         cleared = is_default_adjustments_for_sidecar(adj)
         self._invalidate_gallery_edited_memo(path)
-        if hasattr(self, "status_bar"):
-            self.status_bar.showMessage(
-                "Edits cleared" if cleared else "Adjustments saved to XMP sidecar",
-                2500,
-            )
+        if not getattr(self, "_skip_editing_finished_side_effects", False):
+            panel = getattr(self, "single_image_adjust_panel", None)
+            if panel is not None and hasattr(panel, "flash_saved"):
+                panel.flash_saved(cleared=cleared)
+            elif hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Edits cleared" if cleared else "Adjustments saved to XMP sidecar",
+                    2500,
+                )
         self._refresh_gallery_bookmark_visuals()
         # Every cache tier that can hold an edits-baked-in render of this file
         # (gallery's own composited thumbnail pixmap, and the shared
@@ -26110,6 +26448,39 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         panel.apply_picked_white_balance(temperature, tint)
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(f"Auto white balance ({int(round(temperature))}K)", 3000)
+
+    def _on_auto_tone_requested(self) -> None:
+        """Auto tone: percentile estimate on the edit base → the six Light sliders.
+
+        Reads the same un-adjusted buffer Auto WB reads, so the estimate does
+        not compound on itself and pressing AUTO TONE twice is a no-op.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if panel is None or base is None or not hasattr(base, "shape"):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto tone needs a decoded RAW edit base — try again in a moment",
+                    3000,
+                )
+            return
+        from raw_auto_adjust import estimate_auto_tone
+        from raw_edit_pipeline import _linear_float_from_buffer
+
+        values = estimate_auto_tone(_linear_float_from_buffer(base))
+        if values is None:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto tone: this photo is already balanced", 3000
+                )
+            return
+        panel.apply_auto_tone(values)
+        if hasattr(self, "status_bar"):
+            ev = values.get("Exposure2012", 0.0)
+            self.status_bar.showMessage(
+                f"Auto tone applied (Exposure {ev:+.2f}) — refine or Ctrl+Z to undo",
+                3000,
+            )
 
     def _on_auto_straighten_requested(self) -> None:
         """Auto straighten: Hough / gradient estimate → CropAngle slider."""
@@ -32055,16 +32426,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         if vm == "single" and getattr(self, "_adjust_overlay_visible", False):
             ctrl_or_cmd = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
+            # Bound ONCE for the whole block. It used to be assigned inside the
+            # Ctrl+C / Ctrl+V / M branches only, so the Invert (I) test below --
+            # which reads `panel` without going through any of them -- raised
+            # UnboundLocalError out of keyPressEvent. Short-circuiting hid it
+            # everywhere except the Masks tab, which is the one place I is for.
+            panel = getattr(self, "single_image_adjust_panel", None)
             if ctrl_or_cmd:
                 if key == Qt.Key.Key_C:
-                    panel = getattr(self, "single_image_adjust_panel", None)
                     if panel is not None:
                         panel._on_copy_settings_clicked()
                         if hasattr(self, "status_bar") and self.status_bar:
                             self.status_bar.showMessage("Edit settings copied", 2000)
                         return True
                 elif key == Qt.Key.Key_V:
-                    panel = getattr(self, "single_image_adjust_panel", None)
                     if panel is not None:
                         from rawviewer_ui.adjust_panel import _edit_settings_clipboard
                         if _edit_settings_clipboard() is not None:
@@ -32076,7 +32451,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                                 self.status_bar.showMessage("No edit settings to paste", 2000)
                         return True
             if key == Qt.Key.Key_M and not ctrl_or_cmd:
-                panel = getattr(self, "single_image_adjust_panel", None)
                 if panel is not None:
                     panel.toggle_dodge_burn_show_mask()
                     return True
@@ -32098,6 +32472,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if brush_mode is not None and not ctrl_or_cmd:
                 if self._handle_brush_key_down(brush_mode):
                     return True
+            if (
+                key == Qt.Key.Key_I
+                and not ctrl_or_cmd
+                and self._masks_tab_is_forward()
+                and panel is not None
+                and hasattr(panel, "toggle_mask_invert")
+                and panel.toggle_mask_invert()
+            ):
+                return True
 
         if key == Qt.Key.Key_Escape:
             gv = getattr(self, "gpu_view", None)
@@ -33967,7 +34350,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         else:
             if hasattr(self, 'image_label'):
                 self.image_label.setText(message)
-                self.image_label.setStyleSheet("QLabel { color: #666; font-size: 14px; background-color: transparent; }")
+                self.image_label.setStyleSheet("QLabel { color: #666; font-size: 15px; background-color: transparent; }")
             
         if hasattr(self, 'status_metadata_label'):
             self._apply_top_metadata_text("")
@@ -34003,7 +34386,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             # Single view mode - use image_label
             self.image_label.setText(message)
             self.image_label.setStyleSheet(
-                f"QLabel {{ color: {theme.INK_MUTED}; font-size: 14px; }}")
+                f"QLabel {{ color: {theme.INK_MUTED}; font-size: 15px; }}")
         
         # Clear top metadata when no files
         self._apply_top_metadata_text("")

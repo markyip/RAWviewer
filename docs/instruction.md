@@ -128,8 +128,9 @@ made "put the brush away" feel unreliable when the mode was hold-based.
 Clicking Add / Erase arms or disarms without a key.
 
 **P with no mask yet** creates one via `ensure_mask_layer_for_painting` (same
-as Create → Brush, including the immediate persist). **X with no mask**
-explains instead of arming nothing.
+as Create → Brush, including the immediate persist). If masks already exist
+but none is selected, P selects the last one rather than spawning another
+empty mask. **X with no mask** explains instead of arming nothing.
 
 **Brush Size / Flow / Feather / Edge Assist** appear under **Brush** while a
 brush is in hand. They mirror the Local section on the Global page — the same
@@ -395,9 +396,9 @@ only" — which is the more common of the two.
 - **`MaskLayer.enabled` has no UI.** Hiding a mask's *effect* to judge its
   contribution is a normal thing to want, the model supports it completely, and
   there is no way to ask for it.
-- **P with masks present but none selected** still creates a new empty mask
-  (`ensure_mask_layer_for_painting`), while the Add button is disabled in that
-  state — the shortcut and the button disagree.
+- **P with masks present but none selected** selects the last mask rather than
+  creating another empty one (`ensure_mask_layer_for_painting`), matching the
+  Add button's disabled-when-unselected behaviour.
 
 ## What holds up well
 

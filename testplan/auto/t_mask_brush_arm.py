@@ -225,6 +225,39 @@ def test_mask_key_toggle_via_host():
     check("Esc helper is idempotent", host._disarm_adjust_brushes_if_any() is False)
 
 
+def test_ensure_selects_existing_when_none_selected():
+    """P must not spawn a third empty mask when two exist but none is selected."""
+    import main as mainmod
+    from raw_mask_layers import MaskLayer, MaskLayerStack
+    from rawviewer_ui.adjust_panel import ImageAdjustPanelWidget, reset_section_expanded_session
+
+    reset_section_expanded_session()
+    panel = ImageAdjustPanelWidget()
+    panel.show()
+    panel.show_masks_tab()
+    stack = MaskLayerStack(
+        [MaskLayer.empty(32, 32, name="A"), MaskLayer.empty(32, 32, name="B")]
+    )
+    panel.set_mask_layer_stack(stack)
+    panel.select_mask_index(0)
+    panel._mask_list.setCurrentItem(None)
+    check("deselected", panel.active_mask_index() is None)
+
+    host = type("H", (), {})()
+    host.single_image_adjust_panel = panel
+    host._mask_layer_stack = stack
+    host._dodge_burn_mask_shape = lambda: (32, 32)
+    host._on_adjust_panel_editing_finished = lambda *_a, **_k: None
+    host._show_status = lambda *_a, **_k: None
+    host.ensure_mask_layer_for_painting = (
+        mainmod.RAWImageViewer.ensure_mask_layer_for_painting.__get__(host)
+    )
+    ok = host.ensure_mask_layer_for_painting()
+    check("ensure succeeded", ok is True)
+    check("did not spawn another layer", len(stack.layers) == 2)
+    check("selected the last layer", panel.active_mask_index() == 1)
+
+
 def test_p_shortcut_while_adjust_arms_mask_paint():
     """ApplicationShortcut P must not swallow Adjust's mask-Add binding."""
     import main as mainmod
@@ -251,6 +284,7 @@ def main() -> int:
     test_brush_create_does_not_arm_paint()
     test_host_add_does_not_arm_paint()
     test_mask_key_toggle_via_host()
+    test_ensure_selects_existing_when_none_selected()
     test_p_shortcut_while_adjust_arms_mask_paint()
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

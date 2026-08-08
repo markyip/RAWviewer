@@ -279,15 +279,14 @@ class ColorCalibrationDialog(QDialog):
             QDialog {{
                 background-color: {theme.SURFACE};
                 color: {theme.INK};
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             }}
             QLabel {{
                 color: {theme.INK};
-                font-size: 12px;
+                font-size: 13px;
             }}
             QGroupBox {{
                 font-weight: 600;
-                font-size: 12px;
+                font-size: 13px;
                 color: {theme.EMBER};
                 border: 1px solid {theme.LINE};
                 border-radius: 6px;
@@ -314,7 +313,10 @@ class ColorCalibrationDialog(QDialog):
         # Header Title
         iso_str = f" (ISO {self.iso})" if self.iso else ""
         header_lbl = QLabel(f"🎯 Color Target Calibration — {self.make} {self.model}{iso_str}")
-        header_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        # Not QFont("Segoe UI", ...): naming one family gives Qt no list to
+        # fall through, so on macOS it silently substitutes rather than
+        # reaching the platform UI font.
+        header_lbl.setFont(theme.ui_font(19, QFont.Weight.Bold))
         header_lbl.setStyleSheet(f"color: {theme.INK};")
         layout.addWidget(header_lbl)
 
@@ -323,7 +325,7 @@ class ColorCalibrationDialog(QDialog):
             "The chart must be evenly lit and square-on — a shadow or falloff across the patches is "
             "measured as camera colour error and baked into the profile."
         )
-        sub_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+        sub_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 12px;")
         layout.addWidget(sub_lbl)
 
         # Advisory, not a gate: a factory-profiled body can still need
@@ -348,7 +350,7 @@ class ColorCalibrationDialog(QDialog):
                 colour = theme.INK_FAINT
             note_lbl = QLabel(note)
             note_lbl.setWordWrap(True)
-            note_lbl.setStyleSheet(f"color: {colour}; font-size: 11px;")
+            note_lbl.setStyleSheet(f"color: {colour}; font-size: 12px;")
             layout.addWidget(note_lbl)
 
         # Canvas Widget
@@ -434,7 +436,7 @@ class ColorCalibrationDialog(QDialog):
             "when you don't own a chart."
         )
         source_lbl.setWordWrap(True)
-        source_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        source_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         layout.addWidget(source_lbl)
 
         # Attempt initial auto-detection

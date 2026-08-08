@@ -227,7 +227,7 @@ class CustomTitleBar(QFrame):
                 color: {theme.INK};
                 border-radius: 12px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 15px;
             """)
         layout.addWidget(self.icon_label)
 
@@ -246,7 +246,7 @@ class CustomTitleBar(QFrame):
         )
         self.metadata_label.setStyleSheet(f"""
             color: {theme.INK_MUTED};
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 500;
             padding: 0px 8px;
             letter-spacing: 0.15px;
@@ -406,7 +406,7 @@ class TopMetadataBar(QFrame):
         )
         self.metadata_label.setStyleSheet(f"""
             color: {theme.INK_MUTED};
-            font-size: 12px;
+            font-size: 13px;
             font-weight: 500;
             padding: 0px 8px;
             letter-spacing: 0.15px;
@@ -511,9 +511,8 @@ class CustomConfirmDialog(QDialog):
         self._message_label.setStyleSheet(f"""
             QLabel {{
                 color: {theme.INK};
-                font-size: 16px;
+                font-size: 17px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px;
                 margin: 0px;
             }}
@@ -533,8 +532,7 @@ class CustomConfirmDialog(QDialog):
             self._info_label.setStyleSheet(f"""
                 QLabel {{
                     color: {theme.INK_MUTED};
-                    font-size: 14px;
-                    font-family: 'Roboto', 'Segoe UI', sans-serif;
+                    font-size: 15px;
                     padding: 0px;
                     margin: 0px;
                 }}
@@ -563,9 +561,8 @@ class CustomConfirmDialog(QDialog):
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 20px;
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
             }}
@@ -599,9 +596,8 @@ class CustomConfirmDialog(QDialog):
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 20px;
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
             }}
@@ -630,9 +626,8 @@ class CustomConfirmDialog(QDialog):
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 20px;
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
             }}
@@ -863,9 +858,8 @@ class ExportProgressDialog(QDialog):
         self._message_label.setStyleSheet(f"""
             QLabel {{
                 color: {theme.INK};
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px;
                 margin: 0px;
             }}
@@ -900,8 +894,7 @@ class ExportProgressDialog(QDialog):
         self._percent_label.setStyleSheet(f"""
             QLabel {{
                 color: {theme.INK_MUTED};
-                font-size: 12px;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
+                font-size: 13px;
             }}
         """)
         bar_row.addWidget(self._percent_label)
@@ -924,9 +917,8 @@ class ExportProgressDialog(QDialog):
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 18px;
-                font-size: 13px;
+                font-size: 14px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 20px;
                 outline: none;
             }}
@@ -1106,9 +1098,8 @@ class CustomWarningDialog(QDialog):
         self._message_label.setStyleSheet(f"""
             QLabel {{
                 color: {theme.INK};
-                font-size: 16px;
+                font-size: 17px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px;
                 margin: 0px;
             }}
@@ -1128,8 +1119,7 @@ class CustomWarningDialog(QDialog):
             self._info_label.setStyleSheet(f"""
                 QLabel {{
                     color: {theme.INK_MUTED};
-                    font-size: 14px;
-                    font-family: 'Roboto', 'Segoe UI', sans-serif;
+                    font-size: 15px;
                     padding: 0px;
                     margin: 0px;
                 }}
@@ -1158,9 +1148,8 @@ class CustomWarningDialog(QDialog):
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 20px;
-                font-size: 14px;
+                font-size: 15px;
                 font-weight: 500;
-                font-family: 'Roboto', 'Segoe UI', sans-serif;
                 padding: 0px 24px;
                 outline: none;
             }}
@@ -1362,7 +1351,7 @@ class SingleImageViewOverlay(QWidget):
             QLabel {{
                 background-color: {theme.rgba(theme.BURN_RGB, 200)};
                 color: {theme.INK};
-                font-size: 12px;
+                font-size: 13px;
                 font-weight: 600;
                 border-radius: 4px;
                 padding: 5px 10px;

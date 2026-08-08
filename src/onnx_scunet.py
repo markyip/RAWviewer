@@ -11,11 +11,11 @@ import numpy as np
 # ONNX, fixed 512x512 input) stored in the repo via Git LFS. Pure-conv model:
 # ~5x faster than SCUNet on CPU with equal/better measured denoising, so it is
 # the preferred model on platforms without a GPU EP (macOS/Linux CPU).
-NAFNET_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/nafnet.onnx"
+NAFNET_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/main/models/nafnet.onnx"
 NAFNET_MODEL_SHA256 = "9fb510fdce45ff393ca2822886c6c23cd60c09d47df1229bd7d5f0a07c98f3e0"
 # SCUNet (scunet_color_real_psnr, official KAIR weights, fp16) via Git LFS.
 # Preferred on Windows where DirectML runs its window-attention graph fast.
-DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/scunet.onnx"
+DENOISE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/main/models/scunet.onnx"
 DENOISE_MODEL_SHA256 = "d426f34a1b71670e43e6219161a3258fe65b03ece946467ae842737a55ef0849"
 # Legacy fallback: Restormer weights from the old release asset (what shipped
 # as "scunet.onnx" before the real SCUNet export existed).

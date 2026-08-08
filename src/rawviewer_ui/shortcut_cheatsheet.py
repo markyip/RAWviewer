@@ -88,10 +88,10 @@ _EDITOR = [
     (
         "Retouch",
         [
-            ("D / B", "Dodge / Burn brush"),
-            ("X", "Eraser"),
-            ("H", "Heal"),
-            ("P", "Paint a mask (hold)"),
+            ("D / B", "Dodge / Burn brush (hold)"),
+            ("X", "Eraser (hold on Global, tap on Masks)"),
+            ("H", "Heal (hold)"),
+            ("P", "Masks: add to a mask — tap to arm, tap again to put away"),
             ("M", "Show what is masked"),
             ("Two-finger scroll", "Brush size, while a brush is armed"),
         ],
@@ -177,7 +177,7 @@ def _key_row(keys: str) -> QWidget:
     for part in parts:
         if part in ("+", "/"):
             joiner = QLabel(part)
-            joiner.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+            joiner.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 12px;")
             row.addWidget(joiner)
         elif part.strip():
             row.addWidget(_keycap(part.strip()))
@@ -226,14 +226,14 @@ class ShortcutCheatSheet(QWidget):
         head = QHBoxLayout()
         heading = QLabel("Keyboard shortcuts")
         heading.setStyleSheet(
-            f"color: {theme.INK}; font-size: 15px; font-weight: 700; "
+            f"color: {theme.INK}; font-size: 16px; font-weight: 700; "
             "letter-spacing: 0.3px;"
         )
         head.addWidget(heading)
         # EMBER only here: the mode you are actually in.
         context = QLabel(title)
         context.setStyleSheet(
-            f"color: {theme.EMBER}; font-size: 11px; font-weight: 700; "
+            f"color: {theme.EMBER}; font-size: 12px; font-weight: 700; "
             "letter-spacing: 1.2px;"
         )
         head.addSpacing(10)
@@ -247,7 +247,7 @@ class ShortcutCheatSheet(QWidget):
             f"""
             QPushButton {{
                 background: transparent; border: none; border-radius: 4px;
-                color: {theme.INK_MUTED}; font-size: 13px;
+                color: {theme.INK_MUTED}; font-size: 14px;
             }}
             QPushButton:hover {{ background: {theme.RAISED_HI}; color: {theme.INK}; }}
             """
@@ -272,7 +272,7 @@ class ShortcutCheatSheet(QWidget):
             for group_title, entries in groups[start : start + per_column]:
                 label = QLabel(group_title.upper())
                 label.setStyleSheet(
-                    f"color: {theme.INK_MUTED}; font-size: 9px; font-weight: 700; "
+                    f"color: {theme.INK_MUTED}; font-size: 10px; font-weight: 700; "
                     "letter-spacing: 1.4px;"
                 )
                 col.addWidget(label)
@@ -284,7 +284,7 @@ class ShortcutCheatSheet(QWidget):
                 for row_i, (keys, description) in enumerate(entries):
                     grid.addWidget(_key_row(keys), row_i, 0, Qt.AlignmentFlag.AlignRight)
                     desc = QLabel(description)
-                    desc.setStyleSheet(f"color: {theme.INK}; font-size: 11px;")
+                    desc.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
                     grid.addWidget(desc, row_i, 1)
                 col.addLayout(grid)
             col.addStretch(1)
@@ -292,7 +292,7 @@ class ShortcutCheatSheet(QWidget):
         card_col.addLayout(columns)
 
         footer = QLabel("Esc to close")
-        footer.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 10px;")
+        footer.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
         card_col.addWidget(footer, alignment=Qt.AlignmentFlag.AlignRight)
 
         for seq in ("Esc", "?"):

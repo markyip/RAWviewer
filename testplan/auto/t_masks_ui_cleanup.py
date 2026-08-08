@@ -221,29 +221,30 @@ def test_paint_creates_its_own_mask_like_every_other_tool():
 
 
 def test_create_section_shows_every_way_to_start_a_mask():
-    """Five buttons, one press each, all visible.
+    """Create buttons, one press each, all visible.
 
     This was briefly a "Create new mask" menu. The idea was right -- one
     place that starts a mask, naming the tool up front -- but it charged two
     clicks and hid the choices behind a word.
 
-    What it must not go back to is a "New empty mask" button above these five.
+    What it must not go back to is a "New empty mask" button above these.
     The AI tools each create their own mask while the brush
     paints into the selected one, so that button was load-bearing for the
     brush alone and inert beside everything else.
     """
     p = _panel()
     btns = p._mask_create_buttons
-    # AI Selection leads the AI group: it is ~10x cheaper than Smart Object
-    # and needs no extra download, so it is the right default reach. Smart
-    # Object follows rather than leading -- see _MASK_CREATE_ITEMS.
+    # Luminance / Color sit with Brush (no model download). AI Selection
+    # leads the AI group: it is ~10x cheaper than Smart Object.
     assert [b.text() for b in btns.values()] == [
-        "Brush", "AI Selection", "Smart Object", "Sky", "Depth",
+        "Brush", "Luminance", "Color", "AI Selection", "Smart Object", "Sky", "Depth",
     ], [b.text() for b in btns.values()]
     assert getattr(p, "_mask_add_btn", None) is None, "New empty mask came back"
 
     # Only the tools that wait for something on the photo stay lit.
-    assert {k for k, b in btns.items() if b.isCheckable()} == {"ai_click"}
+    assert {k for k, b in btns.items() if b.isCheckable()} == {
+        "ai_click", "luma", "color"
+    }
 
     # Brush is the only entry that needs a layer made for it up front.
     fired = []
@@ -251,14 +252,14 @@ def test_create_section_shows_every_way_to_start_a_mask():
     p._on_mask_create("brush")
     assert fired == [1], "Brush did not ask the host for a mask"
 
-    for kind in ("ai_click",):
+    for kind in ("ai_click", "luma", "color"):
         fired.clear()
         p._on_mask_create(kind)
         assert fired == [], (
             f"{kind} pre-created a mask -- it makes its own, so arming and "
             "then changing your mind would leave an empty one behind"
         )
-    print("  OK   five buttons, one press each")
+    print("  OK   create buttons, one press each")
 
 
 def test_create_button_lights_while_its_tool_is_armed():
@@ -834,7 +835,9 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
         p._mask_paint_btn, p._mask_ai_subject_btn, p._mask_ai_sky_btn,
         p._mask_ai_depth_btn, p._mask_ai_click_btn,
     )}
-    assert labels == {"Add (P)", "Smart Object", "Sky", "Depth", "AI Selection"}, labels
+    assert labels == {
+        "Add to this mask (P)", "Smart Object", "Sky", "Depth", "AI Selection"
+    }, labels
     print("  OK   the tab is grouped by what each control acts on")
 
 
@@ -856,9 +859,11 @@ def test_delete_does_not_look_like_its_neighbours():
     """Weight follows consequence -- Erase and Invert undo, Delete does not."""
     p = _panel()
     p.set_mask_layer_stack(MaskLayerStack([_painted_layer(name="M1")]))
-    assert p._mask_del_btn.text() == "✕", (
+    # Icon-only compact control (qtawesome times), not a full-width text label.
+    assert p._mask_del_btn.text() == "", (
         f"Delete is back to a full-width label: {p._mask_del_btn.text()!r}"
     )
+    assert not p._mask_del_btn.icon().isNull(), "Delete lost its icon"
     assert p._mask_del_btn.width() <= 40, "Delete is as wide as a normal button"
     sheet = p._mask_del_btn.styleSheet()
     assert "e5484d" in sheet.lower(), "Delete has no destructive colour on hover"
@@ -866,6 +871,26 @@ def test_delete_does_not_look_like_its_neighbours():
     resting = sheet.split(":hover")[0]
     assert "e5484d" not in resting.lower(), "Delete is red before you reach for it"
     print("  OK   Delete is quiet until reached for, then the one red")
+
+
+def test_tool_buttons_carry_quiet_leading_icons():
+    """Icons sit beside labels so rows scan faster; text stays authoritative."""
+    p = _panel()
+    for kind, btn in p._mask_create_buttons.items():
+        assert not btn.icon().isNull(), f"{kind} create button has no icon"
+        assert btn.text(), f"{kind} create button lost its label"
+    for btn, label in (
+        (p._mask_paint_btn, "Add"),
+        (p._mask_erase_btn, "Erase"),
+        (p._mask_invert_btn, "Invert"),
+        (p._dodge_btn, "Dodge"),
+        (p._burn_btn, "Burn"),
+        (p._erase_btn, "Eraser"),
+        (p._heal_btn, "Heal"),
+    ):
+        assert not btn.icon().isNull(), f"{label} has no icon"
+        assert label.split()[0] in btn.text(), f"{label} label drifted: {btn.text()!r}"
+    print("  OK   tool buttons keep labels and gain leading icons")
 
 
 def main() -> int:
@@ -887,6 +912,7 @@ def main() -> int:
     test_masks_tab_is_grouped_by_what_a_control_acts_on()
     test_brush_section_appears_only_with_a_brush_in_hand()
     test_delete_does_not_look_like_its_neighbours()
+    test_tool_buttons_carry_quiet_leading_icons()
     test_overlay_covers_every_kind_of_mask()
     test_selected_mask_is_ember_others_recede()
     test_selected_mask_wins_where_masks_overlap()

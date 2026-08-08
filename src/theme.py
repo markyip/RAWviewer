@@ -62,3 +62,84 @@ def rgba(rgb: tuple[int, int, int], alpha: int) -> str:
     """QSS/QColor-style rgba() string from one of the *_RGB tuples above."""
     r, g, b = rgb
     return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+# --- Type ------------------------------------------------------------------
+#
+# ONE font stack for the whole app, for the same reason there is one palette:
+# a second one is a second answer to a question that has one right answer.
+#
+# The app used to declare three, and the majority stack put **Roboto** first.
+# Roboto ships with neither macOS nor Windows, so on a default install of
+# either it fell through -- to the system UI font on macOS, to Segoe UI on
+# Windows -- and everything happened to match. That match was luck, not
+# design: a user who has Roboto installed (Android Studio and several design
+# tools install it) got Roboto in the twelve places that named it first and
+# the platform font in the three that did not, splitting the UI across two
+# typefaces on one screen.
+#
+# The fix is NOT a better stack in every stylesheet -- it is no family in any
+# stylesheet. The app font is set once (main.py, at startup) from the families
+# below, and widgets inherit it. A QSS `font-family` rule OVERRIDES that app
+# font, so every such rule is a place the single typeface can silently come
+# apart again; there are now none outside bootstrap.py.
+#
+# Order matters. The platform's own UI font comes first, and no third-party
+# family is named at all -- naming one is what created a preference for a font
+# the app does not ship and cannot rely on. Qt resolves this list itself, which
+# a hardcoded QFont("Segoe UI", ...) cannot do: one family is not a list, so it
+# substitutes silently on macOS rather than falling through.
+#
+# `bootstrap.py` deliberately does NOT use this: it imports winreg at module
+# scope, so it only ever runs on Windows, and naming Segoe UI directly there
+# is correct rather than inconsistent.
+FONT_FAMILIES = (".AppleSystemUIFont", "Segoe UI", "Helvetica Neue", "Arial")
+
+# How much bigger than the platform default the base UI font runs, in points.
+# A delta rather than an absolute size: macOS defaults to 13pt and Windows to
+# 9pt, and pinning one number makes the app correct on one platform and wrong
+# on the other. Stylesheet `font-size: Npx` rules do NOT scale with this --
+# they are absolute by definition -- so they were bumped to match, and any new
+# one should be sized against its neighbours rather than against this.
+FONT_BASE_BUMP_PT = 1.0
+
+
+def shortcut(*keys: str) -> str:
+    """Render a shortcut for a tooltip, in the platform's own vocabulary.
+
+    ``shortcut("Ctrl", "C")`` reads "⌘C" on macOS and "Ctrl+C" on Windows.
+    Writing "Ctrl+C" on a Mac is not a small inaccuracy -- Macs have a Control
+    key that does something else, so it names the wrong key rather than the
+    right key awkwardly.
+
+    Pass the modifier as the literal "Ctrl" regardless of platform; this is
+    where it becomes ⌘.
+    """
+    import sys
+
+    mac = sys.platform == "darwin"
+    glyphs = {"Ctrl": "⌘", "Shift": "⇧", "Alt": "⌥", "Meta": "⌃"} if mac else {}
+    parts = [glyphs.get(k, k) for k in keys]
+    return "".join(parts) if mac else "+".join(parts)
+
+
+def with_shortcut(tip: str, *keys: str) -> str:
+    """A tooltip with its shortcut appended in a consistent place and form.
+
+    One helper rather than each call site formatting its own, so that a
+    control's key is always in the same position -- at the end, parenthesised
+    -- instead of sometimes mid-sentence and sometimes missing.
+    """
+    return f"{tip} ({shortcut(*keys)})"
+
+
+def ui_font(size_px: int, weight=None):
+    """A QFont on the canonical stack, for non-stylesheet call sites."""
+    from PyQt6.QtGui import QFont
+
+    f = QFont()
+    f.setFamilies(list(FONT_FAMILIES))
+    f.setPixelSize(int(size_px))
+    if weight is not None:
+        f.setWeight(weight)
+    return f

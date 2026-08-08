@@ -773,7 +773,7 @@ class GpuImageView(QGraphicsView):
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._placeholder.setStyleSheet(
-            "QLabel { color: #666; font-size: 14px; background-color: transparent; }"
+            "QLabel { color: #666; font-size: 15px; background-color: transparent; }"
         )
         self._placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._placeholder.hide()
@@ -2085,7 +2085,7 @@ class GpuImageView(QGraphicsView):
             hud.setStyleSheet(
                 "background-color: #14120f; color: #ede7dd; "
                 "border: 1px solid #3a332a; border-radius: 6px; "
-                "padding: 4px 10px; font-size: 13px; font-weight: 600;"
+                "padding: 4px 10px; font-size: 14px; font-weight: 600;"
             )
             self._brush_hud = hud
         hud.setText(text)

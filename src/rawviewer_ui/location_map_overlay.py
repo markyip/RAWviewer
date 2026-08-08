@@ -278,8 +278,7 @@ class MapCoordinateBadge(QWidget):
             }
             QLabel {
                 color: #ECECEC;
-                font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
-                font-size: 10px;
+                font-size: 11px;
                 font-weight: 500;
                 background-color: transparent;
                 border: none;

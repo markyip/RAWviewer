@@ -1,10 +1,17 @@
-"""One-shot automatic adjustments: Auto white balance and Auto straighten.
+"""One-shot automatic adjustments: Auto white balance, tone and straighten.
 
-Both are ESTIMATORS feeding the existing manual controls -- Auto WB produces a
-neutral-gray sample for raw_adjustments.solve_white_balance_from_sample (the
-same solver the WB dropper uses), Auto straighten produces a CropAngle for the
-Transform slider. The user sees exactly which sliders moved and can refine or
-undo with the normal controls; nothing here writes pixels or sidecars itself.
+All three are ESTIMATORS feeding the existing manual controls -- Auto WB
+produces a neutral-gray sample for raw_adjustments.solve_white_balance_from_sample
+(the same solver the WB dropper uses), Auto tone produces the six PV2012 Light
+slider values, Auto straighten produces a CropAngle for the Transform slider.
+The user sees exactly which sliders moved and can refine or undo with the normal
+controls; nothing here writes pixels or sidecars itself.
+
+That is the whole reason this module exists rather than reusing
+raw_tone_recovery: recovery renders display pixels for the P-key preview, so
+there are no slider values behind it to record, refine, or write to a sidecar.
+An "auto" that produced pixels would be the one destructive step in a
+non-destructive pipeline.
 """
 
 from __future__ import annotations
@@ -57,6 +64,235 @@ def estimate_neutral_rgb(linear_rgb: np.ndarray) -> Optional[tuple]:
         return (r, g, b)
     except Exception as e:
         logger.debug("[AUTO_WB] estimate failed: %s", e)
+        return None
+
+
+# --- Auto tone -------------------------------------------------------------
+#
+# Targets are stated in the PV2012 PERCEPTUAL space (raw_pv2012._scene_to_perceptual),
+# because that is the space the six Light sliders act in. Measuring in scene
+# linear or in display sRGB would put the thresholds in a different space from
+# the controls they drive, and the numbers would only look right by accident.
+#
+# The single most important constant here is where white sits. In perceptual
+# space a clipped white lands at _PERCEPTUAL_WHITE (~0.813), NOT at 1.0 --
+# raw_pv2012 documents at length how measuring highlight math against 1.0
+# silently attenuates it into a no-op. Every highlight threshold below is a
+# fraction of _PERCEPTUAL_WHITE for exactly that reason.
+_AUTO_TONE_MEDIAN_TARGET = 0.38  # perceptual; ~0.16 linear, just under mid-grey
+_AUTO_TONE_MAX_EV = 2.0
+_AUTO_TONE_MAX_SLIDER = 60.0
+
+# Dead zones. Below these an image is "already balanced" and AUTO refuses
+# rather than twitching six sliders by amounts nobody can see.
+_AUTO_TONE_EV_DEADZONE = 0.15
+_AUTO_TONE_SLIDER_DEADZONE = 5.0
+
+# A pixel at/above this fraction of perceptual white counts as near-clipped;
+# at/below the low one it counts as crushed.
+_AUTO_TONE_CLIP_FRAC = 0.98
+_AUTO_TONE_CRUSH_Y = 0.05  # perceptual; ~0.02 linear
+#
+# Every (start, full) pair below was measured, not guessed: the estimator's
+# own statistics were run over 20 real Canon CR3 edit bases (see the header
+# note on why the space matters) and each ramp starts above what a normal
+# frame shows and reaches its cap near the worst frame in that set. Tuning
+# these on synthetic histograms produced wildly wrong numbers -- a lognormal
+# test image has no true blacks and no specular highlights, so Whites and
+# Blacks both pinned near their caps on frames that needed neither.
+#
+# Near-clipped fraction. Measured median 0.8%: a little clipping is NORMAL
+# (specular highlights, a bright sky), so recovery must not engage there.
+# The worst frame in the set clipped 13.8%.
+_AUTO_TONE_CLIP_START = 0.01
+_AUTO_TONE_CLIP_FULL = 0.10
+
+# Crushed fraction. Measured median 8.6%, upper quartile 24.5%, worst 58%.
+# Scene-linear RAW is legitimately dark in the shadows -- this is the ramp
+# that a fraction-of-frame threshold gets most wrong if it is set from
+# intuition, which is why it starts so much higher than the clipping one.
+_AUTO_TONE_CRUSH_START = 0.05
+_AUTO_TONE_CRUSH_FULL = 0.40
+
+# Unused top-end headroom, as a fraction of perceptual white. Measured median
+# deficit 0 (most frames already reach white); the flattest frame in the set
+# sat 30% short.
+_AUTO_TONE_WHITES_START = 0.08
+_AUTO_TONE_WHITES_FULL = 0.30
+
+# Black point. Measured median 0.011, worst 0.090 -- an unhazed RAW already
+# has real blacks, so this fires only for haze / flare / a lifted profile.
+_AUTO_TONE_BLACKS_START = 0.04
+_AUTO_TONE_BLACKS_FULL = 0.12
+
+# Perceptual interquartile spread of a scene with normal contrast (measured
+# median 0.31, lower quartile 0.22). Below this the image is flat (haze,
+# overcast, a flat picture profile) and gains contrast; the estimator never
+# REMOVES contrast, because "this scene is genuinely contrasty" and "this
+# scene is badly exposed" look identical from a histogram and only one of
+# them wants flattening.
+_AUTO_TONE_NORMAL_IQR = 0.20
+_AUTO_TONE_MAX_ENDPOINT = 40.0
+
+
+def _ramp(value: float, start: float, full: float) -> float:
+    """0 below ``start``, 1 at/above ``full``, linear between."""
+    if full <= start:
+        return 1.0 if value >= full else 0.0
+    return float(np.clip((value - start) / (full - start), 0.0, 1.0))
+
+_AUTO_TONE_KEYS = (
+    "Exposure2012",
+    "Contrast2012",
+    "Highlights2012",
+    "Shadows2012",
+    "Whites2012",
+    "Blacks2012",
+)
+
+
+def _solve_ev_for_median(median_lum: float, target_y: float) -> float:
+    """EV that puts ``median_lum`` at ``target_y`` in perceptual space.
+
+    Bisection rather than an analytic inverse: _scene_to_perceptual is a
+    Reinhard-style compression composed with an interpolated base curve, so
+    inverting it in closed form means inverting that curve too. It is monotone,
+    which is all bisection needs, and this runs on ONE scalar -- the median --
+    not on the image, because a monotone map commutes with the median.
+    """
+    from raw_pv2012 import _scene_to_perceptual
+
+    def y_at(ev: float) -> float:
+        return float(
+            _scene_to_perceptual(np.array([median_lum * (2.0**ev)], np.float32))[0]
+        )
+
+    lo, hi = -_AUTO_TONE_MAX_EV, _AUTO_TONE_MAX_EV
+    if y_at(lo) >= target_y:
+        return lo
+    if y_at(hi) <= target_y:
+        return hi
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if y_at(mid) < target_y:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def estimate_auto_tone(linear_rgb: np.ndarray) -> Optional[dict]:
+    """Auto tone: the six PV2012 Light sliders from a scene-linear buffer.
+
+    Takes the SAME input as Auto WB -- the un-adjusted decoded edit base
+    (``_adjust_preview_base_rgb``) -- and returns ABSOLUTE slider values that
+    overwrite whatever is on the sliders now, exactly as the WB dropper
+    overwrites Temperature/Tint. Two consequences worth stating:
+
+      * pressing AUTO twice is a no-op by construction. It does not compound,
+        because the second press measures the same untouched base as the first.
+      * all six keys are always returned, zeros included, so applying is a
+        clean overwrite rather than a merge that could leave a stale Blacks
+        from a previous press fighting the new estimate.
+
+    Returns None when the image is already balanced (every correction inside
+    its dead zone) or when the buffer is unusable, mirroring
+    ``estimate_straighten_angle``'s refuse-rather-than-guess contract.
+    """
+    try:
+        from raw_pv2012 import _PERCEPTUAL_WHITE, _scene_to_perceptual
+
+        a = linear_rgb
+        if a is None or getattr(a, "ndim", 0) != 3 or a.shape[2] < 3:
+            return None
+        h, w = a.shape[:2]
+        step = max(1, int((h * w / 150_000) ** 0.5))
+        s = a[::step, ::step, :3].astype(np.float32)
+        if s.size < 3 * 300:
+            return None
+        lum = 0.2126 * s[..., 0] + 0.7152 * s[..., 1] + 0.0722 * s[..., 2]
+        lum = np.clip(lum, 0.0, None)
+        median = float(np.median(lum))
+        if not np.isfinite(median) or median <= 1e-6:
+            # An all-black (or unrendered) buffer. Exposure would want +inf and
+            # every other measure is meaningless.
+            return None
+
+        # Exposure: anchor the median to a midtone, but never past the point
+        # where the top of the histogram starts clipping. Median-anchoring
+        # alone turns a night scene into +2 EV of mud; the highlight limiter is
+        # what makes negative Highlights (below) the recovery mechanism instead
+        # of having Exposure and Highlights fight each other.
+        #
+        # Perceptual white corresponds to linear 1.0 by construction
+        # (t = 1/(1+0.25) = 0.8 -> base curve -> _PERCEPTUAL_WHITE), so the
+        # headroom solve is a plain log2 in linear -- no bisection needed.
+        # The 99.5th percentile, not the max: a specular highlight or a light
+        # source is allowed to clip, and on a typical frame it is well under
+        # half a percent of the pixels.
+        ev_median = _solve_ev_for_median(median, _AUTO_TONE_MEDIAN_TARGET)
+        p995 = float(np.percentile(lum, 99.5))
+        ev_headroom = (
+            float(np.log2(1.0 / p995)) if p995 > 1e-6 else _AUTO_TONE_MAX_EV
+        )
+        ev = float(np.clip(min(ev_median, ev_headroom), -_AUTO_TONE_MAX_EV, _AUTO_TONE_MAX_EV))
+
+        # Everything below is measured on the frame as Exposure will leave it,
+        # so the sliders do not re-correct what Exposure already fixed.
+        y = _scene_to_perceptual(lum * (2.0**ev))
+        clip_y = _AUTO_TONE_CLIP_FRAC * _PERCEPTUAL_WHITE
+
+        frac_clipped = float(np.mean(y >= clip_y))
+        frac_crushed = float(np.mean(y <= _AUTO_TONE_CRUSH_Y))
+
+        highlights = -_AUTO_TONE_MAX_SLIDER * _ramp(
+            frac_clipped, _AUTO_TONE_CLIP_START, _AUTO_TONE_CLIP_FULL
+        )
+        shadows = _AUTO_TONE_MAX_SLIDER * _ramp(
+            frac_crushed, _AUTO_TONE_CRUSH_START, _AUTO_TONE_CRUSH_FULL
+        )
+
+        # Endpoints. Whites fills unused headroom at the top; Blacks restores a
+        # black point the scene never reached (haze, flare, a lifted profile).
+        p_hi = float(np.percentile(y, 99.5))
+        p_lo = float(np.percentile(y, 0.5))
+        headroom_deficit = max(_PERCEPTUAL_WHITE - p_hi, 0.0) / _PERCEPTUAL_WHITE
+        whites = _AUTO_TONE_MAX_ENDPOINT * _ramp(
+            headroom_deficit, _AUTO_TONE_WHITES_START, _AUTO_TONE_WHITES_FULL
+        )
+        # Never both: raising Whites on a frame that is already clipping would
+        # undo the Highlights recovery two lines up.
+        if frac_clipped > _AUTO_TONE_CLIP_START:
+            whites = 0.0
+        blacks = -_AUTO_TONE_MAX_ENDPOINT * _ramp(
+            max(p_lo, 0.0), _AUTO_TONE_BLACKS_START, _AUTO_TONE_BLACKS_FULL
+        )
+
+        # Contrast from the perceptual interquartile spread. Positive only --
+        # see _AUTO_TONE_NORMAL_IQR.
+        q25, q75 = (float(v) for v in np.percentile(y, (25.0, 75.0)))
+        iqr = max(q75 - q25, 0.0)
+        contrast = _AUTO_TONE_MAX_ENDPOINT * _ramp(
+            _AUTO_TONE_NORMAL_IQR - iqr, 0.0, _AUTO_TONE_NORMAL_IQR
+        )
+
+        out = {
+            "Exposure2012": round(ev, 2),
+            "Contrast2012": round(contrast),
+            "Highlights2012": round(highlights),
+            "Shadows2012": round(shadows),
+            "Whites2012": round(whites),
+            "Blacks2012": round(blacks),
+        }
+        if abs(out["Exposure2012"]) < _AUTO_TONE_EV_DEADZONE and all(
+            abs(out[k]) < _AUTO_TONE_SLIDER_DEADZONE
+            for k in _AUTO_TONE_KEYS
+            if k != "Exposure2012"
+        ):
+            return None
+        return {k: float(out[k]) for k in _AUTO_TONE_KEYS}
+    except Exception as e:
+        logger.debug("[AUTO_TONE] estimate failed: %s", e)
         return None
 
 

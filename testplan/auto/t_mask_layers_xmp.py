@@ -34,6 +34,42 @@ def main() -> int:
     check("deserialize('') returns None", deserialize_stack("") is None)
     check("deserialize(garbage) returns None", deserialize_stack("{not json") is None)
 
+    # --- memory-aware layer cap ---
+    from mask_layers_xmp import max_mask_layers
+
+    # Tiny available RAM + huge frame → hard floor of 1, never unbounded.
+    check(
+        "max_mask_layers respects a tight RAM budget",
+        max_mask_layers(available_bytes=64 * 1024 * 1024, frame_pixels=15_000_000) <= 4,
+    )
+    # Hard backstop: even with "infinite" RAM the count stays bounded.
+    check(
+        "max_mask_layers hard-caps regardless of RAM",
+        max_mask_layers(available_bytes=10**15, frame_pixels=100_000) <= 24,
+    )
+
+    # A sidecar listing more layers than the cap must truncate, not OOM.
+    prev_max = os.environ.get("RAWVIEWER_MASK_LAYERS_MAX")
+    os.environ["RAWVIEWER_MASK_LAYERS_MAX"] = "3"
+    try:
+        tiny = np.zeros((8, 8), np.float32)
+        tiny[2:6, 2:6] = 1.0
+        bloated = MaskLayerStack(
+            layers=[MaskLayer(tiny.copy(), name=f"L{i}") for i in range(10)]
+        )
+        bloated_serial = serialize_stack(bloated)
+        capped = deserialize_stack(bloated_serial)
+        check(
+            "deserialize truncates to the layer cap",
+            capped is not None and len(capped.layers) == 3,
+            f"got {None if capped is None else len(capped.layers)}",
+        )
+    finally:
+        if prev_max is None:
+            os.environ.pop("RAWVIEWER_MASK_LAYERS_MAX", None)
+        else:
+            os.environ["RAWVIEWER_MASK_LAYERS_MAX"] = prev_max
+
     h, w = 48, 64
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     alpha1 = np.clip(1.0 - np.sqrt((xx - 20) ** 2 + (yy - 20) ** 2) / 15.0, 0.0, 1.0).astype(np.float32)

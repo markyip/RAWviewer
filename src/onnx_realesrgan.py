@@ -19,7 +19,7 @@ import numpy as np
 
 # RealESRGAN_x2plus (xinntao/Real-ESRGAN v0.2.1 official weights, BSD-3-Clause,
 # params_ema) exported to ONNX at a static 256x256 -> 512x512 tile shape.
-UPSCALE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/development/models/realesrgan_x2.onnx"
+UPSCALE_MODEL_URL = "https://github.com/markyip/RAWviewer/raw/main/models/realesrgan_x2.onnx"
 UPSCALE_MODEL_SHA256 = "35fa2e6f2b44bf72afa79c1281b47d6cfc9ec093ad109742ba4c80e1c4fe06d2"
 UPSCALE_MODEL_NAME = "realesrgan_x2.onnx"
 
