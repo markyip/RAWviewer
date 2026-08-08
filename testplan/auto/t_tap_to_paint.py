@@ -720,7 +720,49 @@ def test_erasing_with_no_mask_says_so():
     print("  OK   X with no mask explains instead of arming nothing")
 
 
+def test_sam_click_floor_is_absolute_not_a_frame_fraction():
+    """A SAM click must be rejected for being EMPTY, never for being small.
+
+    The click path once reused _AI_MASK_MIN_COVERAGE (0.2% of the frame),
+    which asks "is this big enough to be a sky". That is the wrong
+    question for click-to-select: on a 3300x2200 base it rejects anything
+    smaller than roughly a 120x120 square, and picking small specific
+    things -- "one flower", per the tool's own tooltip -- is the entire
+    purpose of AI Selection.
+
+    Guards both halves: the floor must be an absolute pixel count (so it
+    cannot drift with base resolution), and it must be low enough that a
+    genuinely small object still lands.
+    """
+    import main
+
+    floor = main._SAM_MIN_SELECTED_PX
+    assert isinstance(floor, int), f"floor is not an absolute count: {floor!r}"
+    assert 0 < floor <= 64, f"floor is not a speck guard: {floor}"
+
+    # A 20x20 object -- far below the old fractional gate at every base
+    # size -- must survive on the smallest and largest bases we render.
+    for h, w in ((800, 1200), (1100, 1650), (2200, 3300)):
+        alpha = np.zeros((h, w), np.float32)
+        alpha[:20, :20] = 1.0
+        selected = int(np.count_nonzero(alpha > 0.5))
+        assert selected >= floor, (
+            f"a 20x20 selection ({selected}px) is refused on a {w}x{h} base"
+        )
+        # The fractional gate this replaced would have refused all three.
+        assert selected / float(h * w) < main._AI_MASK_MIN_COVERAGE, (
+            "test no longer demonstrates the regression it guards"
+        )
+
+    # An outright refusal -- exactly zero pixels, which is what predict()
+    # returns once it thresholds -- still has to be caught.
+    empty = np.zeros((800, 1200), np.float32)
+    assert int(np.count_nonzero(empty > 0.5)) < floor, "an empty mask passed the floor"
+    print("  OK   SAM click floor rejects empty, not small")
+
+
 def main() -> int:
+    test_sam_click_floor_is_absolute_not_a_frame_fraction()
     test_latch_survives_key_release()
     test_latched_move_paints_without_any_button()
     test_end_key_paint_clears_the_latch()

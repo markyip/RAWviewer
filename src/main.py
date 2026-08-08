@@ -2375,10 +2375,19 @@ _AI_MASK_BUSY_TEXT = {
 # kind, which only ever worked because "subject" and "sky" happen to be the
 # nouns the sentence needed -- Depth is not a thing you find "a" of in a
 # photo, so the noun has to be written rather than interpolated.
+#
+# Stored WITHOUT the closing period so the "no mask added" variant can be
+# appended rather than spliced. Building it by slicing the last character off
+# a finished sentence assumed every entry ends in exactly one period: Depth's
+# already contains an em dash, so it rendered with two of them, and any entry
+# ending in "!", an ellipsis, or no punctuation would have lost its last real
+# letter instead.
 _AI_MASK_NOTHING_FOUND = {
-    "subject": "Could not find a subject in this photo.",
-    "sky": "Could not find any sky in this photo.",
-    "depth": "Could not read depth from this photo — it looks flat.",
+    "subject": "Could not find a subject in this photo",
+    "sky": "Could not find any sky in this photo",
+    # No em dash in any entry: the no-layer variant appends one, and two in a
+    # single status line reads as a typo.
+    "depth": "Could not read depth from this photo; it looks flat",
 }
 
 
@@ -2389,8 +2398,16 @@ def _ai_mask_nothing_found_text(kind: str, *, no_layer: bool = False) -> str:
     "it returned something too empty to be worth a layer"; the user only
     needs to hear the second half in the latter case.
     """
-    base = _AI_MASK_NOTHING_FOUND.get(kind, f"Could not find a {kind} in this photo.")
-    return f"{base[:-1]} — no mask added." if no_layer else base
+    base = _AI_MASK_NOTHING_FOUND.get(kind, f"Could not find a {kind} in this photo")
+    return f"{base} — no mask added." if no_layer else f"{base}."
+
+# Fewest pixels a SAM click may select and still count as a selection.
+# Deliberately an absolute pixel count rather than a fraction of the frame:
+# the question on this path is "did SAM refuse", not "is it big enough", and
+# a fraction makes the answer depend on the base resolution. A refusal is
+# exactly zero pixels once predict() has thresholded, so this only has to
+# clear a degenerate speck.
+_SAM_MIN_SELECTED_PX = 16
 
 # Mean absolute alpha difference below which two masks are "the same mask".
 # Generous enough to survive the sidecar's 8-bit round trip (1/255 = 0.004),
@@ -23217,11 +23234,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not ready:
             # First use on macOS: the weights download on demand, exactly
             # like the denoise models. Say so rather than looking hung.
-            self._show_status(f"Downloading {kind} model (first use)...", 0)
+            self._show_status(
+                f"Downloading the {_AI_MASK_LAYER_NAMES.get(kind, kind)} "
+                f"model (first use)...",
+                0,
+            )
 
         self._ai_mask_busy = True
         self._set_ai_mask_buttons_enabled(False)
-        self._show_status(f"Finding {kind}...", 0)
+        self._show_status(_AI_MASK_BUSY_TEXT.get(kind, f"Finding {kind}..."), 0)
         self._begin_ai_mask_busy(kind, downloading=not ready)
 
         signals = _AIMaskSignals()
@@ -23391,7 +23412,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             coverage = float(np.count_nonzero(result > 0.10)) / float(max(1, result.size))
         except Exception:
             coverage = 1.0
-        if coverage < _AI_MASK_MIN_COVERAGE:
+        # Depth is exempt: the gate above is a segmentation heuristic, and a
+        # depth map is a gradient rather than a cutout. "Nothing usable" for
+        # depth means "no variation to grade by", which estimate_depth already
+        # detects and reports by returning None -- handled above.
+        #
+        # Applying the gate here got it wrong in both directions: a scene that
+        # is overwhelmingly distant with one small near object yields a
+        # perfectly good depth map whose coverage is ~0.0001 (measured), so it
+        # was refused with "it looks flat" -- which is false, and which threw
+        # away exactly the mask the user wanted.
+        if kind != "depth" and coverage < _AI_MASK_MIN_COVERAGE:
             self._show_status(_ai_mask_nothing_found_text(kind, no_layer=True), 4000)
             return
 
@@ -23404,9 +23435,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if existing is not None:
             panel.select_mask_index(existing)
             self._sync_mask_layer_overlay()
+            # The "use AI Selection instead" nudge only makes sense where AI
+            # Selection is a genuine alternative -- picking one object out of
+            # what Smart Object or Sky returned wholesale. It is not an
+            # alternative to Depth, which grades by distance rather than
+            # selecting a thing, so Depth does not get the suggestion.
+            hint = (
+                " Use AI Selection to pick a specific object."
+                if kind in ("subject", "sky")
+                else ""
+            )
             self._show_status(
-                f"That {kind} is already masked — selected it. "
-                "Use AI Selection to pick a specific object.",
+                f"{_AI_MASK_LAYER_NAMES.get(kind, kind)} is already masked "
+                f"in this photo — selected it.{hint}",
                 4000,
             )
             return
@@ -23415,7 +23456,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()), source=kind
         )
         self._show_status(
-            f"{kind.capitalize()} mask added ({coverage * 100:.0f}% of the frame). "
+            f"{_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize())} mask added "
+            f"({coverage * 100:.0f}% of the frame). "
             "Use Paint / Erase to refine it.",
             3500,
         )
@@ -23558,6 +23600,40 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         alpha = predictor.predict(points, [1] * len(points), (mh, mw))
         if alpha is None:
             self._show_status("Nothing selected there.", 2500)
+            return True
+
+        # An empty result is not None. SamPredictor.predict thresholds its
+        # logits at zero, so a click SAM rejects comes back as a valid
+        # all-zero buffer -- which passed the guard above and became a
+        # permanent zero-coverage "AI Selection" layer with no feedback. The
+        # one-shot path has guarded this since it shipped (see
+        # _AI_MASK_MIN_COVERAGE); the click path never did, and thresholding
+        # turned "vanishingly small" into "exactly zero" and so made it
+        # reachable in earnest.
+        #
+        # Drop the point too: leaving it in _sam_points means every later
+        # click on this photo carries a prompt SAM has already refused, and
+        # the refinement branch below feeds the whole accumulated list back.
+        #
+        # Tested on EMPTINESS, not on a coverage fraction. _AI_MASK_MIN_COVERAGE
+        # asks "is this big enough to be a sky", which is the wrong question
+        # here: at 0.2% of the frame it rejects anything smaller than a 120x120
+        # square on a full-res base, and picking small specific things -- "one
+        # flower", per this tool's own tooltip -- is what AI Selection is FOR.
+        # Since predict() thresholds its logits, a refusal is exactly zero
+        # pixels, so emptiness separates "SAM said no" from "small object"
+        # cleanly. The few-pixel floor only discards a degenerate speck.
+        try:
+            import numpy as np
+
+            selected_px = int(np.count_nonzero(alpha > 0.5))
+        except Exception:
+            selected_px = _SAM_MIN_SELECTED_PX
+        if selected_px < _SAM_MIN_SELECTED_PX:
+            self._sam_points = points[:-1]
+            self._show_status(
+                "Nothing selected there — try clicking the object itself.", 3000
+            )
             return True
 
         # Successive clicks refine one selection rather than stacking new

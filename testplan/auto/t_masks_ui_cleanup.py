@@ -580,6 +580,34 @@ def test_one_shot_ai_tools_disable_once_used():
     print("  OK   a used one-shot tool disables, explains, and comes back")
 
 
+def test_ai_tool_used_ignores_kinds_that_are_not_one_shot():
+    """A non-one-shot kind must return harmlessly, not raise.
+
+    The guard used to key off "is there a button for this kind", which is
+    true for brush and ai_click as well -- both are in _mask_create_buttons
+    -- and then indexed a three-key label dict, so any such kind reaching
+    here raised KeyError inside a Qt slot. The label table is the thing
+    that defines "one-shot AI tool", so it has to be what decides.
+
+    Kinds with no button at all (a stale or misspelled name) must also
+    return quietly rather than raise, which is why the loop below mixes
+    both cases.
+    """
+    p = _panel()
+    for kind in ("brush", "linear", "radial", "ai_click", "sam", "", "nonsense"):
+        before = p._mask_create_buttons.get(kind)
+        was_enabled = None if before is None else before.isEnabled()
+        try:
+            p.set_ai_tool_used(kind, True)
+        except Exception as exc:  # noqa: BLE001
+            raise AssertionError(f"set_ai_tool_used({kind!r}) raised {exc!r}") from exc
+        if before is not None:
+            assert before.isEnabled() == was_enabled, (
+                f"set_ai_tool_used({kind!r}) changed a button it does not own"
+            )
+    print("  OK   non-one-shot kinds are ignored rather than raising")
+
+
 def test_ai_selection_is_never_disabled():
     """Every click adds something, so it is never 'already done'."""
     p = _panel()
@@ -868,6 +896,7 @@ def main() -> int:
     test_repeating_smart_object_does_not_stack_a_duplicate()
     test_a_brushed_mask_is_not_treated_as_the_same_mask()
     test_one_shot_ai_tools_disable_once_used()
+    test_ai_tool_used_ignores_kinds_that_are_not_one_shot()
     test_ai_selection_is_never_disabled()
     test_busy_disables_visible_create_buttons_too()
     test_layer_remembers_what_made_it()

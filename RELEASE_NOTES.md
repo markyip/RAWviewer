@@ -14,7 +14,7 @@ colour calibration, and a long list of speed work.
 ### 🎭 Local masks
 
 - **Masks have their own tab** in the Adjust panel, arranged by what each control acts on: the mask stack, the ways to make a mask, what you can do to the selected one, the brush, and that mask's own adjustments.
-- **Five ways to start a mask**, all visible in one section, one press each: **Brush**, **Smart Object**, **Sky**, **Depth**, **AI Selection**. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
+- **Five ways to start a mask**, all visible in one section, one press each: **Brush**, **AI Selection**, **Smart Object**, **Sky**, **Depth** — listed in the order they appear, with AI Selection first because it is the fastest and needs no model of its own. Everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
 - **Masks can be grouped.** Drag one mask onto another and they combine into a single mask with one adjustment set; drag a part back out to separate it again. Both are undoable.
 - **Each mask carries its own adjustments**, grouped the way the Global tab groups them — **Light** (Exposure, Contrast), **Color** (Temp, Tint, Saturation, Vibrance) and **Detail** (Sharpness, Clarity, Dehaze, Defringe). The groups fold, and click a value readout to reset that slider, exactly as on Global.
 - **Add / Erase / Invert / Duplicate / Delete** act on the selected mask. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
@@ -30,16 +30,18 @@ colour calibration, and a long list of speed work.
 - **Depth** masks by distance rather than by subject: full strength on the nearest things, fading to nothing on the farthest. Use it to lift a background, add haze to a distance, or cool the far half of a landscape. It is a fade, not a cutout — the whole frame is masked, by varying amounts — so invert it to grade the background instead. About a second on a typical frame.
 - **A progress dialog** for the wait, with Cancel and a timeout. First use downloads the model and is not timed out.
 - **Asking for a mask the photo already has selects the existing one** instead of stacking a duplicate, and a tool whose mask exists is disabled with an explanation.
-- **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind.
+- **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind. An **AI Selection** click that selects nothing forgets that click and tells you, instead of leaving a mask covering nothing — and it refuses only genuinely empty selections, never small ones, so picking out one flower still works. **Depth** is never refused this way: it is a fade across the whole frame, so a distant scene with one near subject is a good depth mask, not an empty one.
 - **Standard edition omits these entirely** — no greyed-out buttons, and nothing on the Masks tab can trigger a model download.
 
 ### 🖌️ Brushes
 
-- **Hold <kbd>D</kbd> / <kbd>B</kbd> / <kbd>X</kbd> / <kbd>H</kbd> and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's buttons still arm persistently if you prefer that. On the Masks tab, **hold <kbd>P</kbd>** to add coverage and <kbd>X</kbd> to erase it.
-- **Brush Feather** joins Size and Flow, and all three are reachable from the Masks tab without leaving the page. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
+- **On Global, hold <kbd>D</kbd> / <kbd>B</kbd> / <kbd>X</kbd> / <kbd>H</kbd> and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's buttons still arm persistently if you prefer that.
+- **On Masks, <kbd>P</kbd> and <kbd>X</kbd> toggle Add and Erase** — press once to arm, press again to put away. Sweep or drag to paint while armed. **Brush** creates an empty mask and does not arm Add; arm with <kbd>P</kbd> (or the Add button) when you are ready.
+- **Brush Feather** joins Size, Flow and Edge Assist, all reachable from the Masks tab without leaving the page. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
 - **The eraser actually erases.** It was held back by Edge Assist, so paint that had spilled across an edge could not be removed; worse, releasing the brush put back about a third of what you had just erased.
 - **Two-finger scroll resizes the brush mid-stroke**, and horizontal scroll sets Flow, without ending the stroke.
 - **No square edge printed into the mask** on stroke release.
+- **Empty brush masks survive undo.** Creating a brush mask is saved straight away, so the first paint's Ctrl+Z steps back the stroke instead of wiping the whole mask stack.
 
 ### 🌄 Merging photos
 
@@ -56,13 +58,13 @@ colour calibration, and a long list of speed work.
 
 - **Camera colour calibration from a ColorChecker**, with an interactive dialog, corner handles and auto-detect. Sample 24 patches to derive RGB curves, white-balance offsets and HSL deltas, bound to the camera's EXIF `Make`/`Model` so it applies to every future photo from that body.
 - **Profiles record the decode they were calibrated against** and say so if it changes — a profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
-- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×), applied live in the preview and on export.
+- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×), applied live in the preview and on export. Local masks, dodge & burn and heal stay aligned with the desqueezed frame — including preview, settle and Compare.
 - **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
 
 ### 📤 Export and AI
 
 - **Context-aware export formats.** RAW offers 16-bit TIFF, JPEG and WebP; raster files offer JPEG and WebP.
-- **AI Upscale 2× (Real-ESRGAN)** and **AI Denoise (SCUNet)** appear as export variants, and only when those models are actually on disk.
+- **AI Upscale 2× (Real-ESRGAN)** and **AI Denoise (SCUNet)** are Plus-only export variants, and only when those models are actually on disk. Standard never offers them — even if the model files happen to be present.
 - **Faster AI denoise** — NAFNet on CPU platforms, plus a half-res mode with detail restore — and a new **AI Detail** slider controlling the denoise/detail balance.
 - **The sky mask model is a compact 84 MB** half-precision export, for output identical to the full-size one.
 - **Fixed export band seams** and a case where AI denoise was silently skipped on the banded path.

@@ -4152,7 +4152,7 @@ class ImageAdjustPanelWidget(QWidget):
         #
         # This was briefly a "Create new mask ▾" menu. The menu carried the
         # right idea -- one place that starts a mask, naming the tool up front
-        # -- but charged two clicks and hid the choices behind a word, and six
+        # -- but charged two clicks and hid the choices behind a word, and the
         # buttons fit the panel width perfectly well. The section heading now
         # does the naming the menu label was doing.
         #
@@ -4755,6 +4755,13 @@ class ImageAdjustPanelWidget(QWidget):
         Create buttons are what the user actually presses. Disabling only the
         hidden one left the Create button live with no explanation.
         """
+        # Label lookup first, and it is what decides whether this kind is a
+        # one-shot AI tool at all. Keying off the buttons instead would admit
+        # any kind present in _mask_create_buttons -- brush and ai_click --
+        # and then raise KeyError on the label.
+        label = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}.get(kind)
+        if label is None:
+            return
         arming = {
             "subject": getattr(self, "_mask_ai_subject_btn", None),
             "sky": getattr(self, "_mask_ai_sky_btn", None),
@@ -4765,7 +4772,6 @@ class ImageAdjustPanelWidget(QWidget):
             return
         if not hasattr(self, "_ai_tool_tips"):
             self._ai_tool_tips = {}
-        label = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}[kind]
         used_tip = (
             f"{label} — already masked in this photo.\n\n"
             f"It would return exactly the same selection again. Select the "
