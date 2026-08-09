@@ -25964,10 +25964,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
                 if panel is not None and hasattr(panel, "flash_saved"):
                     panel.flash_saved(note="Saved · masks locked")
-                if panel is not None and hasattr(panel, "show_masks_tab"):
-                    # Surface the banner without yanking focus mid-drag if
-                    # the user is already elsewhere — only when Masks is idle.
-                    pass
+                # Deliberately NOT switching to the Masks tab. Saving fires on
+                # every slider release, so a tab jump would yank the user off
+                # whatever they were doing, repeatedly, for a condition that
+                # does not change. The Masks tab badge carries the state
+                # instead -- it turns amber and reads "24/29" from wherever
+                # you are (_sync_mask_tab_badge), which is the same job
+                # without the interruption.
             elif panel is not None and hasattr(panel, "flash_saved"):
                 panel.flash_saved(cleared=cleared)
             elif hasattr(self, "status_bar"):

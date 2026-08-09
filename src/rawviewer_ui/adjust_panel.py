@@ -692,6 +692,7 @@ class PanelTabBar(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(24)
         self._badges: list[QLabel] = []
+        self._badge_alerts: dict[int, bool] = {}
 
         self._labels = [label.upper() for label in labels]
         for index, label in enumerate(labels):
@@ -741,10 +742,18 @@ class PanelTabBar(QWidget):
         if self._buttons:
             self._buttons[0].setChecked(True)
 
-    def set_badge(self, index: int, text: str) -> None:
-        """Set a tab's count chip, or clear it with ""."""
+    def set_badge(self, index: int, text: str, *, alert: bool = False) -> None:
+        """Set a tab's count chip, or clear it with "".
+
+        ``alert`` recolours the chip for a state the user needs to know about
+        from whichever tab they are on -- currently only "these masks did not
+        all load, so they are not being saved". That is the whole point of
+        putting it here: the banner explaining it lives on the Masks tab, and
+        someone working on Global would never see it.
+        """
         if not (0 <= index < len(self._buttons)):
             return
+        self._badge_alerts[index] = bool(alert)
         badge = self._badges[index]
         if not text:
             badge.hide()
@@ -755,6 +764,12 @@ class PanelTabBar(QWidget):
         badge.show()
         self._buttons[index].setText(self._labels[index])
         self._layout_badge(index)
+
+    def set_tab_tooltip(self, index: int, tip: str) -> None:
+        """Explain a tab's state on hover; "" clears it."""
+        if not (0 <= index < len(self._buttons)):
+            return
+        self._buttons[index].setToolTip(tip or "")
 
     def badge_text(self, index: int) -> str:
         """The count currently shown on a tab ("" when none)."""
@@ -768,6 +783,11 @@ class PanelTabBar(QWidget):
         # Not EMBER even when active: theme.py reserves that for the one lit
         # element, and a count is data, not the thing you are editing.
         colour = theme.INK_MUTED if active else theme.INK_FAINT
+        if self._badge_alerts.get(index):
+            # DODGE, not EMBER and not a new red: theme.py gives DODGE to
+            # "status already decided about this photo", which is exactly what
+            # a locked mask stack is. EMBER stays reserved for what is active.
+            colour = theme.DODGE
         self._badges[index].setStyleSheet(
             f"""
             QLabel#adjust_tab_badge {{
@@ -4722,7 +4742,10 @@ class ImageAdjustPanelWidget(QWidget):
         trunc_col.addWidget(self._mask_truncated_lbl)
         trunc_btns = QHBoxLayout()
         trunc_btns.setSpacing(6)
-        self._mask_truncated_unlock_btn = QPushButton("Keep loaded masks & allow saving")
+        # "and", not "&": Qt reads & in a button label as a mnemonic marker, so
+        # this rendered as "Keep loaded masks _allow saving" with the ampersand
+        # eaten and the a underlined.
+        self._mask_truncated_unlock_btn = QPushButton("Keep loaded masks and allow saving")
         self._mask_truncated_unlock_btn.setObjectName("adjust_db_btn")
         self._mask_truncated_unlock_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._mask_truncated_unlock_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -5301,6 +5324,10 @@ class ImageAdjustPanelWidget(QWidget):
         stack.truncated_total = 0
         stack.truncated_cap = 0
         self._sync_mask_truncated_banner(stack)
+        # And the badge, which is the only trace of this state visible from
+        # the other tabs -- leaving it amber at "24/29" would keep warning
+        # about blocked saves that are no longer blocked.
+        self._sync_mask_tab_badge()
         # Force a save so the sidecar matches the unlocked (shorter) stack
         # immediately — otherwise the next accidental Esc could leave the
         # full serial on disk and the incomplete view in memory.
@@ -5692,7 +5719,33 @@ class ImageAdjustPanelWidget(QWidget):
             return
         stack = getattr(self, "_mask_stack", None)
         count = len(getattr(stack, "layers", []) or []) if stack is not None else 0
-        tabs.set_badge(1, str(count) if count else "")
+        truncated = bool(stack is not None and getattr(stack, "truncated", False))
+        if truncated:
+            # "24/29", not "24". A bare count is a lie here -- it names what
+            # loaded as though it were what the photo has, and the difference
+            # between those two numbers is the whole problem.
+            total = int(getattr(stack, "truncated_total", 0) or 0)
+            loaded = int(getattr(stack, "truncated_loaded", 0) or count)
+            # Same guard the banner and the status message use: the total is
+            # not always known (cap hit exactly, or a total of 0), and without
+            # it this read "Only 24 of this photo's 0 masks loaded."
+            if total > loaded:
+                text = f"{loaded}/{total}"
+                headline = f"Only {loaded} of this photo's {total} masks loaded."
+            else:
+                text = str(loaded)
+                headline = f"Only {loaded} masks loaded — the limit was reached."
+            tip = (
+                f"{headline}\n\n"
+                "Mask edits are not being saved, so the ones that did not "
+                "load stay safe on disk. Open the Masks tab to raise the "
+                "limit or to keep just these."
+            )
+        else:
+            text = str(count) if count else ""
+            tip = ""
+        tabs.set_badge(1, text, alert=truncated)
+        tabs.set_tab_tooltip(1, tip)
 
     # -- internals ------------------------------------------------------
 
