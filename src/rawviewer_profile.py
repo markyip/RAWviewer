@@ -102,6 +102,7 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "480",
         "RAWVIEWER_MASK_LAYERS_RAM_FRAC": "0.08",
         "RAWVIEWER_BG_POOL_THREADS": "2",
+        "RAWVIEWER_BANDED_WORKERS": "2",
     },
     # 10–12 GB unified memory
     "medium": {
@@ -132,6 +133,7 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "560",
         "RAWVIEWER_MASK_LAYERS_RAM_FRAC": "0.10",
         "RAWVIEWER_BG_POOL_THREADS": "2",
+        "RAWVIEWER_BANDED_WORKERS": "2",
     },
     # 16 GB — conservative index workers to avoid jetsam during semantic + face
     "balanced": {
@@ -160,6 +162,7 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_EDIT_BASE_MAX_EDGE": "2560",
         "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "640",
         "RAWVIEWER_BG_POOL_THREADS": "3",
+        "RAWVIEWER_BANDED_WORKERS": "3",
     },
     # 24 GB — near stock full defaults
     "high": {

@@ -226,6 +226,7 @@ class SliderSpec:
     slider_to_value: Callable[[int], float]
     value_to_slider: Callable[[float], int]
     format_value: Callable[[float], str]
+    tooltip: str = ""
 
 
 def _slider_linear(
@@ -237,6 +238,7 @@ def _slider_linear(
     *,
     scale: float = 1.0,
     fmt: Callable[[float], str] | None = None,
+    tooltip: str = "",
 ) -> SliderSpec:
     def slider_to_value(v: int) -> float:
         return float(v) * scale
@@ -254,20 +256,55 @@ def _slider_linear(
         slider_to_value=slider_to_value,
         value_to_slider=value_to_slider,
         format_value=fmt or (lambda x: f"{x:+.0f}"),
+        tooltip=tooltip,
     )
 
 
 SLIDER_SPECS: tuple[SliderSpec, ...] = (
     _slider_linear("Exposure2012", "Exposure", -500, 500, 0.0, scale=0.01, fmt=lambda x: f"{x:+.2f}"),
     _slider_linear("Contrast2012", "Contrast", -100, 100, 0.0),
-    _slider_linear("Highlights2012", "Highlights", -100, 100, 0.0),
-    _slider_linear("Shadows2012", "Shadows", -100, 100, 0.0),
+    _slider_linear(
+        "Highlights2012",
+        "Highlights",
+        -100,
+        100,
+        0.0,
+        tooltip=(
+            "Compress or lift scene-linear highlights, including a clipped "
+            "single channel (RGB×same gain — hue is kept).\n"
+            "The edit base is LibRaw Reconstruct (browse-matched brightness), "
+            "so recovered CFA chroma is already in the buffer. Opening Adjust "
+            "is not the P-key preview (Reconstruct + polish + exposure anchor)."
+        ),
+    ),
+    _slider_linear(
+        "Shadows2012",
+        "Shadows",
+        -100,
+        100,
+        0.0,
+        tooltip=(
+            "Lift or crush scene-linear shadows (luminance-masked).\n"
+            "Not the P-key recovery preview, which uses Reconstruct + polish "
+            "and does not move this slider."
+        ),
+    ),
     _slider_linear("Whites2012", "Whites", -100, 100, 0.0),
     _slider_linear("Blacks2012", "Blacks", -100, 100, 0.0),
     _slider_linear("ParametricShadows", "PV Shad", -100, 100, 0.0),
     _slider_linear("ParametricDarks", "PV Dark", -100, 100, 0.0),
     _slider_linear("ParametricLights", "PV Light", -100, 100, 0.0),
-    _slider_linear("ParametricHighlights", "PV High", -100, 100, 0.0),
+    _slider_linear(
+        "ParametricHighlights",
+        "PV High",
+        -100,
+        100,
+        0.0,
+        tooltip=(
+            "Tone-curve highlight region (ParametricHighlights). "
+            "Not the Light-panel Highlights slider (Highlights2012)."
+        ),
+    ),
     SliderSpec(
         key="Temperature",
         label="Temp",
@@ -1669,7 +1706,13 @@ def apply_adjustments_to_linear_uint16(rgb_image: np.ndarray, adj: dict[str, flo
 
 
 def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> np.ndarray:
-    """Legacy gamma-space path for 8-bit sRGB buffers (cached previews / JPEG)."""
+    """Legacy gamma-space core — not the product preview/export path.
+
+    Browse, Adjust, and ``apply_adjustments_to_rgb`` (including uint8 JPEG /
+    cached display buffers) decode to linear and run
+    ``process_linear_edit_buffer``. This function remains for banded
+    detail-enhance unit tests that pin the old gamma-space core.
+    """
     if rgb_image is None or not adj:
         return rgb_image
     merged = dict(DEFAULT_ADJUSTMENTS)
@@ -1677,10 +1720,9 @@ def _apply_adjustments_to_srgb(rgb_image: np.ndarray, adj: dict[str, float]) -> 
     if is_default_adjustments(merged):
         return rgb_image
 
-    # Geometry first (straighten/perspective/crop, raw_transform.py) so the
-    # gamma path -- gallery tiles, fit previews, cached uint8 redisplay --
-    # shows the same framing as the linear edit pipeline. Must run before the
-    # row-band split below: it changes the buffer's shape.
+    # Geometry first (straighten/perspective/crop, raw_transform.py) so this
+    # legacy core matches the linear pipeline's framing when tests call it.
+    # Must run before the row-band split below: it changes the buffer's shape.
     from raw_transform import apply_geometry
 
     rgb_image = apply_geometry(rgb_image, merged)
@@ -1713,7 +1755,22 @@ def banded_worker_count(height: int) -> int:
     # Thread-pool overhead isn't worth it below a few hundred rows.
     if height < 512:
         return 1
-    return min(8, os.cpu_count() or 1)
+    cores = os.cpu_count() or 1
+    explicit = os.environ.get("RAWVIEWER_BANDED_WORKERS", "").strip()
+    if explicit:
+        try:
+            return max(1, min(int(explicit), cores, 8))
+        except ValueError:
+            pass
+    omp = os.environ.get("OMP_NUM_THREADS", "").strip()
+    omp_n = cores
+    if omp:
+        try:
+            omp_n = max(1, int(omp))
+        except ValueError:
+            pass
+    # More than 4 bands on a laptop fights gallery ILM + OpenCV's own pool.
+    return max(1, min(4, cores, omp_n))
 
 
 # Back-compat alias (older call sites/tests reference the private name).
@@ -1836,11 +1893,9 @@ def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -
     if abs(exp_val) > 1e-4:
         img *= 2.0 ** exp_val
 
-    # 2b. Dodge & burn (see raw_dodge_burn.py). This legacy gamma-space path
-    # is used for cached uint8 full-image redisplay (browse revisit/zoom of
-    # an edited photo, not the live Adjust-panel preview) -- applying the
-    # mask here too keeps that path visually consistent with the scene-
-    # linear pipeline's result (process_linear_edit_buffer).
+    # 2b. Dodge & burn (see raw_dodge_burn.py). Kept so the legacy gamma
+    # core stays complete; product uint8 redisplay uses
+    # process_linear_edit_buffer via apply_adjustments_to_rgb.
     from raw_dodge_burn import MASK_KEY as _db_mask_key
 
     mask_serial = str(merged.get(_db_mask_key, "") or "")
@@ -1873,7 +1928,8 @@ def _apply_adjustments_to_srgb_core(img: np.ndarray, merged: dict[str, float]) -
         factor = (259.0 * (c * 100.0 + 255.0)) / (255.0 * (259.0 - c * 100.0))
         img = factor * (img - 0.5) + 0.5
 
-    # 4. Highlights & Shadows — luminance-weighted (hue-preserving, PaintFE-style)
+    # 4. Highlights & Shadows — legacy gamma-space luminance mask.
+    # Live Adjust / export use scene-linear apply_regional_linear_exposure.
     hi_val = float(merged.get("Highlights2012", 0.0))
     sh_val = float(merged.get("Shadows2012", 0.0))
     if abs(hi_val) > 1e-4 or abs(sh_val) > 1e-4:

@@ -118,6 +118,7 @@ Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first 
 | `RAWVIEWER_SHARE_SHOW_AIRDROP=0` | Hide AirDrop from the Qt share menu (default is shown) |
 | `RAWVIEWER_AIRDROP_PERFORM=0` | After osascript fails, skip in-process AirDrop and go straight to Finder |
 | `RAWVIEWER_EDIT_BASE_MAX_EDGE` | Cap working Adjust decode long edge (RAM tier sets this on ≤16 GB; export uncapped) |
+| `RAWVIEWER_BANDED_WORKERS` | Max row-band threads for export/uncached edit (default min(4, OMP); RAM tier 2 on ≤12 GB) |
 | `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` | Defer face scan until after semantic index (default) |
 | `RAWVIEWER_SEMANTIC_PREP_WORKERS` | Parallel CPU workers before AI encode (RAM tier may set this) |
 | `RAWVIEWER_SEMANTIC_BATCH_AUTO=1` | Auto-tune AI batch/chunk size on index (default) |
@@ -155,6 +156,6 @@ Tracked in the README — [Looking ahead](../README.md#looking-ahead) (not in re
 - **Cache** — memory-first; optional disk cache via env; **RAM-tier defaults** at startup (`rawviewer_profile.py`)
 - **Semantic index** — SQLite + local embeddings (Core ML on macOS, ONNX on Windows; **Full only**); background passes abort when folder scope changes (**v2.5.0**)
 - **Gallery (JustifiedGallery)** — justified grid with zoom slider; capture-time order after EXIF sort (**v2.5.0**+ gallery fill overhaul in **v3.0.0**)
-- **RAW recovery preview** — **P** key, half-res linear decode + local tone recovery (**v2.5.0**)
+- **RAW recovery preview** — **P** key: half-res Reconstruct decode + local polish; **not** the Adjust Highlights/Shadows sliders (**v2.5.0**). Edit-base (Adjust working buffer) also Reconstructs clipped CFA, then restores browse brightness — default Adjust is not the P-key preview.
 - **Clipping overlay** — **J** key (`exposure_clipping.py`; **v2.5.0**)
 - **Lite profile** — no torch/kornia; semantic/face off; CPU Fast RAW + Adjust (**v3.0.0**)

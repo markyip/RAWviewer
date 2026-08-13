@@ -286,16 +286,34 @@ def test_guided_filter_denoise() -> None:
 
 
 def test_shadow_lift_no_extreme_green_shift() -> None:
+    """Uniform green-shadow patch: lift must keep hue (RGB×same gain).
+
+    HF chroma damp is for speckle, not greying a real green. The old
+    display G/R < 3.5 cap expected a grey veil on this flat patch (input
+    G/R is already 4.0). Assert bounded hue rotation vs identity encode
+    and that linear G/R stays at the input ratio.
+    """
+    from raw_pv2012 import apply_pv2012_tone_rgb
+
     dark = np.zeros((32, 32, 3), dtype=np.uint16)
     dark[:, :, 0] = 200
     dark[:, :, 1] = 800
     dark[:, :, 2] = 200
+    identity = apply_adjustments_to_linear(dark, dict(DEFAULT_ADJUSTMENTS))
     adj = dict(DEFAULT_ADJUSTMENTS)
     adj["Shadows2012"] = 50.0
     out = apply_adjustments_to_linear(dark, adj)
-    r_mean = max(float(out[:, :, 0].mean()), 1.0)
-    g_mean = float(out[:, :, 1].mean())
-    assert g_mean / r_mean < 3.5
+
+    lin = dark.astype(np.float32) / 65535.0
+    lin_out = apply_pv2012_tone_rgb(lin, {"Shadows2012": 50.0})
+    g_r_in = 800.0 / 200.0
+    g_r_lin = float(lin_out[:, :, 1].mean()) / max(float(lin_out[:, :, 0].mean()), 1e-12)
+    assert abs(g_r_lin - g_r_in) < 0.05, f"linear G/R drifted: {g_r_lin:.3f} vs {g_r_in:.3f}"
+
+    g_r_id = float(identity[:, :, 1].mean()) / max(float(identity[:, :, 0].mean()), 1.0)
+    g_r_out = float(out[:, :, 1].mean()) / max(float(out[:, :, 0].mean()), 1.0)
+    assert g_r_out < g_r_id * 1.15, f"lift invented extra green: {g_r_out:.3f} vs id {g_r_id:.3f}"
+    assert g_r_out > 2.0, f"lift grey-veiled a real green: G/R={g_r_out:.3f}"
 
 
 def test_positive_saturation_visible_after_tone_map() -> None:
@@ -420,8 +438,33 @@ def test_pv2012_highlights_slider_does_not_touch_deep_shadows() -> None:
     assert ratio[3] < 0.95, "Highlights2012=-100 must still reduce actual highlights"
 
 
+def test_pv2012_highlights_chromatic_clip_not_midtone_red() -> None:
+    """Live Highlights2012 (scene-linear regional gain), not ParametricHighlights."""
+    from raw_pv2012 import apply_pv2012_tone_rgb, apply_regional_linear_exposure
+
+    clip = np.full((4, 4, 3), (1.0, 0.15, 0.08), dtype=np.float32)
+    mid = np.full((4, 4, 3), (0.5, 0.1, 0.1), dtype=np.float32)
+    adj = {"Highlights2012": -100.0}
+    clip_out = apply_pv2012_tone_rgb(clip.copy(), adj)
+    mid_out = apply_pv2012_tone_rgb(mid.copy(), adj)
+    mid_id = apply_pv2012_tone_rgb(mid.copy(), {})
+    assert float(clip_out[0, 0, 0]) < 0.85, "chromatic near-clip must darken"
+    mid_delta = abs(float(mid_out[0, 0, 0]) - float(mid_id[0, 0, 0])) / max(
+        float(mid_id[0, 0, 0]), 1e-6
+    )
+    assert mid_delta < 0.16, f"mid saturated red moved too much: {mid_delta:.3f}"
+    lin, gain = apply_regional_linear_exposure(clip, 0.0, -100.0)
+    assert float(gain[0, 0]) < 0.5
+    assert np.allclose(lin[0, 0] / clip[0, 0], float(gain[0, 0]), atol=1e-5)
+
+
 def test_pv2012_shadows_lift_stays_monotonic() -> None:
-    """Shadows>=~45 previously made the perceptual tone curve locally decreasing."""
+    """Unused perceptual HS branch (live Shadows2012 is scene-linear).
+
+    Shadows>=~45 previously made this perceptual curve locally decreasing.
+    apply_pv2012_tone_rgb now zeros perceptual Shadows/Highlights; this
+    still guards the helper if it is called with non-zero HS.
+    """
     from raw_pv2012 import _apply_pv2012_perceptual, _scene_to_perceptual
 
     lum_ramp = np.linspace(0.0001, 3.0, 4000).astype(np.float32)
@@ -553,9 +596,11 @@ def test_tone_curve_affects_pv2012_tone_rgb_output() -> None:
 
 
 def test_parametric_tone_curve_stays_monotonic() -> None:
-    """ParametricShadows=+100 and ParametricHighlights=-100 both made the
-    curve locally decreasing before the coefficient was reduced (same
-    _smooth_weight/_SPLIT_SHADOWS=0.25 shape as raw_pv2012's shadow-lift bug)."""
+    """ParametricShadows=+100 and ParametricHighlights=-100 (tone-curve
+    regions, not live Shadows2012/Highlights2012) both made the curve
+    locally decreasing before the coefficient was reduced (same
+    _smooth_weight/_SPLIT_SHADOWS=0.25 shape as raw_pv2012's old
+    perceptual shadow-lift bug)."""
     from raw_tone_curve import apply_parametric_tone_curve
 
     y = np.linspace(0.0, 1.0, 4000).astype(np.float32)
@@ -1104,6 +1149,7 @@ def main() -> int:
     test_defringe_purple_green_symmetric()
     test_pv2012_default_adjustments_are_true_identity()
     test_pv2012_highlights_slider_does_not_touch_deep_shadows()
+    test_pv2012_highlights_chromatic_clip_not_midtone_red()
     test_pv2012_shadows_lift_stays_monotonic()
     test_pv2012_whites_blacks_sign_direction()
     test_pv2012_whites_blacks_strength()

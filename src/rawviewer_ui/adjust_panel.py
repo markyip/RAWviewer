@@ -2023,6 +2023,8 @@ class ImageAdjustPanelWidget(QWidget):
             name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
             name_lbl.setFixedWidth(82)
             name_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+            if spec.tooltip:
+                name_lbl.setToolTip(spec.tooltip)
             row.addWidget(name_lbl)
 
             slider = AdjustSlider(Qt.Orientation.Horizontal)
@@ -2035,6 +2037,8 @@ class ImageAdjustPanelWidget(QWidget):
             gradient = _SLIDER_TRACK_GRADIENTS.get(spec.key)
             if gradient is not None:
                 slider.set_track_gradient(gradient)
+            if spec.tooltip:
+                slider.setToolTip(spec.tooltip)
             if spec.key == "Temperature":
                 slider.set_center_value(self._as_shot_temperature)
                 self._temperature_slider = slider
@@ -2814,6 +2818,8 @@ class ImageAdjustPanelWidget(QWidget):
         btn.setToolTip(
             "Auto tone — set Exposure, Contrast, Highlights, Shadows, Whites "
             "and Blacks from the image.\n\n"
+            "Those sliders are scene-linear / PV2012 edits, not the P-key "
+            "recovery preview (Reconstruct + polish).\n\n"
             "Reads the unedited photo, so pressing it twice changes nothing "
             "the second time. Every slider it moves stays yours to refine, "
             "and Ctrl+Z undoes the lot."

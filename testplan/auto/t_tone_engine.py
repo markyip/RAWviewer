@@ -50,7 +50,12 @@ def main() -> int:
     # 1. Identity: defaults / zeroed sliders are an exact no-op
     img = (np.random.RandomState(7).rand(64, 64, 3).astype(np.float32)) ** 2
     a0 = render(img, {})
-    for adj in ({"Exposure2012": 0.0}, {"Shadows2012": 0.0}, {"Blacks2012": 0.0}):
+    for adj in (
+        {"Exposure2012": 0.0},
+        {"Shadows2012": 0.0},
+        {"Highlights2012": 0.0},
+        {"Blacks2012": 0.0},
+    ):
         d = np.abs(a0.astype(int) - render(img, adj).astype(int)).max()
         check(f"identity {list(adj)[0]}=0", d == 0, f"maxdiff={d}")
 
@@ -148,6 +153,77 @@ def main() -> int:
         "Highlights=-100 leaves midtones nearly unchanged",
         abs(mid_hi - mid0) <= 8,
         f"mid0={mid0} mid_hi={mid_hi}",
+    )
+
+    # 6c. Highlights mask is chroma-aware: Rec.709 lum misses R=1, G=B=0.1.
+    from raw_pv2012 import (
+        _HIGHLIGHT_LINEAR_MAX_STOPS,
+        apply_pv2012_tone_rgb,
+        apply_regional_linear_exposure,
+    )
+
+    def _px(rgb):
+        return np.full((6, 6, 3), np.array(rgb, dtype=np.float32), dtype=np.float32)
+
+    clip_in = _px((1.0, 0.1, 0.1))
+    clip_out, clip_gain = apply_regional_linear_exposure(clip_in, 0.0, -100.0)
+    check(
+        "Highlights=-100 darkens chromatic near-clip (1, 0.1, 0.1)",
+        float(clip_out[0, 0, 0]) < 0.7,
+        f"out R={float(clip_out[0, 0, 0]):.3f} gain={float(clip_gain[0, 0]):.3f}",
+    )
+    hue_ok = np.allclose(
+        clip_out[0, 0] / np.maximum(clip_in[0, 0], 1e-9),
+        float(clip_gain[0, 0]),
+        atol=1e-5,
+    )
+    check("chromatic clip keeps RGB×same gain (hue)", hue_ok)
+
+    mid_red_in = _px((0.5, 0.1, 0.1))
+    mid_red_out, mid_red_gain = apply_regional_linear_exposure(mid_red_in, 0.0, -100.0)
+    check(
+        "Highlights=-100 barely moves mid saturated red (0.5, 0.1, 0.1)",
+        float(mid_red_gain[0, 0]) > 0.85,
+        f"gain={float(mid_red_gain[0, 0]):.3f}",
+    )
+
+    neu_in = _px((1.0, 1.0, 1.0))
+    neu_out, neu_gain = apply_regional_linear_exposure(neu_in, 0.0, -100.0)
+    expected = float(2.0 ** (-_HIGHLIGHT_LINEAR_MAX_STOPS))
+    check(
+        "Highlights=-100 full-mask neutral clip is ~2^-1.55",
+        abs(float(neu_gain[0, 0]) - expected) < 1e-4,
+        f"gain={float(neu_gain[0, 0]):.5f} expected={expected:.5f}",
+    )
+
+    deep = _px((0.005, 0.005, 0.005))
+    deep_out, _ = apply_regional_linear_exposure(deep, 0.0, -100.0)
+    check(
+        "Highlights=-100 does not touch deep shadows",
+        np.allclose(deep_out, deep, atol=1e-6),
+        f"maxdiff={float(np.abs(deep_out - deep).max()):.2e}",
+    )
+
+    # Same invariants through the live PV2012 RGB path (perceptual HS zeroed).
+    pv_clip = apply_pv2012_tone_rgb(clip_in.copy(), {"Highlights2012": -100.0})
+    pv_mid = apply_pv2012_tone_rgb(mid_red_in.copy(), {"Highlights2012": -100.0})
+    pv_mid0 = apply_pv2012_tone_rgb(mid_red_in.copy(), {})
+    pv_deep = apply_pv2012_tone_rgb(deep.copy(), {"Highlights2012": -100.0})
+    check(
+        "PV2012 Highlights=-100 reduces chromatic near-clip",
+        float(pv_clip[0, 0, 0]) < float(clip_in[0, 0, 0]) * 0.85,
+        f"out R={float(pv_clip[0, 0, 0]):.3f}",
+    )
+    check(
+        "PV2012 Highlights=-100 does not crush mid saturated red",
+        abs(float(pv_mid[0, 0, 0]) - float(pv_mid0[0, 0, 0]))
+        < 0.16 * max(float(pv_mid0[0, 0, 0]), 1e-6),
+        f"mid={float(pv_mid[0, 0, 0]):.3f} id={float(pv_mid0[0, 0, 0]):.3f}",
+    )
+    check(
+        "PV2012 Highlights=-100 identity on deep shadows",
+        np.allclose(pv_deep, deep, atol=1e-5),
+        f"maxdiff={float(np.abs(pv_deep - deep).max()):.2e}",
     )
 
     # 7. Chroma-speckle regression: real per-pixel sensor noise must not be

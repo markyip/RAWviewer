@@ -60,10 +60,18 @@ def _scene(
 def main() -> int:
     from raw_adjustments import DEFAULT_ADJUSTMENTS, SLIDER_SPECS
     from raw_auto_adjust import (
+        _AUTO_TONE_CLIP_FULL,
+        _AUTO_TONE_CLIP_START,
+        _AUTO_TONE_CRUSH_FULL,
+        _AUTO_TONE_CRUSH_START,
+        _AUTO_TONE_HIGHLIGHTS_MAX_SLIDER,
         _AUTO_TONE_KEYS,
         _AUTO_TONE_MAX_EV,
+        _AUTO_TONE_SHADOWS_MAX_SLIDER,
+        _ramp,
         estimate_auto_tone,
     )
+    from raw_pv2012 import _HIGHLIGHT_LINEAR_MAX_STOPS, _SHADOW_LINEAR_MAX_STOPS
 
     # --- refusals ---------------------------------------------------------
     check("all-black buffer refuses", estimate_auto_tone(np.zeros((200, 200, 3), np.float32)) is None)
@@ -95,6 +103,53 @@ def main() -> int:
     if blown:
         check("recovery does not also raise Whites", blown["Whites2012"] == 0.0,
               f"Wh {blown['Whites2012']}")
+        check(
+            "CLIP_FULL Highlights stay bounded (not -100)",
+            blown["Highlights2012"] > -100.0,
+            f"Hi {blown['Highlights2012']}",
+        )
+
+    # Stop budget: Auto at CLIP_FULL / CRUSH_FULL is the dedicated HS cap,
+    # not the stale perceptual-era ±60. Linear engine: slider/100 * max_stops.
+    hi_full_stops = _AUTO_TONE_HIGHLIGHTS_MAX_SLIDER / 100.0 * _HIGHLIGHT_LINEAR_MAX_STOPS
+    sh_full_stops = _AUTO_TONE_SHADOWS_MAX_SLIDER / 100.0 * _SHADOW_LINEAR_MAX_STOPS
+    check(
+        "CLIP_FULL Highlights cap is 90 (not 60, not 100)",
+        _AUTO_TONE_HIGHLIGHTS_MAX_SLIDER == 90.0,
+        f"cap {_AUTO_TONE_HIGHLIGHTS_MAX_SLIDER}",
+    )
+    check(
+        "CLIP_FULL stop budget is ~1.40 (old perceptual -60 was 1.48)",
+        1.35 <= hi_full_stops <= 1.45,
+        f"stops {hi_full_stops:.3f}",
+    )
+    check(
+        "CRUSH_FULL Shadows cap is 75 (not 60, not 100)",
+        _AUTO_TONE_SHADOWS_MAX_SLIDER == 75.0,
+        f"cap {_AUTO_TONE_SHADOWS_MAX_SLIDER}",
+    )
+    check(
+        "CRUSH_FULL stop budget is ~1.31 (old perceptual +60 was 1.32)",
+        1.28 <= sh_full_stops <= 1.35,
+        f"stops {sh_full_stops:.3f}",
+    )
+    check(
+        "ramp at CLIP_FULL is 1",
+        _ramp(_AUTO_TONE_CLIP_FULL, _AUTO_TONE_CLIP_START, _AUTO_TONE_CLIP_FULL) == 1.0,
+    )
+    check(
+        "ramp at CRUSH_FULL is 1",
+        _ramp(_AUTO_TONE_CRUSH_FULL, _AUTO_TONE_CRUSH_START, _AUTO_TONE_CRUSH_FULL) == 1.0,
+    )
+
+    # Mild specular (~2%) must not pin Highlights at the old −60 or the new −90.
+    mild = estimate_auto_tone(_scene(0.18, clipped=0.02, seed=4))
+    if mild:
+        check(
+            "mild clip does not pin Highlights at the Auto cap",
+            mild["Highlights2012"] > -_AUTO_TONE_HIGHLIGHTS_MAX_SLIDER + 1.0,
+            f"Hi {mild['Highlights2012']}",
+        )
 
     flat = estimate_auto_tone(_scene(0.16, spread=0.10, lift=0.06, seed=2))
     check("flat scene gains contrast", flat is not None and flat["Contrast2012"] > 10,

@@ -4655,7 +4655,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._orientation_already_applied = False
         self._sync_raw_recovery_view_mode()
         self.status_bar.showMessage(
-            "RAW recovery preview ready (local shadows/highlights). P=off",
+            "RAW recovery preview ready (Reconstruct + local polish; not the Highlights/Shadows sliders). P=off",
             3500,
         )
 
@@ -4741,7 +4741,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self._cancel_display_pixmap_converter()
             self.status_bar.showMessage(
-                "Decoding RAW for local shadow/highlight recovery…",
+                "Decoding RAW recovery preview (Reconstruct + polish; not HS sliders)…",
                 4000,
             )
             if path:
@@ -18672,7 +18672,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "C — Toggle Compare mode (requires multiple images selected)",
             "H — Show/hide histogram",
             "J — Show/hide highlight (red) and shadow (blue) clipping",
-            "P — RAW only: shadow/highlight recovery preview (fit only, half-res; session)",
+            "P — RAW only: recovery preview (LibRaw Reconstruct + local polish; not Adjust Highlights/Shadows; fit only, half-res; session)",
             "G — Cycle composition guide (off / 3×3 / diagonal / both / phi grid)",
             "F — Show/hide focus point",
             "M — Show/hide location map",
@@ -22993,18 +22993,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # (file load, recovery-baseline click, post-drag settle) and passes
         # full_quality=True explicitly.
         #
-        # Exception: Compare mode must always use full_quality here too.
-        # GpuImageView._img_w/_img_h (used to crop the *original* comparison
-        # pixmap to the correct width) are updated from whatever pixmap
-        # set_pixmap() last received -- if a live-drag tick delivers a
-        # downsampled fast-preview pixmap, _img_w/_img_h shrink to match it,
-        # and the next _update_compare_overlay() crops the full-resolution
-        # original using coordinates sized for that *much smaller* frame,
-        # showing a tiny corner of it stretched across the divider (reported
-        # as the original side appearing "zoomed in" while dragging the tone
-        # curve with Compare on). The fast/full pixmap sizes only ever match
-        # by construction when full_quality is used, so Compare mode simply
-        # always gets the full-res path -- see docs/EDIT_PIPELINE.md.
         gv = getattr(self, "gpu_view", None)
         comparing = bool(gv is not None and gv.is_compare_mode())
         self._pending_adjust_preview = dict(adj or {})
@@ -23039,11 +23027,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # with no worker round-trip or throttle. The exact render below
         # still runs (throttled) and replaces the approximation when it
         # lands, so the image converges to the true pipeline output.
-        # Compare overlay already scales the original to the edited pixmap
-        # size (_update_compare_overlay), so drag can stay on the 640px lite
-        # path; settle still upgrades via editing_finished → full_quality.
+        # Compare overlay scales the original to the edited pixmap size, so
+        # live-drag can stay on the 640px lite path. Instant Exposure/WB
+        # LUTs are safe in Compare too (same pixmap size both sides).
+        # Instant transform is not: the original pane is a separate geometry
+        # render and would lag a UI-thread warp of only the edited side.
+        self._try_instant_gain_preview(adj)
         if not comparing:
-            self._try_instant_gain_preview(adj)
             self._try_instant_transform_preview(adj)
         self._apply_adjust_panel_preview(full_quality=False)
 
@@ -37391,15 +37381,27 @@ def main():
     except Exception:
         pass
 
-    # Cap OpenMP threads before rawpy/LibRaw loads. LibRaw decodes are
-    # OpenMP-parallel on Windows (rawpy wheel ships vcomp140) and on macOS
-    # via scripts/libraw/build_libraw_openmp.sh; with 2 concurrent RAW workers an
-    # uncapped pool (all cores each) starves the GUI thread (observed as a
-    # full app freeze on M1). Half the cores, clamped to 2..8, keeps most of
-    # the per-decode speedup while leaving headroom for the GUI and the
-    # second worker. Override by exporting OMP_NUM_THREADS.
+    # Cap native math threads before rawpy/LibRaw/OpenCV load. LibRaw decodes
+    # are OpenMP-parallel on Windows (rawpy wheel ships vcomp140) and on macOS
+    # via scripts/libraw/build_libraw_openmp.sh; numpy may use OpenBLAS /
+    # Accelerate. With 2 concurrent RAW workers an uncapped pool (all cores
+    # each) starves the GUI thread (observed as a full app freeze on M1).
+    # Half the cores, clamped to 2..8, keeps most of the per-decode speedup
+    # while leaving headroom for the GUI and the second worker. Override by
+    # exporting OMP_NUM_THREADS (the others follow if unset).
     _cores = os.cpu_count() or 8
-    os.environ.setdefault("OMP_NUM_THREADS", str(max(2, min(8, _cores // 2))))
+    _math_threads = str(max(2, min(8, _cores // 2)))
+    os.environ.setdefault("OMP_NUM_THREADS", _math_threads)
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", os.environ["OMP_NUM_THREADS"])
+    os.environ.setdefault("MKL_NUM_THREADS", os.environ["OMP_NUM_THREADS"])
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", os.environ["OMP_NUM_THREADS"])
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", os.environ["OMP_NUM_THREADS"])
+    try:
+        import cv2 as _cv2_threads
+
+        _cv2_threads.setNumThreads(max(1, int(os.environ.get("OMP_NUM_THREADS", _math_threads))))
+    except Exception:
+        pass
 
     # macOS: opt out of App Nap before any pipeline timers are created —
     # throttled QTimers delay the staged full decode by 9-15s when the app

@@ -802,7 +802,10 @@ class UnifiedImageProcessor:
         apply_lens_correction: bool = False,
     ) -> Optional[np.ndarray]:
         from common_image_loader import dng_prefers_embedded_preview_first, is_raw_file
-        from raw_tone_recovery import edit_base_decode_params
+        from raw_tone_recovery import (
+            edit_base_decode_params,
+            linearize_reconstruct_edit_base,
+        )
 
         try:
             if not is_raw_file(file_path):
@@ -845,8 +848,8 @@ class UnifiedImageProcessor:
 
             exif_data = self.exif_extractor.extract_exif_data(file_path)
             half_size = not use_full_resolution
-            # Browse-brightness decode (Blend highlights, no exp_shift) with
-            # the corrected-WB handling built in; see edit_base_decode_params.
+            # Reconstruct CFA highlights; browse brightness via
+            # linearize_reconstruct_edit_base (no P-key exp_shift).
             edit_params = edit_base_decode_params(
                 half_size=half_size, demosaic="AHD", for_file=file_path
             )
@@ -927,32 +930,19 @@ class UnifiedImageProcessor:
                             cam_mul_for_scale = list(raw.camera_whitebalance or [])
                             with _heavy_fallback_semaphore:
                                 rgb_image = raw.postprocess(**edit_params)
-                    # Restore browse (min-normalized) brightness: dcraw
-                    # divides the WB multipliers by their MAX whenever
-                    # highlight_mode > 0 (measured: a uniform 1.74x darkening
-                    # on a cam_mul of [1780,1024,1786]), which made the
-                    # editor's default rendering visibly darker than browse.
-                    # Rescale to float32 scene-linear where 1.0 = camera clip
-                    # point: unclipped tones land exactly on browse scale,
-                    # and values > 1.0 are the Blend-reconstructed highlight
-                    # headroom that Exposure/Highlights can pull back down
-                    # (display clips them to white, matching browse).
+                    # Reconstruct shares Blend's max-normalized WB scale.
+                    # Restore browse (min-normalized) midtones; values that
+                    # hit the 16-bit ceiling become >1.0 headroom.
                     try:
                         from fast_raw_decode import get_corrected_camera_wb
 
                         mul = get_corrected_camera_wb(file_path) or cam_mul_for_scale
                         if mul is None and edit_params.get("user_wb"):
                             mul = edit_params.get("user_wb")
-                        mul3 = [float(m) for m in (mul or [])[:3] if float(m) > 0]
-                        dmax_over_dmin = (
-                            (max(mul3) / min(mul3)) if len(mul3) == 3 else 1.0
-                        )
                     except Exception:
-                        dmax_over_dmin = 1.0
+                        mul = cam_mul_for_scale
                     if rgb_image is not None and rgb_image.dtype == np.uint16:
-                        rgb_image = rgb_image.astype(np.float32) * (
-                            dmax_over_dmin / 65535.0
-                        )
+                        rgb_image = linearize_reconstruct_edit_base(rgb_image, mul)
                 except Exception as libraw_err:
                     is_unsupported = (
                         "unsupported" in str(libraw_err).lower()

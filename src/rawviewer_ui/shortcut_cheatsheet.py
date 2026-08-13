@@ -62,7 +62,7 @@ _BROWSE = [
             ("G", "Composition guide (cycles)"),
             ("F", "Focus point"),
             ("M", "Location map"),
-            ("P", "RAW recovery preview (fit only, this session)"),
+            ("P", "RAW recovery preview — Reconstruct + polish, not HS sliders (fit only, this session)"),
         ],
     ),
     (

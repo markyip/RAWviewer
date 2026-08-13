@@ -32,7 +32,7 @@ def main() -> int:
         "no_auto_bright": True,
         "bright": 1.0,
         "user_flip": 0,
-        "highlight_mode": 1,  # Blend
+        "highlight_mode": 2,  # Blend replica (live edit-base is Reconstruct=5; rejected)
         "demosaic_algorithm": "AHD",
     }
 

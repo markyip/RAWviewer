@@ -32,6 +32,7 @@ _KEYS = (
     "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE",
     "RAWVIEWER_EDIT_BASE_LRU_MAX",
     "RAWVIEWER_BG_POOL_THREADS",
+    "RAWVIEWER_BANDED_WORKERS",
 )
 
 
@@ -91,6 +92,11 @@ def main() -> int:
             "low tier shrinks live-drag preview edge",
             os.environ.get("RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE") == "480",
             os.environ.get("RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE"),
+        )
+        check(
+            "low tier caps export banding workers",
+            os.environ.get("RAWVIEWER_BANDED_WORKERS") == "2",
+            os.environ.get("RAWVIEWER_BANDED_WORKERS"),
         )
     finally:
         rp.system_total_ram_gb = orig_ram

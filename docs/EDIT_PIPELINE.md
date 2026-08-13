@@ -22,7 +22,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Area | Status | Notes |
 |------|--------|-------|
 | Scene-linear decode (fast EA / AHD fallback, 16-bit) | Done | Half-res working preview (RAM-tier long-edge cap on ≤16 GB); full-res export; `user_wb` stays on fast path (see Performance review #25). Full-res may reuse the browse unpack + Plus CUDA demosaic (`edit_gpu_policy.py`) |
-| PV2012 tone (ProcessVersion 11.0) | Done | Base curve + HS/W/B in perceptual space; live-drag uses `preview_lite` (#26) |
+| PV2012 tone (ProcessVersion 11.0) | Done | Contrast / Whites / Blacks + curves in perceptual space; live Highlights/Shadows are scene-linear regional gain; live-drag uses `preview_lite` (#26) |
 | Point tone curve UI | Done | `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = True` in panel (re-enabled 2026-07-04) |
 | Parametric tone regions | Done | PV Shad / Dark / Light / High (same flag); monotonicity bug fixed before re-enabling (see Performance review #14) |
 | HSL (8 colors) | Done | UI on (`_SHOW_HSL_UI = True`); float32 HSV scale fixed (Performance review #6) |
@@ -61,9 +61,11 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 
 ```
 RAW file
-  → LibRaw postprocess (recovery_decode_params, demosaic=AHD)
+  → LibRaw postprocess (edit_base_decode_params, demosaic=AHD)
       • 16-bit linear (gamma=(1,1))
-      • use_camera_wb=True, highlight reconstruct
+      • use_camera_wb=True, highlight_mode=Reconstruct(5) (not Blend)
+      • no exp_shift / exp_preserve (those are P-key only)
+      • linearize_reconstruct_edit_base: WB max/min gain so midtones match browse
       • half_size=True for live preview (optional RAWVIEWER_EDIT_BASE_MAX_EDGE cap)
       • full-res for export (peek browse unpack; Plus CUDA demosaic when enabled)
   → float32 scene-linear (÷ 65535)
@@ -72,10 +74,11 @@ RAW file
   → chroma denoise (bilateral, Cb/Cr only; preview skips unless panel NR on)
   → luma denoise (bilateral, Y only; runs whenever Luma NR slider > 0)
   → PV2012 tone (unless recovery baseline — see below)
+      • Highlights / Shadows: scene-linear regional gain first (perceptual HS zeroed)
       • Built-in medium-contrast base curve
       • Point curve LUT (when UI enabled + crs:ToneCurvePV2012)
       • Parametric Shadows / Darks / Lights / Highlights (when UI enabled)
-      • Contrast / Highlights / Shadows / Whites / Blacks
+      • Contrast / Whites / Blacks (perceptual)
   → tone map to display
       • Default: luminance-preserving Reinhard
       • Recovery baseline: linear_tone_map_to_display + local shadow/highlight polish
@@ -101,10 +104,12 @@ Browse / gallery / non-edit paths **unchanged** (embedded JPEG + fast 8-bit LibR
 |---------|---------|-------|----------------|
 | Exposure | `Exposure2012` | −5 … +5 EV | Scene-linear multiply (fixed range = LR / XMP standard) |
 | Contrast | `Contrast2012` | −100 … +100 | PV2012 perceptual |
-| Highlights | `Highlights2012` | −100 … +100 | PV2012 perceptual |
-| Shadows | `Shadows2012` | −100 … +100 | PV2012 perceptual |
+| Highlights | `Highlights2012` | −100 … +100 | Scene-linear regional gain (`apply_regional_linear_exposure`; mask from max(lum, max RGB); perceptual HS zeroed) |
+| Shadows | `Shadows2012` | −100 … +100 | Scene-linear regional gain (`apply_regional_linear_exposure`; luminance mask; perceptual HS zeroed) |
 | Whites | `Whites2012` | −100 … +100 | PV2012 perceptual |
 | Blacks | `Blacks2012` | −100 … +100 | PV2012 perceptual |
+
+**P-key recovery preview ≠ Highlights/Shadows.** Browse **P** (RAW/DNG, session, fit-only) decodes with LibRaw **Reconstruct** plus `exp_shift` / highlight preserve and local polish (`raw_tone_recovery.recovery_decode_params`). It does not move the sliders or write XMP. Edit-base decode also uses **Reconstruct(5)** so clipped CFA can keep chromatic data, then `linearize_reconstruct_edit_base` restores browse (min-normalized) brightness — default Adjust must not look like the P-key preview. The Light-panel sliders compress or lift that scene-linear RGB with a shared gain (hue preserved). Highlights can act on a chromatic near-clip such as `(1.0, 0.1, 0.1)` because the mask uses `max(lum, max(R,G,B))`, and on Reconstruct-recovered chroma that Blend would have greyed. They still cannot invent hue that Reconstruct did not restore.
 
 ### Tone curve
 
@@ -114,7 +119,7 @@ Browse / gallery / non-edit paths **unchanged** (embedded JPEG + fast 8-bit LibR
 | PV Shadows | `ParametricShadows` | |
 | PV Darks | `ParametricDarks` | |
 | PV Lights | `ParametricLights` | |
-| PV Highlights | `ParametricHighlights` | |
+| PV Highlights | `ParametricHighlights` | Tone-curve region only — not live `Highlights2012` |
 
 Re-enabled 2026-07-04 (`_SHOW_TONE_CURVE_UI = True` in `adjust_panel.py`) after
 fixing a monotonicity bug in `apply_parametric_tone_curve`
@@ -584,13 +589,21 @@ three share one contract, and it is the reason they live outside the pipeline:
 covering similar ground: it renders display pixels for the **P**-key preview,
 so there are no slider values behind it to record or write to a sidecar.
 
-Auto Tone specifics: measurements are taken in the **PV2012 perceptual space**
-(`raw_pv2012._scene_to_perceptual`) because that is the space the six Light
-sliders act in, and highlight thresholds are fractions of `_PERCEPTUAL_WHITE`
-(~0.813) rather than of 1.0 — see `raw_pv2012`'s own warning about highlight
-math measured against 1.0 collapsing into a no-op. Exposure is solved two ways
-and the smaller taken: a median anchor, and the EV at which the 99.5th
-percentile reaches white. Without that limiter a night scene with a bright
+Auto Tone specifics: clip/crush/IQR/endpoint **measurements** are taken in
+the **PV2012 perceptual space** (`raw_pv2012._scene_to_perceptual`) because
+Contrast / Whites / Blacks still act there, and highlight thresholds are
+fractions of `_PERCEPTUAL_WHITE` (~0.813) rather than of 1.0 — see
+`raw_pv2012`'s own warning about highlight math measured against 1.0
+collapsing into a no-op. Shadows/Highlights sliders themselves now apply as
+scene-linear regional gain (±1.55 / ±1.75 stop at slider ±100). Auto Tone
+still *measures* clip/crush in perceptual space (CR3-measured fraction
+thresholds unchanged) but sizes Highlights/Shadows with dedicated caps
+(90 / 75) so CLIP_FULL / CRUSH_FULL match the old perceptual-HS *stop*
+intent (−1.40 / +1.31) instead of the stale ±60 → ±0.93 / ±1.05 stop.
+Reconstruct on the edit base can lower the clipped fraction (recovered
+pixels leave the clip floor); Auto still fires on remaining true clips.
+Exposure is solved two ways and the smaller taken: a median anchor, and
+the EV at which the 99.5th percentile reaches white. Without that limiter a night scene with a bright
 lamp brightens into mud. Every ramp threshold was calibrated on 20 real CR3
 edit bases, **not** on synthetic histograms — a lognormal test image has no
 true blacks and no speculars, and tuning against one pins Whites/Blacks near
@@ -931,7 +944,7 @@ recompute.
 | 2 | No incremental recompute — every slider tick reruns the entire WB→exposure→NLM→PV2012→tonemap→sat→HSL→detail chain even when only one late-stage control changed | All-default preview ~150–270ms; typical multi-slider edit ~1.7–1.9s; far past the 80ms throttle window | **Fixed** — see Performance review #18 (`PreviewStageCache`, live preview path only) |
 | 3 | Recovery baseline (`_tone_map_recovery_display`) reruns a `scipy.ndimage.gaussian_filter(sigma=22)` + downsample/upsample round-trip on every tick, even though Exposure/Sat/Vibrance/HSL/Detail are layered "on top of" recovery tone and don't need it recomputed | ~2.0–2.3s per tick with recovery on, the slowest path measured | **Partially fixed** — see Performance review #18; the gaussian-filter pass is now skipped when only a sat/vibrance/HSL/detail slider changes with recovery held on, since it lives in the cached tonemap stage, but still reruns on any pre-tone or PV2012-tone-slider change |
 | 4 | `UnifiedImageProcessor.decode_raw_edit_base(..., executor=self.process_pool)` accepts `executor` but never uses it — decode always runs in-process on the calling `QRunnable` thread, not offloaded to the process pool | N/A (code review) | **Fixed (2026-07-16)** — rawpy/AHD fallback submits via `executor.submit(decode_raw_file, ...)` when a process pool is present (Windows/Linux default); macOS usually has `executor=None` (pool off). Fast path still in-process. |
-| 5 | `phase_develop_adjust_linear.py` only checks correctness on tiny (16×16–64×64) synthetic arrays; no benchmark at realistic preview resolution | N/A | Open — a perf regression (like #1) would not be caught by the existing suite |
+| 5 | `phase_develop_adjust_linear.py` only checks correctness on tiny (16×16–64×64) synthetic arrays; no benchmark at realistic preview resolution | N/A | **Partially closed (2026-08-13)** — `t_perf_baseline.py` benches unpack / half / full decode and a 6MP sidecar apply against a per-machine baseline (`TOLERANCE` 1.25×). Tiny synthetic correctness tests remain. |
 | 6 | `raw_hsl.py`'s `_rgb_to_hsv` treats cv2's **float32** `COLOR_BGR2HSV` output (already H:0–360, S/V:0–1) as if it were the **uint8** convention (H:0–179, S/V:0–255) — `h * 2.0` doubles an already-0–360 hue (wraps/misassigns color bands), and `s / 255.0`, `v / 255.0` crush saturation/value to ~1/255 of true scale. `_hsv_to_rgb`'s uint8 packing then largely undoes the S/V crush on the way back out, but the per-color slider deltas (`ds`/`dv`, order ±1.0) are added *before* that undo, so they dominate the crushed (~0.004) true value — HSL Hue/Sat/Lum sliders would behave close to on/off rather than proportional, and hue-band assignment is wrong. Not visible while `_SHOW_HSL_UI = False`, but still runs for any file with pre-existing non-zero `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` XMP values (browse view, export) | Confirmed via direct `cv2.cvtColor` test; not benchmarked (no user-visible path while hidden) | **Fixed** — float path uses H∈[0,360], S/V∈[0,1]; defensive uint8-scale detection retained; `t_hsl_correctness.py` guards proportional sat + hue shift |
 | 7 | `_apply_saturation_vibrance` scaled chroma (`img - luma`) additively on **scene-linear** RGB with no upper clip. Linear-light channel spread is highly hue-dependent (green/yellow have large spread relative to luma, red/blue less so), so the same `+50` slider value clipped green/yellow to a flat, fully-saturated block (`ΔS` up to 0.54, hitting the gamut ceiling) while skin tones and blue sky barely moved (`ΔS` ~0.11–0.13) — the reported "colors look off, no pop" | Measured `ΔS` (HSV saturation, encoded output) across 6 test hues at Saturation +50: **0.11–0.54** (7× spread, several hues clipped to `S=1.0`) | **Fixed** — `_apply_saturation_vibrance` now round-trips scene-linear → sRGB-encoded (float LUT, `_encode_srgb_float01`/`_decode_srgb_float01` in `raw_tone_recovery.py`) and scales the HSV **S** channel there, bounded to `[0, 1]` by construction. Same 6 hues at +50 now measure **0.13–0.30** (~2× spread, no clipping). Cost: +~50–80ms per preview tick when Saturation/Vibrance is non-zero (HSV round-trip); no-op path unaffected |
 | 8 | `apply_defringe` (`raw_detail_enhance.py`) had no edge/locality gate at all — any pixel whose hue leaned purple/green relative to its own chroma got desaturated, including uniform, unfringed regions, because `fringe / span` is scale-invariant along the purple/green hue axis rather than proportional to cast strength. A uniform purple patch (e.g. a flower petal, no edge anywhere) lost **90% saturation at Defringe=100** with nothing to correct. Separately, `green = g - 0.5*(r+b)` had half the gain of `purple = r+b-2*g` for the same absolute color imbalance — green fringing was flagged as half as severe as equally-strong purple fringing | Uniform purple patch: **90% saturation loss** at Defringe=100 with zero edges present; purple-vs-green raw mask ratio confirmed **exactly 2.00×** at every tested magnitude (d=0.02/0.05/0.10) | **Fixed** — `green` now uses `2*g - r - b` (exact negation of `purple`, so `fringe == \|r + b - 2*g\|`); added `edge_weight` gated on local luminance contrast (same Gaussian-blur trick as clarity/sharpness, sigma=1.5, soft-knee `edge/(edge+0.04)`) so the mask only engages near a real luminance transition. Uniform purple/green patches now measure **0% saturation loss** at Defringe=100; a genuine fringe pixel at a dark/bright edge still loses ~57-75%. 3 new smoke tests added (`test_defringe_*`) |
@@ -970,6 +983,8 @@ recompute.
 | 26 | Follow-up to #23: upstream PV2012 ticks (Contrast/Shadows/Highlights/curve) still lag on the ~1000px fast base once guided-filter y0 smooth + shadow chroma damp run | Same architecture as #23; drag path only | **Implemented (2026-07-16)** — `_ADJUST_FAST_PREVIEW_MAX_EDGE` **1000→640**; live-drag passes `preview_lite=True` into `apply_pv2012_tone_rgb` (skip y0 guided filter + shadow chroma damp). Settle / Compare / export keep the full tone path. Separate fast/full `PreviewStageCache` instances plus `preview_lite` in the tone cache key prevent lite buffers from poisoning settle. Tests: `t_pv2012_preview_lite.py`. |
 
 | 27 | Adjust open: Fit settle (~3514px) → drag sliders paints 640px lite → double-click 100% zooms the soft buffer (`640x427 - 100%` in status). Separately, double-click still queued browse `_queue_sensor_full_decode` while Space already gated it off under Adjust | Last-run `rawviewer_dev.log` on DSC01416.ARW: settle `3514x2344`, then lite spam `640x427`, then `640x427 - 100%` after zoom-in | **Fixed (2026-07-17)** — (1) gate double-click / zoom-to-point browse sensor decode when `_adjust_panel_active()` (match Space); (2) `_should_defer_adjust_preview_paint` skips lite paints while zoomed; (3) `_adjust_hires_render` keeps last ≥1200px settle; `_restore_adjust_hires_before_zoom` puts it back before 100%; (4) zoom-in requests `full_quality=True`. Instant-gain baseline is not replaced by a deferred lite tier. |
+
+| 28 | Follow-up pass (2026-08-13): (a) `banded_worker_count` was `min(8, cpu_count)`, so export banding started 8 pool workers on a laptop, each also inside OpenCV/OpenMP; (b) numpy OpenBLAS / Accelerate ignored the existing `OMP_NUM_THREADS` cap; (c) Depth+Blur gather was a Python per-channel loop on the working base; (d) Compare skipped instant Exposure/WB LUTs even after the overlay started *scaling* the original to the edited pixmap (#24's crop bug) | Code review; `t_banded_workers.py`; existing `t_depth_blur.py` | **Implemented** — banded workers cap at 4 and follow `OMP_NUM_THREADS` / `RAWVIEWER_BANDED_WORKERS` (RAM-tier 2 on ≤12 GB); startup also setdefaults OPENBLAS/MKL/VECLIB/NUMEXPR and `cv2.setNumThreads`; Depth+Blur scatter is vectorized; Compare live-drag stays on the 640px lite path and uses instant gain. Instant transform stays off in Compare (the original pane is a separate geometry render). |
 
 Numbers were captured with `raw_edit_pipeline.process_linear_edit_buffer` +
 `linear_to_display_uint8` directly (no Qt/GUI thread involved); see the

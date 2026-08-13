@@ -128,13 +128,13 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **G** | Cycle composition guide |
 | **H** | Show / hide histogram |
 | **J** | Toggle highlight/shadow clipping overlay |
-| **P** | Toggle RAW recovery preview — half-res shadow/highlight recovery (RAW/DNG, session only; fit-only) |
+| **P** | Toggle RAW recovery preview — LibRaw Reconstruct + local polish (RAW/DNG, session only; fit-only). Not the Adjust Highlights/Shadows sliders. |
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos) |
 
 **Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above.
 
-**Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** shows half-res shadow/highlight recovery for judging extreme contrast.
+**Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** uses Reconstruct + local polish to judge extreme contrast. It is not the Highlights/Shadows sliders (those compress/lift scene-linear luminance and cannot restore hue in fully blown whites).
 
 **Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out. On Mac the menu includes AirDrop (original file) and messaging apps such as WhatsApp / Signal (JPEG proxy for RAW). See [`docs/macos-sharing.md`](docs/macos-sharing.md).
 
@@ -283,7 +283,7 @@ This clears local cache and session state only — **not** your photos or XMP si
 |---------|------------|
 | GPS map not showing | Press **M** in single-image view; the map only appears when the photo has embedded GPS coordinates |
 | HDR HEIC/TIFF looks flat or too dark | HDR stills are tone-mapped to standard brightness by design in v3.0 |
-| **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is fit-only half-res preview |
+| **P** / **J** no effect | **P**/**J** are RAW/DNG single view only; **P** is a fit-only Reconstruct preview, not the Highlights/Shadows sliders |
 | Gallery slow on a huge folder (first open) | Normal — RAWviewer waits for capture-time sorting so gallery order is correct; instant when metadata is cached |
 | Upgraded but search / gallery still feels slow | Run **`clear_cache`** once (see [Upgrading from an older version](#upgrading-from-an-older-version)), then reopen the folder |
 

@@ -69,10 +69,18 @@ def estimate_neutral_rgb(linear_rgb: np.ndarray) -> Optional[tuple]:
 
 # --- Auto tone -------------------------------------------------------------
 #
-# Targets are stated in the PV2012 PERCEPTUAL space (raw_pv2012._scene_to_perceptual),
-# because that is the space the six Light sliders act in. Measuring in scene
-# linear or in display sRGB would put the thresholds in a different space from
-# the controls they drive, and the numbers would only look right by accident.
+# Histogram targets (median, clip/crush fractions, IQR, endpoints) are stated
+# in PV2012 PERCEPTUAL space (raw_pv2012._scene_to_perceptual). That matches
+# Contrast / Whites / Blacks, which still run on the perceptual ratio path.
+# Shadows2012 / Highlights2012 on the live RGB path are scene-linear regional
+# gain (apply_regional_linear_exposure: ±1.55 / ±1.75 stop at slider ±100),
+# not the dead perceptual HS branch. Clip/crush *fractions* stay perceptual
+# (same space as Contrast/Whites/Blacks). The slider magnitude for HS is a
+# dedicated cap so CLIP_FULL / CRUSH_FULL map to the scene-linear stop the
+# old Auto intended on the perceptual HS path — not the stale ±60 → ±0.93 /
+# ±1.05 stop that fell out when HS went linear while the cap stayed 60.
+# Measuring clip in scene-linear or display sRGB would put those fractions in
+# a different space from Contrast/Whites/Blacks and from _PERCEPTUAL_WHITE.
 #
 # The single most important constant here is where white sits. In perceptual
 # space a clipped white lands at _PERCEPTUAL_WHITE (~0.813), NOT at 1.0 --
@@ -81,7 +89,20 @@ def estimate_neutral_rgb(linear_rgb: np.ndarray) -> Optional[tuple]:
 # fraction of _PERCEPTUAL_WHITE for exactly that reason.
 _AUTO_TONE_MEDIAN_TARGET = 0.38  # perceptual; ~0.16 linear, just under mid-grey
 _AUTO_TONE_MAX_EV = 2.0
+# Unused for live HS (see the dedicated caps below). Kept as the historical
+# Auto magnitude from when all six sliders were treated as perceptual.
 _AUTO_TONE_MAX_SLIDER = 60.0
+#
+# Perceptual _apply_highlights_shadows on clipped white (_PERCEPTUAL_WHITE,
+# scene-linear 1.0) at Highlights=-60 (old Auto CLIP_FULL) lands at
+# perceptual 0.595 → linear 0.359 = −1.479 stop. The linear engine is
+# slider/100 * 1.55 stop, so matching that stop would be slider −95.4 —
+# effectively pinning Highlights. Cap at 90 (−1.395 stop, 94% of the old
+# intent) so CLIP_FULL stays bounded away from −100 and does not out-punch
+# Contrast/Whites/Blacks (those still top out at _AUTO_TONE_MAX_ENDPOINT).
+# Shadows=+60 on crush y=0.05 was +1.317 stop; 75/100*1.75 = +1.3125.
+_AUTO_TONE_HIGHLIGHTS_MAX_SLIDER = 90.0
+_AUTO_TONE_SHADOWS_MAX_SLIDER = 75.0
 
 # Dead zones. Below these an image is "already balanced" and AUTO refuses
 # rather than twitching six sliders by amounts nobody can see.
@@ -103,7 +124,10 @@ _AUTO_TONE_CRUSH_Y = 0.05  # perceptual; ~0.02 linear
 #
 # Near-clipped fraction. Measured median 0.8%: a little clipping is NORMAL
 # (specular highlights, a bright sky), so recovery must not engage there.
-# The worst frame in the set clipped 13.8%.
+# The worst frame in the set clipped 13.8%. Edit-base Reconstruct moves
+# recovered CFA off the clip floor, so this fraction can drop versus the
+# old Blend bases — remaining counts are true leftover clips; that is
+# correct, not a reason to lower these thresholds.
 _AUTO_TONE_CLIP_START = 0.01
 _AUTO_TONE_CLIP_FULL = 0.10
 
@@ -245,10 +269,10 @@ def estimate_auto_tone(linear_rgb: np.ndarray) -> Optional[dict]:
         frac_clipped = float(np.mean(y >= clip_y))
         frac_crushed = float(np.mean(y <= _AUTO_TONE_CRUSH_Y))
 
-        highlights = -_AUTO_TONE_MAX_SLIDER * _ramp(
+        highlights = -_AUTO_TONE_HIGHLIGHTS_MAX_SLIDER * _ramp(
             frac_clipped, _AUTO_TONE_CLIP_START, _AUTO_TONE_CLIP_FULL
         )
-        shadows = _AUTO_TONE_MAX_SLIDER * _ramp(
+        shadows = _AUTO_TONE_SHADOWS_MAX_SLIDER * _ramp(
             frac_crushed, _AUTO_TONE_CRUSH_START, _AUTO_TONE_CRUSH_FULL
         )
 

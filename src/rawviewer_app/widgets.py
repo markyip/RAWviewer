@@ -1371,7 +1371,7 @@ class SingleImageViewOverlay(QWidget):
                 text = "Recovery preview"
                 if detail:
                     text = f"{text}{detail}"
-                text = f"{text} · fit only · P to exit"
+                text = f"{text} · Reconstruct, not HS sliders · fit only · P to exit"
             badge.setText(text)
             badge.adjustSize()
             badge.show()

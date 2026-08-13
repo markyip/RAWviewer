@@ -530,7 +530,9 @@ def params_supported(params: Dict[str, Any], return_linear: bool = False) -> boo
     if return_linear:
         if int(params.get("output_bps", 16)) != 16:
             return False
-        # Linear adjustments use highlight_mode > 0 (usually 2 for blend)
+        # This replica implements clip / unclip / blend (0–2) only.
+        # edit_base_decode_params requests Reconstruct(5); reject that so
+        # the caller falls through to LibRaw instead of silently clipping.
         hm = params.get("highlight_mode", 0)
         if getattr(hm, "value", hm) not in (0, 1, 2):
             return False

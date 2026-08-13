@@ -2,8 +2,11 @@
 Adobe Lightroom / Camera Raw Process Version 2012 tone engine.
 
 PV2012 (XMP ProcessVersion 11.0) applies a built-in medium-contrast base curve,
-then parametric Exposure / Contrast / Highlights / Shadows / Whites / Blacks in
-perceptual space. Tone work is luminance-only to preserve hue.
+then Contrast / Whites / Blacks (and the point/parametric curves) in perceptual
+space. Shadows2012 / Highlights2012 on the live RGB path are scene-linear
+regional gain (apply_regional_linear_exposure); perceptual HS is zeroed there
+to avoid double-application. Exposure2012 is a scene-linear multiply upstream
+of this module. Tone work is luminance-only to preserve hue.
 """
 
 from __future__ import annotations
@@ -112,10 +115,16 @@ def _shadow_mask_scene_linear(lum: np.ndarray) -> np.ndarray:
     return 1.0 - _smoothstep01((lum - _SHADOW_MASK_LO) / span)
 
 
-def _highlight_mask_scene_linear(lum: np.ndarray) -> np.ndarray:
-    """0 through midtone → 1 in highlights / near-white."""
+def _highlight_mask_scene_linear(driver: np.ndarray) -> np.ndarray:
+    """0 through midtone → 1 near clip / near-white.
+
+    ``driver`` is max(lum, max(R,G,B)), not Rec.709 lum alone: a single
+    clipped channel (R=1, G=B=0.1 → lum≈0.29) sits below
+    ``_HIGHLIGHT_MASK_LO`` and would otherwise be a no-op. Same 0.38–0.98
+    band, so a healthy saturated midtone (0.5, 0.1, 0.1) gets little weight.
+    """
     span = max(_HIGHLIGHT_MASK_HI - _HIGHLIGHT_MASK_LO, 1e-6)
-    return _smoothstep01((lum - _HIGHLIGHT_MASK_LO) / span)
+    return _smoothstep01((driver - _HIGHLIGHT_MASK_LO) / span)
 
 
 def apply_regional_linear_exposure(
@@ -126,28 +135,35 @@ def apply_regional_linear_exposure(
     Returns ``(rgb, gain_map)``. ``gain_map`` is None when the op is a no-op
     (used by chroma-damp to know whether a lift happened). Absolute black
     stays 0 under multiply. Midtones stay near gain 1 by construction of the
-    masks.
+    masks. Gain is RGB×same scalar (hue preserved); this is not Reconstruct.
     """
     sh = float(shadows) / 100.0
     hi = float(highlights) / 100.0
     if abs(sh) < 1e-6 and abs(hi) < 1e-6:
         return img, None
 
-    lum = _luminance(img).astype(np.float32)
+    rgb = img.astype(np.float32, copy=False)
+    lum = _luminance(rgb).astype(np.float32)
     log2_gain = np.zeros_like(lum, dtype=np.float32)
     if abs(sh) > 1e-6:
+        # Deep underexposure is a luminance problem — keep Rec.709 lum.
         log2_gain = log2_gain + (sh * _SHADOW_LINEAR_MAX_STOPS) * _shadow_mask_scene_linear(
             lum
         )
     if abs(hi) > 1e-6:
         # hi > 0 brightens highlights; hi < 0 compresses (recovery), same
-        # stop language as Exposure but masked to the highlight region.
+        # stop language as Exposure. Drive the mask from the hotter of lum
+        # and the max channel so chromatic clips are visible.
+        max_rgb = np.maximum(
+            np.maximum(rgb[:, :, 0], rgb[:, :, 1]), rgb[:, :, 2]
+        )
+        hi_driver = np.maximum(lum, max_rgb)
         log2_gain = log2_gain + (
             hi * _HIGHLIGHT_LINEAR_MAX_STOPS
-        ) * _highlight_mask_scene_linear(lum)
+        ) * _highlight_mask_scene_linear(hi_driver)
 
     gain = np.power(2.0, log2_gain).astype(np.float32)
-    out = img.astype(np.float32, copy=False) * gain[..., np.newaxis]
+    out = rgb * gain[..., np.newaxis]
     return out, gain
 
 

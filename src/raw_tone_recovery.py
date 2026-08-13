@@ -53,18 +53,49 @@ def _highlight_reconstruct_mode():
         return rawpy.HighlightMode.ReconstructDefault
 
 
+def edit_base_highlight_brightness_gain(cam_mul) -> float:
+    """Browse-scale restore after LibRaw ``highlight_mode > 0``.
+
+    dcraw ``scale_colors`` divides WB multipliers by their **minimum** when
+    highlights are clipped (browse) and by their **maximum** when
+    ``highlight_mode`` is Blend or Reconstruct. That max-normalization is a
+    uniform darkening (measured 1.74× on cam_mul ``[1780, 1024, 1786]``).
+
+    Reconstruct shares that same ``scale_colors`` path with Blend; it does
+    not apply a second global exposure. The reconstructed CFA values sit in
+    the 16-bit ceiling — after this gain they land **above** 1.0 so
+    Highlights/Shadows still see chromatic headroom. This is not P-key
+    ``exp_shift`` / ``exp_preserve_highlights`` / local polish.
+    """
+    try:
+        mul3 = [float(m) for m in (cam_mul or [])[:3] if float(m) > 0]
+    except (TypeError, ValueError):
+        return 1.0
+    if len(mul3) != 3:
+        return 1.0
+    lo = min(mul3)
+    if lo <= 0.0:
+        return 1.0
+    return float(max(mul3) / lo)
+
+
+def linearize_reconstruct_edit_base(rgb, cam_mul) -> np.ndarray:
+    """uint16 Reconstruct postprocess → scene-linear float32 at browse scale."""
+    gain = edit_base_highlight_brightness_gain(cam_mul)
+    return np.asarray(rgb, dtype=np.float32) * (gain / 65535.0)
+
+
 def edit_base_decode_params(
     *, half_size: bool = True, demosaic: str | None = None, for_file: str | None = None
 ):
     """Scene-linear 16-bit decode for the Adjust-panel edit base.
 
-    Unlike :func:`recovery_decode_params` (P-key recovery / EDR), this keeps
-    browse-equivalent brightness: no exp_shift, and ``highlight_mode=Blend``
-    instead of Reconstruct(5) -- Reconstruct lowers overall exposure to buy
-    highlight headroom, which made the editor's default rendering visibly
-    darker than browsing the same file once the editor's display transform
-    was aligned with browse (dcraw BT.709 + clip). Blend keeps unclipped
-    tones at browse scale while still smoothing clipped-highlight edges.
+    Uses LibRaw Reconstruct so clipped CFA can keep chromatic data for the
+    Highlights slider. Brightness is *not* the P-key path: no ``exp_shift``,
+    no ``exp_preserve_highlights``. After postprocess, callers must apply
+    :func:`linearize_reconstruct_edit_base` (WB max/min restore) so default
+    Adjust exposure matches browse. Reconstruct itself does not re-run when
+    Highlights move — those sliders operate on the float buffer.
     """
     import rawpy
 
@@ -77,7 +108,7 @@ def edit_base_decode_params(
         bright=1.0,
         user_flip=0,
         half_size=half_size,
-        highlight_mode=rawpy.HighlightMode.Blend,
+        highlight_mode=_highlight_reconstruct_mode(),
     )
     if demosaic:
         try:

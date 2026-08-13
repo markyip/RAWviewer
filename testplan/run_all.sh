@@ -32,6 +32,8 @@ run "compile check" -m py_compile \
   src/raw_detail_enhance.py src/raw_tone_recovery.py src/edit_gpu_policy.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
+run "auto tone estimator" testplan/auto/t_auto_tone.py
+run "edit-base decode params" testplan/auto/t_edit_base_decode_params.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
 run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
@@ -51,6 +53,9 @@ run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
 run "edit GPU policy" testplan/auto/t_edit_gpu_policy.py
+run "banded worker cap" testplan/auto/t_banded_workers.py
+run "share payload" testplan/auto/t_share_payload.py
+run "memory tier overlay" testplan/auto/t_memory_tier_overlay.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
 run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
 run "shadow smoothed ratio" testplan/auto/t_shadow_smoothed_ratio.py

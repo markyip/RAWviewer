@@ -101,19 +101,14 @@ def apply_variable_blur(
     f = (t - i0.astype(np.float32))[..., np.newaxis]
 
     out = np.zeros_like(levels[0])
-    # Scatter-add from each band pair. n_bands is small (4–6), so looping
-    # bands is cheaper than a full fancy index gather on 20MP buffers.
+    # Vectorized scatter-add. A Python per-channel loop over 12 MP frames
+    # was the gather cost; n_bands is still only 4–6.
+    fade = f[..., 0]
     for b in range(n_bands):
-        m0 = i0 == b
-        if np.any(m0):
-            w0 = (1.0 - f[..., 0]) * m0
-            for c in range(out.shape[2]):
-                out[:, :, c] += levels[b][:, :, c] * w0
-        m1 = (i1 == b) & (i0 != i1)
-        if np.any(m1):
-            w1 = f[..., 0] * m1
-            for c in range(out.shape[2]):
-                out[:, :, c] += levels[b][:, :, c] * w1
+        w0 = ((i0 == b).astype(np.float32) * (1.0 - fade))[..., np.newaxis]
+        out += levels[b] * w0
+        w1 = (((i1 == b) & (i0 != i1)).astype(np.float32) * fade)[..., np.newaxis]
+        out += levels[b] * w1
     return out
 
 
