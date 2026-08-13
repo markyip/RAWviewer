@@ -113,8 +113,11 @@ Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first 
 | `RAWVIEWER_SIDECAR_ADJUST=0` | **Default.** Browse shows original pixels; edits render in Adjust. Set `1` to apply saved XMP in browse |
 | `RAWVIEWER_LIBRAW_CONSISTENT_PREVIEW=1` | Same color pipeline for fit vs 100% zoom on RAW (default on) |
 | `RAWVIEWER_EXIF_BACKEND=auto` | `auto`, `pyexiv2`, or `exifread` |
-| `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended) |
+| `RAWVIEWER_SHARE_MENU=1` | macOS: Qt share menu (recommended). Lists AirDrop; messaging apps get a JPEG proxy for RAW |
 | `RAWVIEWER_SHARE_TRY_NATIVE_PICKER=1` | macOS: try native share sheet first |
+| `RAWVIEWER_SHARE_SHOW_AIRDROP=0` | Hide AirDrop from the Qt share menu (default is shown) |
+| `RAWVIEWER_AIRDROP_PERFORM=0` | After osascript fails, skip in-process AirDrop and go straight to Finder |
+| `RAWVIEWER_EDIT_BASE_MAX_EDGE` | Cap working Adjust decode long edge (RAM tier sets this on ≤16 GB; export uncapped) |
 | `RAWVIEWER_INDEX_DEFER_FACE_SCAN=1` | Defer face scan until after semantic index (default) |
 | `RAWVIEWER_SEMANTIC_PREP_WORKERS` | Parallel CPU workers before AI encode (RAM tier may set this) |
 | `RAWVIEWER_SEMANTIC_BATCH_AUTO=1` | Auto-tune AI batch/chunk size on index (default) |
@@ -126,7 +129,7 @@ Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first 
 | `RAWVIEWER_SESSION_RESTORE_FULL_DECODE_DELAY_MS` | Milliseconds to wait after first paint before full decode on session restore (default `2500`) |
 | `RAWVIEWER_DISABLE_SESSION_RESTORE=1` | Opt out of the normal feature that reopens the last folder/file on launch (useful for cold benches / low-RAM edge cases) |
 
-Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/README.md), [`docs/macos-sharing-v21-v22.md`](macos-sharing-v21-v22.md).
+Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/README.md), [`docs/macos-sharing.md`](macos-sharing.md).
 
 ## MobileCLIP models (Full — AI search)
 

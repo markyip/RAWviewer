@@ -21,7 +21,7 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Scene-linear decode (fast EA / AHD fallback, 16-bit) | Done | Half-res preview; full-res export; `user_wb` stays on fast path (see Performance review #25) |
+| Scene-linear decode (fast EA / AHD fallback, 16-bit) | Done | Half-res working preview (RAM-tier long-edge cap on ≤16 GB); full-res export; `user_wb` stays on fast path (see Performance review #25). Full-res may reuse the browse unpack + Plus CUDA demosaic (`edit_gpu_policy.py`) |
 | PV2012 tone (ProcessVersion 11.0) | Done | Base curve + HS/W/B in perceptual space; live-drag uses `preview_lite` (#26) |
 | Point tone curve UI | Done | `tone_curve_widget.py`; `_SHOW_TONE_CURVE_UI = True` in panel (re-enabled 2026-07-04) |
 | Parametric tone regions | Done | PV Shad / Dark / Light / High (same flag); monotonicity bug fixed before re-enabling (see Performance review #14) |
@@ -49,7 +49,8 @@ Replace **8-bit sRGB / gamma-space** adjust preview with a **scene-linear** pipe
 | Effects (vignette / dehaze) | Done | Paint-overlay vignette + Midpoint; LR Amount sign; whole-frame (not per-band) |
 | Dodge/Burn Effect Strength | Done | `DodgeBurnStrength` stops separate from Brush Flow |
 | XMP presets | Done | Managed `.xmp` library (import/apply/remove), same chrome as Creative LUT (`raw_xmp_presets.py`) |
-| Adjust zoom vs lite preview | Done | Zoomed-in view keeps settle buffer; Fit may use 640px lite — see Performance review #27 |
+| Adjust zoom vs lite preview | Done | Zoomed-in view keeps settle buffer; Fit may use 640px lite (RAM-tier may shrink that edge) — see Performance review #27 |
+| GPU vs CPU for Adjust ticks | Done | Live preview / settle stay host OpenCV. GPU is the OpenGL viewport plus Plus CUDA **full-res** demosaic (browse + export base). See GPU vs CPU below |
 | Identity tone-curve = default | Done | `tone_curve_serial_is_active()` so Reset / `is_default` treat `"0,0;255,255"` as unset |
 
 **Not supported:** Lightroom-style radial/gradient/brush masks (beyond dodge/burn), layers. Per-channel RGB tone curves **are** supported (`ToneCurvePV2012Red/Green/Blue`, applied post-encode like LR Standard mode).
@@ -63,7 +64,8 @@ RAW file
   → LibRaw postprocess (recovery_decode_params, demosaic=AHD)
       • 16-bit linear (gamma=(1,1))
       • use_camera_wb=True, highlight reconstruct
-      • half_size=True for live preview; full-res for export
+      • half_size=True for live preview (optional RAWVIEWER_EDIT_BASE_MAX_EDGE cap)
+      • full-res for export (peek browse unpack; Plus CUDA demosaic when enabled)
   → float32 scene-linear (÷ 65535)
   → WB (Temperature / Tint vs as-shot reference)
   → Exposure2012 (linear multiply)
@@ -681,7 +683,8 @@ Written on slider / curve release and before export:
 | `display_brightness.py` | Best-effort macOS display brightness bump while Adjust is open |
 | `rawviewer_ui/adjust_panel.py` | Adjust panel UI |
 | `rawviewer_ui/tone_curve_widget.py` | Draggable point curve editor |
-| `unified_image_processor.py` | `decode_raw_edit_base()` |
+| `unified_image_processor.py` | `decode_raw_edit_base()` (working-base cap; full-res unpack reuse) |
+| `edit_gpu_policy.py` | When full-res linear demosaic may use GPU; live ticks stay CPU |
 | `main.py` | Edit-base worker, preview worker, export worker, **E** shortcut |
 | `scripts/test/phase_develop_adjust_linear.py` | Smoke tests |
 
@@ -692,6 +695,29 @@ Written on slider / curve release and before export:
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `RAWVIEWER_EDIT_CHROMA_DENOISE` | `1` | Chroma denoise (bilateral) on export when panel NR off |
+| `RAWVIEWER_EDIT_BASE_MAX_EDGE` | unset / RAM-tier | Long-edge cap on the **working** (non-export) edit base. Low ≤8 GB sets `1600` |
+| `RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE` | `640` | Live-drag downsample. RAM-tier may set `480` on low |
+| `RAWVIEWER_PREFER_GPU_DECODE` | platform | Same gate as browse. Full-res export edit base may follow it; half-size never does |
+
+---
+
+## GPU vs CPU
+
+`GpuImageView` is an OpenGL **viewport**: it composites a bitmap that the edit
+pipeline already computed on the CPU. It is not a shader rewrite of PV2012,
+masks, bilateral NR, depth blur, or geometry `remap`.
+
+Plus CUDA already GPU-demosaics **full-resolution** RAW (CuPy; optional
+PyTorch CUDA). `finish_linear_edit_base_from_unpacked()` reuses a browse
+unpack so export does not LibRaw-unpack a second time, then calls that same
+`finish_full_decode(prefer_gpu=…)` path. Half-size working bases stay CPU
+2×2 binning — they are unpack-bound; uploading the mosaic for a 2×2 bin
+loses the transfer.
+
+Live Adjust ticks stay on host OpenCV (`adjust_preview_gpu_compute_enabled()`
+returns False): settle must not drift from export, Standard has no torch /
+`cv2.cuda`, and the 640 px lite path is already cheaper than a GPU round-trip
+on machines without a discrete CUDA device. Tests: `t_edit_gpu_policy.py`.
 
 ---
 

@@ -29,7 +29,7 @@ run "compile check" -m py_compile \
   src/raw_pv2012.py src/raw_adjustments.py src/raw_edit_pipeline.py \
   src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
   src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py src/torch_bootstrap.py \
-  src/raw_detail_enhance.py src/raw_tone_recovery.py
+  src/raw_detail_enhance.py src/raw_tone_recovery.py src/edit_gpu_policy.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
@@ -50,6 +50,7 @@ run "dodge & burn brush wheel" testplan/auto/t_dodge_burn_brush_wheel.py
 run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
+run "edit GPU policy" testplan/auto/t_edit_gpu_policy.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
 run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
 run "shadow smoothed ratio" testplan/auto/t_shadow_smoothed_ratio.py

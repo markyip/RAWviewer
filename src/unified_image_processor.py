@@ -879,6 +879,19 @@ class UnifiedImageProcessor:
                                 )
                             except Exception:
                                 rgb_image = None
+                    else:
+                        # Full-res export / use_full_resolution bases: reuse
+                        # the same mosaic and the existing GPU demosaic gate
+                        # (CuPy / CUDA). Peek, don't take — browse still owns
+                        # the stash for its 8-bit full-tier finish.
+                        from edit_gpu_policy import (
+                            finish_linear_edit_base_from_unpacked,
+                        )
+
+                        rgb_image = finish_linear_edit_base_from_unpacked(
+                            self._peek_unpacked_raw(file_path),
+                            edit_params,
+                        )
 
                     if rgb_image is None:
                         rgb_image = try_fast_raw_decode(

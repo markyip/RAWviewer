@@ -91,12 +91,14 @@ colour calibration, and a long list of speed work.
 - **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block the visible ones (a stall on slower machines that needed a folder reload).
 - **Low-RAM machines keep the snappy gallery without the 24 GB prefetch.** Shared scroll defaults (idle-preload 120, 12 preload threads, hover full-res) are overlaid by the RAM tier, so an 8 GB machine no longer inherits those numbers.
 - **Editing on slower machines stays on a smaller working copy.** Live-drag was already 640 px; settle, masks and Auto Tone still used a half-sensor frame (often 12 MP). The RAM tier now caps that working base (and the live-drag edge) on ≤16 GB. Export still decodes at full resolution.
+- **Adjust preview/settle stay on the CPU; GPU is used where it already pays off.** Plus CUDA already GPU-demosaics full-resolution RAW (browse and the export edit base) and the OpenGL viewport composites the finished bitmap. Live ticks (PV2012, bilateral/guided NR, masks, depth blur, geometry) stay host OpenCV so Standard remains torch-free and baked pixels do not drift. Half-size working bases are unpack-bound — a GPU 2×2 bin would lose the transfer. Export can now reuse the browse unpack and that same GPU demosaic instead of unpacking again.
 - **Compare zoom loads the real pixels.** Space / 100% requests full-resolution for the two on-screen photos, and a preview upgrading to sensor-res no longer copies its zoom onto the other pane.
 - **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.
 - **Missing gallery tiles come back.** A transient failure used to cache a grey placeholder permanently for the session.
 - **Trackpad scrolling is smooth**, no longer discarding sub-pixel movement.
 - **Visiting the editor no longer forces a re-decode.** Opening and closing without changing anything was dropping every cache tier for that photo.
 - **The full-image cache is bounded by memory rather than a fixed count of 8**, so smaller files keep more of them.
+- **Share lists WhatsApp, Signal and AirDrop.** RAW is offered as a JPEG to messaging apps (they reject camera files); AirDrop still sends the original, and on Mac the person picker is hosted outside Qt so it can actually appear.
 
 ### 🖥️ Panel, gallery and shortcuts
 

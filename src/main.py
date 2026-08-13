@@ -690,6 +690,9 @@ def _find_file_index_in_list(files, file_path, *, default: int = -1) -> int:
     return default
 
 
+from share_payload import needs_jpeg_proxy, write_jpeg_proxy
+
+
 def _share_logger() -> logging.Logger:
     return logging.getLogger("rawviewer.share")
 
@@ -702,6 +705,72 @@ def _share_log(
 ) -> None:
     """Dedicated share diagnostics (always prefixed; visible at INFO in console)."""
     _share_logger().log(level, "[SHARE] " + msg, *args, exc_info=exc_info)
+
+
+_AIRDROP_JXA = """
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+var paths = %s;
+var urls = [];
+for (var i = 0; i < paths.length; i++) {
+  urls.push($.NSURL.fileURLWithPath(paths[i]));
+}
+var svc = $.NSSharingService.sharingServiceNamed("com.apple.share.AirDrop.send");
+if (!svc || svc.isNil()) {
+  throw new Error("AirDrop sharing service unavailable");
+}
+svc.performWithItems(urls);
+$.NSRunLoop.currentRunLoop.runUntilDate(
+  $.NSDate.dateWithTimeIntervalSinceNow(90)
+);
+"""
+
+
+def _macos_airdrop_via_osascript(paths) -> bool:
+    """Host AirDrop outside the Qt process so the person picker can appear.
+
+    ``NSSharingService.performWithItems`` for AirDrop does not show UI when
+    the host is a Qt window; osascript's AppKit session does.
+    """
+    import json
+    import subprocess
+    import time
+
+    files = [os.path.abspath(p) for p in paths if p and os.path.isfile(p)]
+    if not files:
+        return False
+    script = _AIRDROP_JXA % json.dumps(files)
+    try:
+        proc = subprocess.Popen(
+            ["osascript", "-l", "JavaScript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Syntax / missing-service failures exit immediately; a live picker
+        # keeps the 90s runloop, so poll stays None.
+        try:
+            from PyQt6.QtWidgets import QApplication
+
+            app = QApplication.instance()
+        except Exception:
+            app = None
+        deadline = time.time() + 0.35
+        while time.time() < deadline:
+            rc = proc.poll()
+            if rc is not None:
+                if rc == 0:
+                    break
+                _share_log(logging.WARNING, "AirDrop osascript exited %s", rc)
+                return False
+            if app is not None:
+                app.processEvents()
+            time.sleep(0.02)
+        _share_log(logging.INFO, "AirDrop via osascript files=%d", len(files))
+        return True
+    except Exception as exc:
+        _share_log(logging.WARNING, "AirDrop osascript failed: %s", exc)
+        return False
 
 
 def _macos_share_items_array(urls) -> object:
@@ -28241,16 +28310,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             QTimer.singleShot(100, self._on_share_macos_deferred)
             return
         elif sys.platform == "win32":
+            share_paths = [self._share_path_for_messaging(p) for p in paths]
             if n == 1:
-                self._share_windows_ui_chain(paths[0])
+                self._share_windows_ui_chain(share_paths[0])
                 return
-            if _share_windows_clipboard_cf_hdrop_paths(paths):
+            if _share_windows_clipboard_cf_hdrop_paths(share_paths):
                 self.status_bar.showMessage(
-                    f"{n} files copied to clipboard — paste into Mail, Teams, or other apps",
+                    f"{n} files copied to clipboard — paste into Mail, WhatsApp, or other apps",
                     4500,
                 )
                 return
-            if self._share_windows_ui_chain(paths[0]):
+            if self._share_windows_ui_chain(share_paths[0]):
                 return
         if n == 1:
             self._copy_file_path_to_clipboard(paths[0])
@@ -28697,9 +28767,64 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return None, ""
         return url, share_path
 
+    def _share_remember_temp(self, path: str) -> None:
+        if not path:
+            return
+        temps = getattr(self, "_macos_share_temp_paths", None)
+        if temps is None:
+            self._macos_share_temp_paths = [path]
+        elif path not in temps:
+            temps.append(path)
+
+    def _share_write_jpeg_proxy(self, src_path: str) -> Optional[str]:
+        """JPEG WhatsApp/Signal can open; None if the original should be used."""
+        if not needs_jpeg_proxy(src_path):
+            return None
+        import tempfile
+
+        stem = os.path.splitext(os.path.basename(src_path))[0] or "share"
+        fd, dest = tempfile.mkstemp(prefix=f"rawviewer_share_{stem}_", suffix=".jpg")
+        os.close(fd)
+        try:
+            current = getattr(self, "current_file_path", None)
+            pixmap = getattr(self, "current_pixmap", None)
+            if (
+                current
+                and pixmap is not None
+                and not pixmap.isNull()
+                and _norm_path(current) == _norm_path(src_path)
+            ):
+                if pixmap.save(dest, "JPEG", 90):
+                    self._share_remember_temp(dest)
+                    _share_log(
+                        logging.INFO,
+                        "share JPEG proxy from display buffer: %s",
+                        dest,
+                    )
+                    return dest
+            if write_jpeg_proxy(src_path, dest):
+                self._share_remember_temp(dest)
+                _share_log(
+                    logging.INFO,
+                    "share JPEG proxy from embedded preview: %s",
+                    dest,
+                )
+                return dest
+        except Exception as exc:
+            _share_log(logging.WARNING, "JPEG proxy failed for %s: %s", src_path, exc)
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        return None
+
+    def _share_path_for_messaging(self, path: str) -> str:
+        proxy = self._share_write_jpeg_proxy(path)
+        return proxy or path
+
     def _macos_share_show_airdrop_in_menu(self) -> bool:
-        """AirDrop perform UI does not work under Qt host; hidden from menu unless opted in."""
-        return _env_true("RAWVIEWER_SHARE_SHOW_AIRDROP")
+        """AirDrop is listed by default. Set RAWVIEWER_SHARE_SHOW_AIRDROP=0 to hide."""
+        return _env_true("RAWVIEWER_SHARE_SHOW_AIRDROP", default=True)
 
     def _macos_share_include_service_in_menu(self, service) -> bool:
         if self._macos_share_is_airdrop_service(service):
@@ -28765,45 +28890,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return menu_service
 
     def _macos_share_airdrop_via_appkit(self, urls, share_paths) -> None:
-        """AirDrop: Finder Share sheet is reliable under Qt; in-app perform is opt-in only."""
+        """AirDrop person picker: osascript (outside Qt), then in-app, then Finder."""
         if isinstance(share_paths, str):
             paths = [share_paths]
         else:
             paths = list(share_paths)
 
-        if not _env_true("RAWVIEWER_AIRDROP_PERFORM"):
-            _share_log(
-                logging.INFO,
-                "AirDrop: using Finder (NSSharingService.perform does not show UI in Qt host)",
-            )
-            self._macos_share_airdrop_finder(paths)
-            return
-        self._macos_share_airdrop_completed = False
         _activate_macos_foreground_for_share()
         try:
             self.raise_()
             self.activateWindow()
-            app = QApplication.instance()
-            if app is not None:
-                app.processEvents()
         except Exception:
             pass
-        service = self._macos_share_resolve_airdrop_service(None)
-        if service is None or self._macos_share_ns_window() is None:
-            self._macos_share_airdrop_finder(paths)
+
+        if _macos_airdrop_via_osascript(paths):
+            self.status_bar.showMessage("AirDrop — choose a recipient", 4000)
+            QTimer.singleShot(600000, self._macos_cleanup_share_temp)
             return
-        _share_log(logging.INFO, "AirDrop experimental perform paths=%s", paths)
-        self._perform_macos_share_service(
-            service, urls, is_airdrop=True, share_paths=paths
-        )
-        delay_ms = 1500
-        try:
-            delay_ms = max(800, int(os.environ.get("RAWVIEWER_AIRDROP_WATCHDOG_MS", "1500")))
-        except ValueError:
-            pass
-        QTimer.singleShot(
-            delay_ms, lambda sps=paths: self._macos_share_airdrop_perform_watchdog(sps)
-        )
+
+        if _env_true("RAWVIEWER_AIRDROP_PERFORM", default=True):
+            self._macos_share_airdrop_completed = False
+            service = self._macos_share_resolve_airdrop_service(None)
+            if service is not None and self._macos_share_ns_window() is not None:
+                _share_log(logging.INFO, "AirDrop in-process perform paths=%s", paths)
+                self._perform_macos_share_service(
+                    service, urls, is_airdrop=True, share_paths=paths
+                )
+                delay_ms = 1500
+                try:
+                    delay_ms = max(
+                        800, int(os.environ.get("RAWVIEWER_AIRDROP_WATCHDOG_MS", "1500"))
+                    )
+                except ValueError:
+                    pass
+                QTimer.singleShot(
+                    delay_ms,
+                    lambda sps=paths: self._macos_share_airdrop_perform_watchdog(sps),
+                )
+                return
+
+        self._macos_share_airdrop_finder(paths)
 
     def _perform_macos_share_service(
         self, service, urls, *, is_airdrop: bool = False, share_paths = None
@@ -28875,7 +29001,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         self._macos_share_defer_to_main(run)
 
-    def _share_macos_menu_chose_service(self, service, urls, share_paths) -> None:
+    def _share_macos_menu_chose_service(
+        self,
+        service,
+        jpeg_urls,
+        jpeg_paths,
+        orig_urls,
+        orig_paths,
+    ) -> None:
         try:
             title = str(service.title())
         except Exception:
@@ -28883,11 +29016,69 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         _share_log(logging.INFO, "share menu chose: %s", title)
         if self._macos_share_is_airdrop_service(service):
             if _env_true("RAWVIEWER_AIRDROP_PICKER"):
-                self._share_macos_picker_ui_for_url(urls)
+                self._share_macos_picker_ui_for_url(orig_urls)
                 return
-            self._macos_share_airdrop_via_appkit(urls, share_paths)
+            self._macos_share_airdrop_via_appkit(orig_urls, orig_paths)
             return
-        self._perform_macos_share_service(service, urls, share_paths=share_paths)
+        orig_items = _macos_share_items_array(orig_urls)
+        try:
+            if orig_items is not None and service.canPerformWithItems_(orig_items):
+                self._perform_macos_share_service(
+                    service, orig_urls, share_paths=orig_paths
+                )
+                return
+        except Exception:
+            pass
+        self._perform_macos_share_service(service, jpeg_urls, share_paths=jpeg_paths)
+
+    def _macos_share_prepare_payload(self, paths: List[str]):
+        """Original files (AirDrop/Mail) plus JPEG proxies (WhatsApp/Signal)."""
+        try:
+            from AppKit import NSURL
+        except Exception as exc:
+            _share_log(logging.WARNING, "AppKit unavailable: %s", exc)
+            return [], [], [], []
+
+        orig_urls, orig_paths = self._macos_share_prepare_urls(paths)
+        jpeg_urls = []
+        jpeg_paths = []
+        for url, share_path in zip(orig_urls, orig_paths):
+            proxy = self._share_write_jpeg_proxy(share_path)
+            if proxy:
+                jpeg_u = NSURL.fileURLWithPath_(proxy)
+                if jpeg_u is not None:
+                    jpeg_urls.append(jpeg_u)
+                    jpeg_paths.append(proxy)
+                    continue
+            jpeg_urls.append(url)
+            jpeg_paths.append(share_path)
+        return orig_urls, orig_paths, jpeg_urls, jpeg_paths
+
+    def _share_macos_merge_services(self, jpeg_items, orig_items):
+        from AppKit import NSSharingService
+
+        services = []
+        seen = set()
+
+        def _add(batch) -> None:
+            for svc in batch or []:
+                try:
+                    key = str(svc.title() or "").strip().lower()
+                except Exception:
+                    key = ""
+                if not key:
+                    try:
+                        key = str(svc.valueForKey_("NSSharingServiceName") or "")
+                    except Exception:
+                        key = repr(svc)
+                if key in seen:
+                    continue
+                seen.add(key)
+                services.append(svc)
+
+        _add(NSSharingService.sharingServicesForItems_(jpeg_items) or [])
+        _add(NSSharingService.sharingServicesForItems_(orig_items) or [])
+        return services
 
     def _share_macos_services_menu(self, paths: List[str]) -> bool:
         """List NSSharingService targets in a Qt menu (picker sheet often spins empty in v2.2)."""
@@ -28901,33 +29092,41 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self._macos_share_ensure_appkit_context(require_window=False):
             return False
 
-        urls, share_paths = self._macos_share_prepare_urls(paths)
-        if not urls:
+        orig_urls, orig_paths, jpeg_urls, jpeg_paths = self._macos_share_prepare_payload(
+            paths
+        )
+        if not orig_urls and not jpeg_urls:
             return False
-        items = _macos_share_items_array(urls)
-        if items is None:
+        jpeg_items = _macos_share_items_array(jpeg_urls or orig_urls)
+        orig_items = _macos_share_items_array(orig_urls)
+        if jpeg_items is None and orig_items is None:
             return False
-        services = NSSharingService.sharingServicesForItems_(items) or []
+        services = self._share_macos_merge_services(jpeg_items, orig_items)
         visible = [s for s in services if self._macos_share_include_service_in_menu(s)]
         hidden = len(services) - len(visible)
         if hidden:
             _share_log(
                 logging.INFO,
-                "share menu: %d service(s) (%d hidden, e.g. AirDrop — RAWVIEWER_SHARE_SHOW_AIRDROP=1)",
+                "share menu: %d service(s) (%d hidden)",
                 len(visible),
                 hidden,
             )
         else:
             _share_log(logging.INFO, "share menu: %d service(s)", len(visible))
-        if not visible:
-            self.status_bar.showMessage(
-                "No share services available for this file — use Finder → Share",
-                5000,
-            )
-            return False
 
         menu = QMenu(self)
         menu.setWindowFlag(Qt.WindowType.Popup, True)
+
+        has_airdrop = any(self._macos_share_is_airdrop_service(s) for s in visible)
+        if self._macos_share_show_airdrop_in_menu() and not has_airdrop:
+            airdrop = QAction("AirDrop", self)
+            airdrop.triggered.connect(
+                lambda _checked=False, us=orig_urls, sps=orig_paths: self._macos_share_airdrop_via_appkit(
+                    us, sps
+                )
+            )
+            menu.addAction(airdrop)
+
         for svc in visible:
             try:
                 title = str(svc.title() or "Share").strip()
@@ -28935,11 +29134,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 title = "Share"
             action = QAction(title, self)
             action.triggered.connect(
-                lambda _checked=False, s=svc, us=urls, sps=share_paths: self._share_macos_menu_chose_service(
-                    s, us, sps
+                lambda _checked=False, s=svc: self._share_macos_menu_chose_service(
+                    s, jpeg_urls, jpeg_paths, orig_urls, orig_paths
                 )
             )
             menu.addAction(action)
+
+        if not menu.actions():
+            self.status_bar.showMessage(
+                "No share services available for this file — use Finder → Share",
+                5000,
+            )
+            return False
 
         btn = getattr(self, "share_bottom_button", None)
         try:
@@ -29239,7 +29445,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 _share_log(logging.ERROR, "refusing minimal picker: not on Qt GUI thread")
                 return False
 
-            urls, share_paths = self._macos_share_prepare_urls(paths)
+            orig_urls, orig_paths, jpeg_urls, jpeg_paths = self._macos_share_prepare_payload(paths)
+            urls = jpeg_urls or orig_urls
+            share_paths = jpeg_paths or orig_paths
             if not urls:
                 return False
             if _env_true("RAWVIEWER_MACOS_FORCE_FOREGROUND") or _env_true(
@@ -29368,7 +29576,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             if not self._macos_share_ensure_appkit_context(require_window=True):
                 return False
 
-            urls, share_paths = self._macos_share_prepare_urls(paths)
+            orig_urls, orig_paths, jpeg_urls, jpeg_paths = self._macos_share_prepare_payload(paths)
+            urls = jpeg_urls or orig_urls
+            share_paths = jpeg_paths or orig_paths
             if not urls:
                 return False
             items = _macos_share_items_array(urls)

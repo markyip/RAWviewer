@@ -136,7 +136,7 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 
 **Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** shows half-res shadow/highlight recovery for judging extreme contrast.
 
-**Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out.
+**Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out. On Mac the menu includes AirDrop (original file) and messaging apps such as WhatsApp / Signal (JPEG proxy for RAW). See [`docs/macos-sharing.md`](docs/macos-sharing.md).
 
 </details>
 

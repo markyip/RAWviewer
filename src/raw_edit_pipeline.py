@@ -1,4 +1,8 @@
-"""Shared edit decode → denoise → PV2012 adjust → display / 16-bit export."""
+"""Shared edit decode → denoise → PV2012 adjust → display / 16-bit export.
+
+Live Adjust ticks stay on CPU (cv2/numpy). GPU demosaic is decode-only —
+see ``edit_gpu_policy``. Do not pull torch/kornia into this module.
+"""
 
 from __future__ import annotations
 
