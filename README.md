@@ -340,15 +340,24 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 
 ### 🛠️ In Active Development (Development Branch / Worktree)
 
+These are on `development` for **3.1.0** (not yet tagged). GitHub Releases still ship **3.0.x**.
+
 | Item | Status | Notes |
 |------|--------|-------|
-| **Local masks** (brush, AI) | **Landed, stabilising** | Stacked mask layers with per-layer adjustments. Brush has Size / Flow / Feather; **Smart Object** and **Sky** find a mask in one press; **AI Selection** masks whatever you click. Every mask kind shares one colour overlay (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`) |
+| **Local masks** (brush, luminance, colour, AI, depth) | **Landed, stabilising** | Stacked mask layers with per-layer Light / Color / Detail. Brush, Luminance, Color, **AI Selection**, **Smart Object**, **Sky**, and **Depth**; Depth + Blur is continuous defocus from the focus plane. Linear and radial gradients still place coverage by dragging on the photo (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`, `src/raw_depth_blur.py`) |
+| **Mask grouping** (Lightroom-style) | **Landed, stabilising** | Drag one mask onto another to combine them: components hold coverage (add/subtract), the group holds one adjustment set. Cheaper to render than separate layers (`src/raw_mask_layers.py`, `src/mask_layers_xmp.py`) |
+| **Auto Tone** | **Landed, stabilising** | One press sets Exposure, Contrast, Highlights, Shadows, Whites and Blacks from the unedited photo. Highlights/Shadows follow the linear stop budget; it will not pin Highlights on a little specular clip (`src/raw_auto_adjust.py`) |
+| **Highlight recovery on Adjust** | **Landed, stabilising** | Edit-base Reconstructs clipped CFA (with WB gain so default Adjust stays as bright as browse). Highlights see single-channel clips, not only Rec.709 luma. **P** remains a session-only recovery *preview* — not the sliders |
+| **Photo merging** | **Landed, stabilising** | HDR, panorama, panorama HDR, and focus stacking from a gallery selection, with a live preview before commit |
+| **Non-destructive JPEG / TIFF / WebP / PNG** | **Landed, stabilising** | Ordinary image files open in Adjust with XMP sidecars. 16-bit files keep their bit depth through the editor |
 | **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export with an **AI Detail** slider. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable |
 | **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN as the final export stage, ~65s for a 32MP frame. Being a GAN it invents plausible detail rather than reconstructing it, so its strength is dialable toward a plain resize |
 | **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Profiles record the decode they were calibrated against and warn if it changes |
-| **Manual lens distortion** | **Landed, stabilising** | A Distortion slider for lenses with no profile — positive corrects pincushion, negative barrel. Runs before straighten, since distortion is a property of the capture |
+| **Lens distortion + anamorphic desqueeze** | **Landed, stabilising** | Profile correction plus a Distortion slider; desqueeze presets 1.33× / 1.5× / 1.6× / 2.0×. Local masks stay aligned with the unsqueezed frame |
+| **Share to WhatsApp / Signal / AirDrop** | **Landed, stabilising** | Messaging apps get a JPEG (they reject camera RAW); AirDrop still sends the original, with a Mac person picker outside Qt |
+| **Slower-machine editing** | **Landed, stabilising** | RAM tier caps the Adjust working copy on ≤16 GB (live-drag and settle). Export still decodes full resolution |
 | **Edit Nikon HE/HE\* NEF** | **Landed, stabilising** | LibRaw still cannot demosaic these, so the editor falls back to the embedded JPEG. An 8-bit display-referred base: white balance and highlight recovery have far less headroom, everything else behaves as it does editing a JPEG |
-| **Generative Editing** (instruction-based) | **In Progress** (`generative-editing` branch) | Provider layer, derived-file lifecycle, Adjust-panel wiring. The remote provider uploads the photo to a third party — opt-in and clearly flagged; a local Windows+NVIDIA provider is the follow-up |
+| **Generative Editing** (instruction-based) | **Shelved** (parked on `generative-editing`) | Backend complete and tested, UI removed. Models that are *good* are too large to embed (~6–7 GB resident). Revival path is a local OpenAI-compatible image-edits server, not an in-process provider |
 
 "Landed, stabilising" means the feature is on `development` and working, but has not been through a tagged release.
 
@@ -357,19 +366,19 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
 | 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until the next Adjust visit |
-| 2 | **Mask add / subtract** | **High** | M | `MaskLayer.blend` exists and the compositor ignores it. Decide first whether it composes across layers or within one mask, as Lightroom does |
-| 3 | **User-facing upscale strength** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants a slider with a gentler default |
-| 4 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts "not this" points; only positive ones are sent, so an over-reaching selection can be trimmed by brush but not re-solved |
-| 5 | **Local generative provider** (Windows + NVIDIA) | **Medium** | L | Keeps generative edits on-device, removing the third-party upload the remote provider requires |
-| 6 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 7 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 8 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 9 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
-| 10 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
+| 2 | **User-facing upscale strength** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants a slider with a gentler default |
+| 3 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts "not this" points; only positive ones are sent, so an over-reaching selection can be trimmed by brush but not re-solved |
+| 4 | **Generative editing via a local server** | **High** | S | A model on the user's machine behind an OpenAI-compatible `/v1/images/edits` endpoint (mlx-serve, ComfyUI). `LocalServerProvider` is written on `generative-editing`; only the UI to select it was removed |
+| 5 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
+| 6 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
+| 7 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
+| 8 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
+| 9 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
+| 10 | **Edit Nikon HE/HE\* NEF as sensor data** | **Low** | L+ | Editing works today from the embedded JPEG; true RAW development still waits on a LibRaw decoder for HE mosaics |
 
 **Current limits (not aspirational):**
 - **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
-- **Nikon HE-NEF** edits from the embedded JPEG, not sensor data — an 8-bit base, so heavy white-balance and highlight-recovery moves have little to work with.
+- **Nikon HE-NEF** edits from the embedded JPEG, not sensor data — an 8-bit base, so heavy white-balance and highlight-recovery moves have little to work with (row 10).
 - **AI model weights download on first use**, not bundled: the mask, denoise and upscale features each need one online session before they work offline.
 - **Smart Object returns one mask.** It finds everything salient — on a studio scene, eleven separate regions — but hands them back as a single mask. Use AI Selection to isolate one thing.
 
