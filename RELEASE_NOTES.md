@@ -90,6 +90,7 @@ colour calibration, and a long list of speed work.
 - **Loading a photo with saved edits is much faster** — the sidecar is parsed once and shared, and mask coverage is stored at half resolution.
 - **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block the visible ones (a stall on slower machines that needed a folder reload).
 - **Low-RAM machines keep the snappy gallery without the 24 GB prefetch.** Shared scroll defaults (idle-preload 120, 12 preload threads, hover full-res) are overlaid by the RAM tier, so an 8 GB machine no longer inherits those numbers.
+- **Editing on slower machines stays on a smaller working copy.** Live-drag was already 640 px; settle, masks and Auto Tone still used a half-sensor frame (often 12 MP). The RAM tier now caps that working base (and the live-drag edge) on ≤16 GB. Export still decodes at full resolution.
 - **Compare zoom loads the real pixels.** Space / 100% requests full-resolution for the two on-screen photos, and a preview upgrading to sensor-res no longer copies its zoom onto the other pane.
 - **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.
 - **Missing gallery tiles come back.** A transient failure used to cache a grey placeholder permanently for the session.

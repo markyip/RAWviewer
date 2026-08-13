@@ -95,6 +95,13 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_GALLERY_MAX_WIDGETS": "28",
         # Hover full-res decode steals both RAW slots from tile fill.
         "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
+        # Working Adjust base (not export): half-sensor 24MP is still ~70 MB+
+        # plus stage-cache copies. Cap the long edge so settle/masks stay light.
+        "RAWVIEWER_EDIT_BASE_MAX_EDGE": "1600",
+        "RAWVIEWER_EDIT_BASE_LRU_MAX": "1",
+        "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "480",
+        "RAWVIEWER_MASK_LAYERS_RAM_FRAC": "0.08",
+        "RAWVIEWER_BG_POOL_THREADS": "2",
     },
     # 10–12 GB unified memory
     "medium": {
@@ -120,6 +127,11 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_GALLERY_ACTIVE_CAP": "32",
         "RAWVIEWER_GALLERY_MAX_TASKS": "32",
         "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
+        "RAWVIEWER_EDIT_BASE_MAX_EDGE": "2048",
+        "RAWVIEWER_EDIT_BASE_LRU_MAX": "1",
+        "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "560",
+        "RAWVIEWER_MASK_LAYERS_RAM_FRAC": "0.10",
+        "RAWVIEWER_BG_POOL_THREADS": "2",
     },
     # 16 GB — conservative index workers to avoid jetsam during semantic + face
     "balanced": {
@@ -145,6 +157,9 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "16",
         "RAWVIEWER_GALLERY_ACTIVE_CAP": "40",
         "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
+        "RAWVIEWER_EDIT_BASE_MAX_EDGE": "2560",
+        "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE": "640",
+        "RAWVIEWER_BG_POOL_THREADS": "3",
     },
     # 24 GB — near stock full defaults
     "high": {

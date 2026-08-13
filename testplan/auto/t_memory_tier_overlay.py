@@ -28,6 +28,10 @@ _KEYS = (
     "RAWVIEWER_GALLERY_HOVER_PREFETCH",
     "RAWVIEWER_MEMORY_PREVIEW_MAX",
     "RAWVIEWER_MEMORY_TIER_AUTO",
+    "RAWVIEWER_EDIT_BASE_MAX_EDGE",
+    "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE",
+    "RAWVIEWER_EDIT_BASE_LRU_MAX",
+    "RAWVIEWER_BG_POOL_THREADS",
 )
 
 
@@ -77,6 +81,16 @@ def main() -> int:
             "low preview max overlays the Standard 2304 default",
             os.environ.get("RAWVIEWER_MEMORY_PREVIEW_MAX") == "1280",
             os.environ.get("RAWVIEWER_MEMORY_PREVIEW_MAX"),
+        )
+        check(
+            "low tier caps the working Adjust edit base",
+            os.environ.get("RAWVIEWER_EDIT_BASE_MAX_EDGE") == "1600",
+            os.environ.get("RAWVIEWER_EDIT_BASE_MAX_EDGE"),
+        )
+        check(
+            "low tier shrinks live-drag preview edge",
+            os.environ.get("RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE") == "480",
+            os.environ.get("RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE"),
         )
     finally:
         rp.system_total_ram_gb = orig_ram

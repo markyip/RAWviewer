@@ -64,6 +64,56 @@ _EDIT_BASE_INFLIGHT_LOCK = _ebt.Lock()
 _EDIT_BASE_LRU: OrderedDict = OrderedDict()
 _EDIT_BASE_LRU_LOCK = _ebt.Lock()
 _EDIT_BASE_LRU_MAX = 2
+
+
+def _edit_base_max_edge() -> int:
+    """Optional long-edge cap for the working (non-export) edit base.
+
+    Unset = LibRaw half-size only. RAM-tier overlay sets this on ≤16 GB so
+    settle / masks / Auto Tone do not keep a 12 MP uint16/float working copy.
+    Export still uses ``use_full_resolution=True`` and is never capped here.
+    """
+    raw = os.environ.get("RAWVIEWER_EDIT_BASE_MAX_EDGE", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(640, min(int(raw), 8000))
+    except ValueError:
+        return 0
+
+
+def _edit_base_lru_max() -> int:
+    raw = os.environ.get("RAWVIEWER_EDIT_BASE_LRU_MAX", "").strip()
+    if raw:
+        try:
+            return max(1, min(int(raw), 4))
+        except ValueError:
+            pass
+    return _EDIT_BASE_LRU_MAX
+
+
+def cap_working_edit_base(img, *, use_full_resolution: bool = False):
+    """Downsample a working edit base to ``RAWVIEWER_EDIT_BASE_MAX_EDGE``.
+
+    Full-resolution export bases are returned unchanged.
+    """
+    if img is None or use_full_resolution or not hasattr(img, "shape"):
+        return img
+    max_edge = _edit_base_max_edge()
+    if max_edge <= 0:
+        return img
+    try:
+        h, w = int(img.shape[0]), int(img.shape[1])
+        m = max(h, w)
+        if m <= max_edge:
+            return img
+        import cv2
+
+        scale = max_edge / float(m)
+        nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+        return cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    except Exception:
+        return img
 # Unpacked-RAW stash. Module-level for the same reason the in-flight registry
 # above is: workers build their own UnifiedImageProcessor, so instance state
 # is thrown away with the worker.
@@ -672,11 +722,13 @@ class UnifiedImageProcessor:
         # Ident includes mtime/size so a replaced file on Windows/macOS
         # invalidates without relying on path alone.
         file_ident = _edit_base_file_ident(file_path)
+        max_edge = 0 if use_full_resolution else _edit_base_max_edge()
         cache_key = (
             skip_key,
             bool(use_full_resolution),
             bool(apply_lens_correction),
             file_ident,
+            int(max_edge),
         )
         if not use_full_resolution:
             with _EDIT_BASE_LRU_LOCK:
@@ -689,7 +741,12 @@ class UnifiedImageProcessor:
         # panel's base request racing a preview worker's, each on its OWN
         # UnifiedImageProcessor instance) share one decode instead of queueing
         # a redundant multi-hundred-ms unpack behind the global rawpy lock.
-        dedup_key = (skip_key, bool(use_full_resolution), bool(apply_lens_correction))
+        dedup_key = (
+            skip_key,
+            bool(use_full_resolution),
+            bool(apply_lens_correction),
+            int(max_edge),
+        )
         import threading as _threading
 
         mine = False
@@ -722,10 +779,11 @@ class UnifiedImageProcessor:
                 apply_lens_correction=apply_lens_correction,
             )
             if result is not None and not use_full_resolution:
+                result = cap_working_edit_base(result)
                 with _EDIT_BASE_LRU_LOCK:
                     _EDIT_BASE_LRU[cache_key] = result
                     _EDIT_BASE_LRU.move_to_end(cache_key)
-                    while len(_EDIT_BASE_LRU) > _EDIT_BASE_LRU_MAX:
+                    while len(_EDIT_BASE_LRU) > _edit_base_lru_max():
                         _EDIT_BASE_LRU.popitem(last=False)
             slot["result"] = result
             return result

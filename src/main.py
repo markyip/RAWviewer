@@ -1118,10 +1118,17 @@ _macos_completion_guarded_edits: "weakref.WeakSet" = weakref.WeakSet()
 _shared_bg_pool = None
 def _get_bg_thread_pool():
     global _shared_bg_pool
+    n = max(2, (os.cpu_count() or 4) // 2)
+    cap = os.environ.get("RAWVIEWER_BG_POOL_THREADS", "").strip()
+    if cap:
+        try:
+            n = max(1, min(int(cap), 16))
+        except ValueError:
+            pass
     if _shared_bg_pool is None:
         from PyQt6.QtCore import QThreadPool
         _shared_bg_pool = QThreadPool()
-        _shared_bg_pool.setMaxThreadCount(max(2, (os.cpu_count() or 4) // 2))
+    _shared_bg_pool.setMaxThreadCount(n)
     return _shared_bg_pool
 def _macos_apply_ns_text_completion_off(node) -> None:
     """Turn off AppKit completion/spellcheck hooks on one NSView/NSTextField."""
@@ -2311,9 +2318,24 @@ class _AdjustCompareOriginalWorker(QRunnable):
 
 # Live-drag max edge. Was 1000 (~55ms Contrast tick at half-res base); 640
 # cuts pixel count ~2.4x so upstream PV2012 ticks stay nearer the 80ms
-# throttle. Settle uses the full edit base; Compare drag uses lite too
-# (overlay scales original to match).
+# throttle. Settle uses the (possibly RAM-tier-capped) edit base; Compare
+# drag uses lite too (overlay scales original to match). Low-RAM overlay
+# may set RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE smaller (e.g. 480).
 _ADJUST_FAST_PREVIEW_MAX_EDGE = 640
+
+
+def _adjust_fast_preview_max_edge() -> int:
+    return max(
+        320,
+        min(
+            _env_int(
+                "RAWVIEWER_ADJUST_FAST_PREVIEW_MAX_EDGE",
+                _ADJUST_FAST_PREVIEW_MAX_EDGE,
+                minimum=320,
+            ),
+            2000,
+        ),
+    )
 
 # Hold-to-paint brush control, now the default. A brush hotkey (D/B/X/H) held
 # down paints while the pointer sweeps -- no click needed -- and on release the
@@ -2459,9 +2481,10 @@ def _make_fast_preview_base(base: Any) -> Any:
 
         h, w = int(base.shape[0]), int(base.shape[1])
         max_dim = max(h, w)
-        if max_dim <= _ADJUST_FAST_PREVIEW_MAX_EDGE:
+        target = _adjust_fast_preview_max_edge()
+        if max_dim <= target:
             return base
-        scale = _ADJUST_FAST_PREVIEW_MAX_EDGE / max_dim
+        scale = target / max_dim
         nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
         return cv2.resize(base, (nw, nh), interpolation=cv2.INTER_AREA)
     except Exception:
@@ -26656,7 +26679,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from raw_auto_adjust import estimate_auto_tone
         from raw_edit_pipeline import _linear_float_from_buffer
 
-        values = estimate_auto_tone(_linear_float_from_buffer(base))
+        # Subsample before the float conversion: converting a 12 MP half-res
+        # base on the UI thread hitching low-end machines. The estimator
+        # itself only needs ~150k pixels.
+        values = estimate_auto_tone(
+            _linear_float_from_buffer(_make_fast_preview_base(base))
+        )
         if values is None:
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(
@@ -26692,7 +26720,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 adj0["CropAngle"] = 0.0
                 adj0["PerspectiveVertical"] = 0.0
                 adj0["PerspectiveHorizontal"] = 0.0
-                rgb = linear_to_display_uint8(base, adj0)
+                # Hough already downsamples to 1400; the hitch is rendering
+                # the full working base on the UI thread.
+                rgb = linear_to_display_uint8(_make_fast_preview_base(base), adj0)
             except Exception:
                 rgb = None
         if rgb is None:
