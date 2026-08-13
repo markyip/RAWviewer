@@ -42,6 +42,15 @@ def main() -> int:
         m = Mock()
         m._last_scroll_event_t = 0.0 if not scrolling else __import__("time").time()
         m.parent_viewer = FakeViewer(view_mode)
+        # The same hover event now also drives the hover-expand (on its own,
+        # shorter debounce -- see t_gallery_hover_expand). Prefetch behaviour
+        # is what this file covers, so the expand is switched off rather than
+        # animated against a widget-less mock.
+        m._hover_expand_enabled = lambda: False
+        m._hover_expand_widget = None
+        m._hover_expand_path = None
+        m._hover_expand_pending_path = None
+        m._collapse_hover_expand = lambda path=None, immediate=False: None
         for name in ("_is_actively_scrolling", "_on_gallery_thumb_hover", "_fire_gallery_hover_prefetch"):
             setattr(m, name, getattr(gv.JustifiedGallery, name).__get__(m))
         return m

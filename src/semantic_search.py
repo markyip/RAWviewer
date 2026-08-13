@@ -416,8 +416,21 @@ def _thumbnail_jpeg_bytes(arr: np.ndarray, quality: int = 85) -> bytes:
 
 
 def _maybe_persist_index_thumbnail(file_path: str, im: PilImage) -> None:
-    """Disk-back index thumbnails so deferred face scan can reuse semantic loads."""
+    """Disk-back index thumbnails so deferred face scan can reuse semantic loads.
+
+    Stored in DISPLAY orientation. This cache is shared with the gallery, and
+    the read side (image_cache._repair_index_thumbnail_orientation) has to
+    resolve EXIF and rotate every RAW thumbnail that arrives in container
+    orientation -- on the scroll path, for the life of the entry. Orienting
+    once here, where the image is already open, means the repair finds nothing
+    to do. The repair stays: it is what fixes entries written before this.
+
+    Only what is PERSISTED is oriented. The caller's ``im`` is also the
+    MobileCLIP input, and rotating that would change the embeddings, leaving
+    newly-indexed files inconsistent with every file already in the index.
+    """
     try:
+        from common_image_loader import finalize_index_thumbnail_array
         from image_cache import get_image_cache
 
         cache = get_image_cache()
@@ -427,6 +440,9 @@ def _maybe_persist_index_thumbnail(file_path: str, im: PilImage) -> None:
         if max(rgb.width, rgb.height) > 1024:
             rgb.thumbnail((1024, 1024), Image.Resampling.BICUBIC)
         arr = np.asarray(rgb, dtype=np.uint8)
+        oriented = finalize_index_thumbnail_array(file_path, arr, cache=cache)
+        if oriented is not None:
+            arr = oriented
         cache.put_thumbnail(file_path, arr, _thumbnail_jpeg_bytes(arr))
     except Exception:
         pass
@@ -5822,6 +5838,96 @@ class SemanticImageIndex:
         return pending
 
 
+    def _rekey_moved_rows(self, canonical_paths: List[str]) -> Dict[str, sqlite3.Row]:
+        """Recover index rows for files that moved, and re-key them in place.
+
+        Looks the missing paths up by ``file_signature`` -- basename, size and
+        mtime, which a move preserves -- then points the row at where the file
+        actually is now. Returns {canonical_path: row} for what was recovered.
+
+        Only ever reached for paths that already missed the file_path lookup,
+        so a library that has not moved pays one extra indexed SELECT per
+        genuinely-unindexed file and nothing else.
+        """
+        if not canonical_paths:
+            return {}
+
+        sig_to_path: Dict[str, str] = {}
+        for cp in canonical_paths:
+            try:
+                sig_to_path[self._file_signature_from_stat(cp, os.stat(cp))] = cp
+            except OSError:
+                continue  # deleted or unreadable: genuinely not indexable
+        if not sig_to_path:
+            return {}
+
+        self._conn.row_factory = sqlite3.Row
+        recovered: Dict[str, sqlite3.Row] = {}
+        signatures = list(sig_to_path)
+        for i in range(0, len(signatures), 500):
+            chunk = signatures[i:i + 500]
+            placeholders = ",".join(["?"] * len(chunk))
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM semantic_index
+                WHERE file_signature IN ({placeholders})
+                ORDER BY CASE WHEN model_name = ? THEN 0 ELSE 1 END, rowid DESC
+                """,
+                [*chunk, self.model_name],
+            ).fetchall()
+            for row in rows:
+                signature = str(row["file_signature"] or "")
+                new_path = sig_to_path.get(signature)
+                if not new_path or new_path in recovered:
+                    continue
+                old_path = str(row["file_path"])
+                if old_path != new_path:
+                    self._repoint_row(old_path, new_path)
+                patched = dict(row)
+                patched["file_path"] = new_path
+                patched["file_name"] = os.path.basename(new_path)
+                recovered[new_path] = patched
+
+        if recovered:
+            import logging
+
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+            logging.getLogger(__name__).info(
+                "[SEMANTIC] re-keyed %d moved file(s) in the index", len(recovered)
+            )
+        return recovered
+
+    def _repoint_row(self, old_path: str, new_path: str) -> None:
+        """Move an index row onto the file's new path.
+
+        ``file_path`` is the table's PRIMARY KEY, so a row already sitting on
+        the destination makes the UPDATE raise instead of silently doing
+        nothing. That only happens when a stale row for the new path exists --
+        it lost the file_path lookup, so it is not the row we want -- so drop
+        it and let the recovered row take the name.
+        """
+        try:
+            self._conn.execute(
+                "UPDATE semantic_index SET file_path = ?, file_name = ? WHERE file_path = ?",
+                (new_path, os.path.basename(new_path), old_path),
+            )
+        except sqlite3.IntegrityError:
+            try:
+                self._conn.execute("DELETE FROM semantic_index WHERE file_path = ?", (new_path,))
+                self._conn.execute(
+                    "UPDATE semantic_index SET file_path = ?, file_name = ? WHERE file_path = ?",
+                    (new_path, os.path.basename(new_path), old_path),
+                )
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "[SEMANTIC] could not re-key %s -> %s", old_path, new_path, exc_info=True
+                )
+
     def _fetch_rows_for_paths(self, paths: Sequence[str]) -> List[MetadataRow]:
         """Bulk fetch rows for a list of paths using optimized batch queries."""
         if not paths:
@@ -5876,8 +5982,20 @@ class SemanticImageIndex:
                     # First match wins: preferred model first (ORDER BY above), then any row
                     found_map[fp] = r
         
+        # 2b. Anything still missing may simply have MOVED. Rows carry a
+        # file_signature (basename + size + mtime) precisely so identity
+        # survives a path change, and _needs_reindex already honours it -- so
+        # without this step a moved folder lost its metadata permanently: the
+        # lookup below found nothing, and the re-indexer, consulting the
+        # signature, correctly reported "already indexed" and never repaired
+        # it. Re-key on the way past so it is fixed once, not re-resolved on
+        # every search.
+        missing = [cp for cp in unique_canonical if cp not in found_map]
+        if missing:
+            found_map.update(self._rekey_moved_rows(missing))
+
         # 3. Assemble results in original order, injecting mock rows for missing files
-        # This ensures that newly added files appear in search results (as unindexed) 
+        # This ensures that newly added files appear in search results (as unindexed)
         # instead of being filtered out.
         results = []
         for cp in unique_canonical:

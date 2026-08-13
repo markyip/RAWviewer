@@ -3,8 +3,11 @@
 
 Covers the raw_stitching.merge_hdr_exposure_fusion extensions for the
 per-frame recovery-weight dialog (plan: Feature 4):
-  1. Backward compatibility: no per-image lists -> byte-identical output
-     to the pre-change call shape (global scalars, cv2 Mertens path).
+  1. Call-shape compatibility: no per-image lists -> a plain ndarray of the
+     input's depth and shape, stable across calls. (Both call shapes now
+     run the same Laplacian-pyramid blend; cv2.createMergeMertens was
+     removed, since its process() ignores external weight maps and so
+     discarded every control except midtone -- see t_stitch_fixes.)
   2. Per-image weights actually flow through to the OUTPUT -- this is the
      key check, because the previous custom weight maps were silently
      ignored whenever cv2.createMergeMertens succeeded (its process()

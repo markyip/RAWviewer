@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -76,19 +76,51 @@ def _as_float32(img: np.ndarray) -> np.ndarray:
     return np.clip(img.astype(np.float32), 0.0, 1.0)
 
 
+# Below this ECC correlation the solve has not found the frame; see the call site.
+_MIN_ECC_CC = 0.15
+
+
+def _plausible_alignment(cc: float, warp: np.ndarray) -> bool:
+    """Is this ECC solve a focus-breathing correction, or noise?
+
+    Breathing is a small uniform scale with a shift. Anything with real
+    rotation or shear in it is the solver wandering off, whatever it scored.
+    """
+    if not np.isfinite(cc) or cc < _MIN_ECC_CC:
+        return False
+    a = warp[:2, :2]
+    if not np.all(np.isfinite(a)):
+        return False
+    return (
+        abs(a[0, 0] - 1.0) <= 0.2
+        and abs(a[1, 1] - 1.0) <= 0.2
+        and abs(a[0, 1]) <= 0.1
+        and abs(a[1, 0]) <= 0.1
+    )
+
+
 def align_focus_stack(
     images: List[np.ndarray],
     progress_callback: ProgressCb = None,
-) -> Tuple[List[np.ndarray], List[str]]:
+    return_masks: bool = False,
+):
     """Align every frame to the first using an ECC affine model.
 
-    Returns (aligned_images, warnings). Frames that fail to converge are passed
+    Returns (aligned_images, warnings), or (aligned_images, warnings, masks)
+    when ``return_masks`` is set. Frames that fail to converge are passed
     through unaligned with a warning rather than dropped -- a slightly
     misaligned frame still contributes sharp detail where it agrees, and losing
     a frame silently would leave an unexplained soft band in the result.
+
+    ``masks`` are uint8 coverage maps (1 = this frame really has data here)
+    carried through the same warp as the pixels. The frames themselves are
+    warped with BORDER_REFLECT -- constant black would feed the fusion pyramid
+    and darken the edge bands -- so the border is real-looking content that no
+    luminance test can distinguish from the photograph. Only a warped mask can
+    tell the auto-crop where the alignment border is.
     """
     if len(images) < 2:
-        return images, []
+        return (images, [], [np.ones(im.shape[:2], np.uint8) for im in images]) if return_masks else (images, [])
 
     ref_gray = _to_gray_u8(images[0]).astype(np.float32)
     h, w = ref_gray.shape
@@ -101,6 +133,8 @@ def align_focus_stack(
     criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-5)
     aligned = [images[0]]
     warnings: List[str] = []
+    masks: List[np.ndarray] = [np.ones((h, w), np.uint8)]
+    ones = np.ones((h, w), np.uint8)
 
     for idx in range(1, len(images)):
         if progress_callback:
@@ -114,9 +148,31 @@ def align_focus_stack(
         )
         warp = np.eye(2, 3, dtype=np.float32)
         try:
-            _, warp = cv2.findTransformECC(
+            cc, warp = cv2.findTransformECC(
                 ref_small, mov_small, warp, cv2.MOTION_AFFINE, criteria, None, 5
             )
+            # ECC always returns *a* transform. On frames it cannot register
+            # (too little shared structure, or two focal planes with almost no
+            # overlap in what is sharp) it converges to a skewed one that is
+            # far worse than not aligning at all -- and, because the coverage
+            # mask follows the warp, that also eats the auto-crop: a measured
+            # cc of 0.04 produced a warp with 0.17 shear and left barely a
+            # third of the frame commonly covered. A good solve scores well
+            # clear of this: 0.47 on a hard synthetic breathing pair, 0.997 on
+            # ordinary texture.
+            if not _plausible_alignment(cc, warp):
+                logger.warning(
+                    "ECC solve for frame %d rejected (cc=%.3f, warp=%s)",
+                    idx, cc, np.array2string(warp, precision=3),
+                )
+                warnings.append(
+                    f"Frame {idx + 1} could not be registered against the first "
+                    "frame; used as-is."
+                )
+                aligned.append(mov)
+                if return_masks:
+                    masks.append(ones.copy())
+                continue
             # Rescale the translation terms from the downscaled solve to full res.
             if scale < 1.0:
                 warp[0, 2] /= scale
@@ -127,12 +183,20 @@ def align_focus_stack(
                 borderMode=cv2.BORDER_REFLECT,
             )
             aligned.append(aligned_img)
+            if return_masks:
+                masks.append(cv2.warpAffine(
+                    ones, warp, (w, h),
+                    flags=cv2.INTER_NEAREST + cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                ))
         except cv2.error as exc:
             logger.warning("ECC align failed for frame %d: %s", idx, exc)
             warnings.append(f"Frame {idx + 1} could not be aligned; used as-is.")
             aligned.append(mov)
+            if return_masks:
+                masks.append(ones.copy())
 
-    return aligned, warnings
+    return (aligned, warnings, masks) if return_masks else (aligned, warnings)
 
 
 def refine_alignment_flow(
@@ -140,6 +204,7 @@ def refine_alignment_flow(
     ref_idx: int = 0,
     max_shift_frac: float = 0.03,
     progress_callback: ProgressCb = None,
+    masks: Optional[List[np.ndarray]] = None,
 ) -> Tuple[List[np.ndarray], float]:
     """Non-rigid (per-pixel) refinement after the global affine align.
 
@@ -156,6 +221,11 @@ def refine_alignment_flow(
     should track and discards the focus mismatch. Vectors are clamped to
     ``max_shift_frac`` of the frame so textureless/out-of-focus areas cannot
     inject wild warps.
+
+    ``masks``: optional coverage maps from :func:`align_focus_stack`, updated
+    in place through the same remap so the auto-crop still knows where each
+    frame genuinely has data. Without this the flow's reflect border would
+    re-contaminate the edge the affine mask had just marked invalid.
 
     Returns (refined_images, parallax_px) where parallax_px is the median flow
     magnitude across frames -- a cheap "how much parallax is present" signal for
@@ -217,6 +287,16 @@ def refine_alignment_flow(
         blended = warped.astype(np.float32) * conf3 + img.astype(np.float32) * (1.0 - conf3)
         refined[idx] = blended.astype(img.dtype)
 
+        if masks is not None and idx < len(masks):
+            # Mirror the pixel blend: where confidence is low the ORIGINAL
+            # pixels survive, so the original coverage does too.
+            remapped = cv2.remap(
+                masks[idx], map_x, map_y,
+                interpolation=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            masks[idx] = np.where(confidence > 0.5, remapped, masks[idx]).astype(np.uint8)
+
     return refined, (float(np.median(mags)) if mags else 0.0)
 
 
@@ -231,6 +311,40 @@ def _sharpness_map(gray_u8: np.ndarray, blur: int = 5) -> np.ndarray:
     sharp = np.abs(lap)
     k = blur | 1  # odd
     return cv2.GaussianBlur(sharp, (k, k), 0)
+
+
+def apply_focus_points(
+    sharp_maps: List[np.ndarray],
+    focus_points: Optional[List[Tuple[float, float, float, int]]],
+) -> List[np.ndarray]:
+    """Bias the source selection toward a chosen frame around a chosen spot.
+
+    ``focus_points`` are ``(x, y, radius, frame_index)`` with x/y/radius
+    NORMALISED to 0-1 of the frame. Normalised on purpose: the point is picked
+    on a downscaled proxy in the tuning panel and re-applied to the full-size
+    aligned stack, which is a different pixel grid (and, after auto-crop, a
+    different extent). Absolute coordinates would land somewhere else.
+
+    The bias is a soft radial lift on that frame's sharpness map, large enough
+    to win the per-pixel argmax inside the spot and fading to nothing outside,
+    so :func:`_seam_aware_weights` hands that region to the frame the user
+    pointed at while the guided filter keeps the boundary on real image edges.
+    """
+    if not focus_points:
+        return sharp_maps
+    h, w = sharp_maps[0].shape
+    peak = max(float(m.max()) for m in sharp_maps) + 1e-6
+    yy = np.arange(h, dtype=np.float32)[:, None]
+    xx = np.arange(w, dtype=np.float32)[None, :]
+    out = [m.copy() for m in sharp_maps]
+    for nx, ny, nr, frame_idx in focus_points:
+        if not (0 <= int(frame_idx) < len(out)):
+            continue
+        cx, cy = float(nx) * w, float(ny) * h
+        sigma = max(2.0, float(nr) * max(h, w) * 0.5)
+        falloff = np.exp(-0.5 * (((xx - cx) ** 2 + (yy - cy) ** 2) / (sigma ** 2)))
+        out[int(frame_idx)] = out[int(frame_idx)] + falloff.astype(np.float32) * peak * 2.0
+    return out
 
 
 def _seam_aware_weights(
@@ -252,10 +366,17 @@ def _seam_aware_weights(
     """
     stack = np.stack(sharp_maps, axis=0)  # (N, H, W)
     labels = np.argmax(stack, axis=0)
+    guided = getattr(cv2, "ximgproc", None)
     weights: List[np.ndarray] = []
     for i in range(len(sharp_maps)):
         mask = (labels == i).astype(np.float32)
-        smooth = cv2.ximgproc.guidedFilter(guide_gray_u8, mask, radius, eps)
+        if guided is not None:
+            smooth = guided.guidedFilter(guide_gray_u8, mask, radius, eps)
+        else:
+            # opencv-contrib is what we ship; a base cv2 on sys.path still
+            # has to fuse rather than raise into the stitch worker.
+            k = max(3, (int(radius) // 2) * 2 + 1)
+            smooth = cv2.GaussianBlur(mask, (k, k), max(1.0, radius / 3.0))
         weights.append(np.clip(smooth, 0.0, 1.0))
     return weights
 
@@ -320,10 +441,21 @@ def _fuse_pyramid(
 
 
 def _auto_crop_border(img: np.ndarray, aligned_masks: List[np.ndarray]) -> np.ndarray:
-    """Trim to the region every aligned frame covers (no reflect-padding edges)."""
+    """Trim to the rectangle every aligned frame covers (no reflect-padding edges).
+
+    Takes fully-covered rows and columns rather than the bounding box of any
+    covered pixel: for the translation/affine warps here that IS the common
+    rectangle, whereas a bounding box keeps rows the border only partly eats.
+    """
     valid = np.ones(img.shape[:2], dtype=bool)
     for m in aligned_masks:
-        valid &= m
+        valid &= m.astype(bool)
+    rows = np.where(valid.all(axis=1))[0]
+    cols = np.where(valid.all(axis=0))[0]
+    if rows.size and cols.size:
+        return img[rows[0] : rows[-1] + 1, cols[0] : cols[-1] + 1]
+    # Nothing is covered edge to edge (a heavy rotation, say): fall back to the
+    # bounding box of covered pixels rather than returning an empty frame.
     ys, xs = np.where(valid)
     if ys.size == 0:
         return img
@@ -335,6 +467,111 @@ def _auto_crop_border(img: np.ndarray, aligned_masks: List[np.ndarray]) -> np.nd
 _PARALLAX_WARN_PX = 2.0
 
 
+@dataclass
+class FocusStackPrep:
+    """Everything a fusion needs, with the expensive stages already done.
+
+    Alignment (ECC, then dense optical flow) costs orders of magnitude more
+    than the fusion and does not depend on any of the tuning controls, so the
+    tuning panel prepares once and re-fuses on every slider move and every
+    focus point the user places.
+    """
+
+    floats: List[np.ndarray]          # aligned frames, float32 [0, 1]
+    sharp_maps: List[np.ndarray]      # per-frame focus measure
+    guide: np.ndarray                 # uint8 luma of the reference frame
+    coverage: Optional[List[np.ndarray]]
+    dtype: Any                        # bit-depth family to return in
+    warnings: List[str] = field(default_factory=list)
+
+
+def fuse_prepared_stack(
+    prep: FocusStackPrep,
+    seam_aware: bool = True,
+    auto_crop: bool = True,
+    frame_weights: Optional[List[float]] = None,
+    focus_points: Optional[List[Tuple[float, float, float, int]]] = None,
+) -> np.ndarray:
+    """Fuse an aligned stack. Cheap enough to re-run interactively.
+
+    ``frame_weights``: per-frame multipliers on the focus measure; 0 drops a
+    frame from the selection without re-aligning the set.
+    ``focus_points``: see :func:`apply_focus_points`.
+    """
+    sharp_maps = prep.sharp_maps
+    if frame_weights and len(frame_weights) == len(sharp_maps):
+        sharp_maps = [m * max(0.0, float(w)) for m, w in zip(sharp_maps, frame_weights)]
+    sharp_maps = apply_focus_points(sharp_maps, focus_points)
+
+    weights = _seam_aware_weights(sharp_maps, prep.guide) if seam_aware else sharp_maps
+    fused = _fuse_pyramid(prep.floats, weights)
+    del weights, sharp_maps
+
+    if auto_crop and prep.coverage is not None:
+        fused = _auto_crop_border(fused, prep.coverage)
+
+    # Return in the input's bit-depth family.
+    if prep.dtype == np.uint16:
+        return (fused * 65535.0).astype(np.uint16)
+    if prep.dtype == np.uint8:
+        return (fused * 255.0).astype(np.uint8)
+    return fused.astype(np.float32)
+
+
+def source_label_map(
+    prep: FocusStackPrep,
+    frame_weights: Optional[List[float]] = None,
+    focus_points: Optional[List[Tuple[float, float, float, int]]] = None,
+    auto_crop: bool = True,
+) -> np.ndarray:
+    """Which frame owns each pixel (int32 index), for the panel's source map."""
+    sharp_maps = prep.sharp_maps
+    if frame_weights and len(frame_weights) == len(sharp_maps):
+        sharp_maps = [m * max(0.0, float(w)) for m, w in zip(sharp_maps, frame_weights)]
+    sharp_maps = apply_focus_points(sharp_maps, focus_points)
+    labels = np.argmax(np.stack(sharp_maps, axis=0), axis=0).astype(np.int32)
+    if auto_crop and prep.coverage is not None:
+        labels = _auto_crop_border(labels, prep.coverage)
+    return labels
+
+
+def prepare_focus_stack(
+    images: List[np.ndarray],
+    align: bool = True,
+    local_align: bool = True,
+    auto_crop: bool = True,
+    progress_callback: ProgressCb = None,
+) -> FocusStackPrep:
+    """Align a stack and measure its sharpness, ready for repeated fusion."""
+    warnings: List[str] = []
+    coverage: Optional[List[np.ndarray]] = None
+    if align:
+        if auto_crop:
+            images, warnings, coverage = align_focus_stack(
+                images, progress_callback, return_masks=True
+            )
+        else:
+            images, warnings = align_focus_stack(images, progress_callback)
+    if local_align:
+        images, parallax_px = refine_alignment_flow(
+            images, progress_callback=progress_callback, masks=coverage
+        )
+        if parallax_px > _PARALLAX_WARN_PX:
+            warnings.append(
+                f"Significant parallax detected (~{parallax_px:.1f}px between frames). "
+                "Edges of near objects may still show softness; a tripod or focus rail "
+                "avoids this."
+            )
+    return FocusStackPrep(
+        floats=[_as_float32(im) for im in images],
+        sharp_maps=[_sharpness_map(_to_gray_u8(im)) for im in images],
+        guide=_to_gray_u8(images[0]),
+        coverage=coverage if auto_crop else None,
+        dtype=images[0].dtype,
+        warnings=warnings,
+    )
+
+
 def focus_stack(
     images: List[np.ndarray],
     paths: Optional[List[str]] = None,
@@ -343,6 +580,8 @@ def focus_stack(
     seam_aware: bool = True,
     auto_crop: bool = True,
     progress_callback: ProgressCb = None,
+    frame_weights: Optional[List[float]] = None,
+    focus_points: Optional[List[Tuple[float, float, float, int]]] = None,
 ) -> FocusStackResult:
     """Merge a focus bracket into one all-in-focus frame.
 
@@ -354,7 +593,13 @@ def focus_stack(
     affine to absorb parallax the affine cannot. ``seam_aware`` (v2) selects
     each region's owning frame coherently instead of per-pixel, so contested
     parallax areas are not composited from two frames at once.
+
+    ``paths``: source filenames, used to name the frames a rejection is about.
+    ``frame_weights`` / ``focus_points``: the tuning panel's overrides; see
+    :func:`fuse_prepared_stack` and :func:`apply_focus_points`.
     """
+    names = list(paths) if paths and len(paths) == len(images) else []
+
     if not images or len(images) < 2:
         return FocusStackResult(False, error_message="Focus stacking needs at least 2 photos.")
 
@@ -367,22 +612,45 @@ def focus_stack(
                 "larger stack risks exhausting RAM. Select fewer frames or raise "
                 "RAWVIEWER_FOCUS_STACK_MAX_FRAMES."
             ),
+            rejected_paths=names,
         )
 
     shapes = {im.shape[:2] for im in images}
     if len(shapes) != 1:
+        # Name the odd ones out: with a dozen frames selected, "not the same
+        # dimensions" alone leaves the user to find them by hand.
+        ref_shape = images[0].shape[:2]
+        odd = [
+            (names[i] if names else f"Image {i + 1}")
+            for i, im in enumerate(images)
+            if im.shape[:2] != ref_shape
+        ]
         return FocusStackResult(
             False,
-            error_message="Selected photos are not the same dimensions; focus stacking needs identical frames.",
+            error_message=(
+                "Selected photos are not the same dimensions; focus stacking needs "
+                f"identical frames. Different from the first: {', '.join(os.path.basename(o) for o in odd)}."
+            ),
+            rejected_paths=odd,
         )
 
     warnings: List[str] = []
     try:
+        # Coverage travels with the frames through every warp; see
+        # align_focus_stack. Only built when the crop will actually use it.
+        coverage: Optional[List[np.ndarray]] = None
         if align:
-            images, warnings = align_focus_stack(images, progress_callback)
+            if auto_crop:
+                images, warnings, coverage = align_focus_stack(
+                    images, progress_callback, return_masks=True
+                )
+            else:
+                images, warnings = align_focus_stack(images, progress_callback)
 
         if local_align:
-            images, parallax_px = refine_alignment_flow(images, progress_callback=progress_callback)
+            images, parallax_px = refine_alignment_flow(
+                images, progress_callback=progress_callback, masks=coverage
+            )
             if parallax_px > _PARALLAX_WARN_PX:
                 warnings.append(
                     f"Significant parallax detected (~{parallax_px:.1f}px between frames). "
@@ -398,44 +666,29 @@ def focus_stack(
         # everything still needed from the source frames up front, then drop the
         # source list before the pyramid is built, and free each large
         # intermediate the moment it is consumed.
-        ref_dtype = images[0].dtype
-        guide = _to_gray_u8(images[0])
-        crop_masks = None
-        if auto_crop:
-            crop_masks = [np.ones(images[0].shape[:2], dtype=bool)]
-            for im in images[1:]:
-                crop_masks.append(_to_gray_u8(im) > 0)
-
-        sharp_maps = [_sharpness_map(_to_gray_u8(im)) for im in images]
-        floats = [_as_float32(im) for im in images]
+        prep = FocusStackPrep(
+            floats=[_as_float32(im) for im in images],
+            sharp_maps=[_sharpness_map(_to_gray_u8(im)) for im in images],
+            guide=_to_gray_u8(images[0]),
+            # The masks come from the warps, never from the pixels: the frames
+            # are warped with BORDER_REFLECT, so a `_to_gray_u8(im) > 0` test
+            # sees mirrored photograph in the alignment border and calls it
+            # valid -- which made the crop a no-op on every stack.
+            coverage=coverage if auto_crop else None,
+            dtype=images[0].dtype,
+            warnings=warnings,
+        )
         images = None  # source frames no longer needed -- release before fusion
-
-        if seam_aware:
-            weights = _seam_aware_weights(sharp_maps, guide)
-            sharp_maps = None  # superseded by the coherent weights
-        else:
-            weights = sharp_maps
 
         if progress_callback:
             progress_callback(70, "Blending sharpest regions…")
-        fused = _fuse_pyramid(floats, weights)
-        floats = None
-        weights = None
-        sharp_maps = None
-
-        if auto_crop and crop_masks is not None:
-            if progress_callback:
-                progress_callback(92, "Cropping alignment border…")
-            fused = _auto_crop_border(fused, crop_masks)
-            crop_masks = None
-
-        # Return in the input's bit-depth family.
-        if ref_dtype == np.uint16:
-            out = (fused * 65535.0).astype(np.uint16)
-        elif ref_dtype == np.uint8:
-            out = (fused * 255.0).astype(np.uint8)
-        else:
-            out = fused.astype(np.float32)
+        out = fuse_prepared_stack(
+            prep,
+            seam_aware=seam_aware,
+            auto_crop=auto_crop,
+            frame_weights=frame_weights,
+            focus_points=focus_points,
+        )
 
         if progress_callback:
             progress_callback(100, "Focus stack complete")

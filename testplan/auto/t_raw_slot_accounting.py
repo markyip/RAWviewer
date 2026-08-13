@@ -241,6 +241,29 @@ def main() -> int:
         f"{m._active_raw_tasks} (counting _active_tasks would give 0)",
     )
 
+    # --- distant gallery CURRENT must be prunable (they used to be exempt) ---
+    import queue as _queue
+    from image_load_manager import ImageLoadTask
+
+    m = _manager()
+    m._work_queue = _queue.PriorityQueue()
+    near = ImageLoadTask("/near.CR3", Priority.CURRENT, stages={"thumbnail"}, gallery_thumbnail=True)
+    far = ImageLoadTask("/far.CR3", Priority.CURRENT, stages={"thumbnail"}, gallery_thumbnail=True)
+    keep_sv = ImageLoadTask("/sv.CR3", Priority.CURRENT, stages={"full"}, gallery_thumbnail=False)
+    preload = ImageLoadTask("/pre.CR3", Priority.PRELOAD_NEXT, stages={"thumbnail"})
+    for t in (near, far, keep_sv, preload):
+        m._work_queue.put(t)
+    n = ilm.ImageLoadManager.cancel_distant_queued_tasks(
+        m, lambda p: 0 if ("near" in p or "sv" in p) else 99, 24
+    )
+    leftover = []
+    while not m._work_queue.empty():
+        leftover.append(m._work_queue.get_nowait().file_path)
+    check("distant gallery CURRENT thumbs are dropped", "/far.CR3" not in leftover and n >= 1, str(leftover))
+    check("on-screen gallery thumbs stay queued", "/near.CR3" in leftover, str(leftover))
+    check("single-view CURRENT is never pruned as distant", "/sv.CR3" in leftover, str(leftover))
+    check("distant preload is dropped", "/pre.CR3" not in leftover, str(leftover))
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 

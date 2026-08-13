@@ -172,8 +172,16 @@ _SLIDER_TRACK_GRADIENTS: dict[str, list[tuple[float, str]]] = {
 }
 
 
-def _qta_icon_safe(name: str, *, color: str) -> QIcon:
-    """qtawesome icon that degrades to an empty (invisible) QIcon if unavailable."""
+def _qta_icon_safe(name: str, *, color: str, size: int = 20) -> QIcon:
+    """Chrome line icon, then qtawesome, then empty."""
+    try:
+        from rawviewer_ui.chrome_icons import icon as chrome_icon
+
+        ic = chrome_icon(name, color=color, size=size)
+        if ic is not None and not ic.isNull():
+            return ic
+    except Exception:
+        pass
     try:
         import qtawesome as qta
 
@@ -194,7 +202,7 @@ def _apply_tool_icon(
     Matches Compare / WB / Burst: one quiet FA icon, same ink as the label,
     and a no-op when qtawesome is missing so the button still reads.
     """
-    icon = _qta_icon_safe(name, color=color or theme.INK_MUTED)
+    icon = _qta_icon_safe(name, color=color or theme.INK_MUTED, size=size)
     if icon.isNull():
         return
     btn.setIcon(icon)

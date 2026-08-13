@@ -156,7 +156,9 @@ def _spatial_pad_px(adjustments: dict, *, preview: bool = True) -> int:
     return pad
 
 
-def _apply_layer_adjustments(img: np.ndarray, adjustments: dict) -> np.ndarray:
+def _apply_layer_adjustments(
+    img: np.ndarray, adjustments: dict, *, preview: bool = True
+) -> np.ndarray:
     """Apply one layer's adjustment set, reusing the real global adjustment
     math (WB/tint, saturation-vibrance, dehaze, HSL, detail) wherever it
     already operates as a pure per-region function -- only Exposure and
@@ -201,7 +203,7 @@ def _apply_layer_adjustments(img: np.ndarray, adjustments: dict) -> np.ndarray:
 
     dehaze = float(adjustments.get("Dehaze", 0.0))
     if abs(dehaze) > 1e-4:
-        out = apply_dehaze(out, dehaze, preview=True)
+        out = apply_dehaze(out, dehaze, preview=preview)
 
     if any(abs(float(adjustments.get(k, 0.0))) > 1e-4 for k in _hsl_keys()):
         out = apply_hsl_adjustments(out, adjustments)
@@ -554,7 +556,9 @@ def _composite_one_layer(
     ex0, ex1 = max(0, x0 - pad), min(w, x1 + pad)
 
     extraction = img[ey0:ey1, ex0:ex1]
-    adjusted_padded = _apply_layer_adjustments(extraction, layer.adjustments)
+    adjusted_padded = _apply_layer_adjustments(
+        extraction, layer.adjustments, preview=preview
+    )
     ry0, ry1, rx0, rx1 = ly0 - ey0, ly1 - ey0, x0 - ex0, x1 - ex0
     adjusted_region = adjusted_padded[ry0:ry1, rx0:rx1]
 

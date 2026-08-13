@@ -1857,9 +1857,10 @@ class ImageLoadManager(QObject):
         """Drop QUEUED work further than ``max_distance`` rows from view.
 
         Only queued tasks: running ones hold a slot and a decode that cannot
-        be interrupted. The gallery's existing cancel diff runs only once
-        scrolling settles, which is exactly when the queue is no longer
-        flooded -- this is for during the scroll, when it is.
+        be interrupted. Gallery thumbnails are CURRENT priority (so they beat
+        prefetch), which used to exempt them from this prune — they then sat
+        in the queue until the visible-pass cancel, starving newly visible
+        tiles. Far-off gallery thumbs are dropped; single-view CURRENT is not.
         """
         cancelled = 0
         with self._queue_lock:
@@ -1876,15 +1877,21 @@ class ImageLoadManager(QObject):
                     far = int(distance_for(task.file_path)) > max_distance
                 except Exception:
                     far = False
-                if far and task.priority != Priority.CURRENT:
+                drop_queued = far and (
+                    task.priority != Priority.CURRENT
+                    or getattr(task, "gallery_thumbnail", False)
+                )
+                if drop_queued:
                     task.cancel()
                     self._release_raw_slot_locked(task)
                     key = getattr(task, "task_key", None)
                     if key in self._active_tasks and self._active_tasks[key] is task:
                         del self._active_tasks[key]
-                        self._task_keys_by_path[task.file_path].discard(key)
-                        if not self._task_keys_by_path[task.file_path]:
-                            self._task_keys_by_path.pop(task.file_path, None)
+                        keys = self._task_keys_by_path.get(task.file_path)
+                        if keys is not None:
+                            keys.discard(key)
+                            if not keys:
+                                self._task_keys_by_path.pop(task.file_path, None)
                     cancelled += 1
                     continue
                 self._work_queue.put(task)

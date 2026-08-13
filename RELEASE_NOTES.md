@@ -51,11 +51,20 @@ colour calibration, and a long list of speed work.
 
 - **HDR Merge, Panorama and Panorama HDR.** Multi-select in the gallery and right-click. Handheld MTB exposure alignment, Highlight/Shadow/Midtone weighting, and automatic rectangular border cropping.
 - **Focus Stack (All-in-Focus)** merges a focus bracket, with parallax correction and seam-aware fusion.
+- **Tune the merge before you commit to it.** The merge dialog previews the result live on a downscaled copy, so Highlight/Shadow/Midtone, the per-photo weights and the crop all show their effect immediately. Alignment is done once and reused, so only the blend re-runs as you adjust.
+- **Every source photo gets its own row** — tick it in or out, set how much it counts, and see the EV it was shot at.
+- **Focus stacking shows you where each pixel came from.** Switch the preview to the source map to see which photo owns each region, colour-matched to the photo list.
+- **Pick the focus yourself where the automatic choice is wrong.** Choose a photo, click that spot in the preview, and the area is handed to it. Points are held relative to the frame, so what you set on the preview is what you get at full resolution.
+- **Merges run at full resolution**, and are written display-referred — the gallery thumbnail and other applications agree on how the result looks. If a set is too large for the memory available it falls back to half size and tells you, rather than failing.
+- **Panorama HDR asks how the set was bracketed.** Exposures per panel is seeded from the EXIF exposure pattern, so 4 panels of 3 stops are grouped as they were shot.
+- **The merge dialog reorders the selection from EXIF**, so click order in the gallery no longer decides which frames are fused together. HDR sorts darkest → brightest; panorama and focus stack sort by capture time; Panorama HDR sorts by capture time into panels, then darkest → brightest inside each bracket. File copy time is never used.
+- **Merges are reproducible**: the same photos and the same settings give the same file.
+- **Frames that cannot be registered are left as shot** and reported, rather than being warped by a failed alignment solve.
 
 ### 🖼️ Editing beyond RAW
 
 - **JPEG, WebP, PNG, TIFF and BMP open in the Adjust panel** (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence — exposure, contrast, relative white balance, curves, HSL, vignette, denoise, dodge & burn, spot heal and geometry, without touching the original.
-- **Files deeper than 8 bits are edited at their real depth** — a 16-bit TIFF keeps all 65,536 levels through the editor, not 256 of them. This matters most for this app's own output: HDR merge, panorama and focus stack all write 16-bit TIFF, so a shadow lift holds together instead of banding.
+- **Files deeper than 8 bits are edited at their real depth** — a 16-bit TIFF keeps all 65,536 levels through the editor, not 256 of them. This matters most for this app's own output: HDR merge and focus stack write 16-bit TIFF, so a shadow lift holds together instead of banding. (Panorama is 8-bit, which is the depth the stitcher works at.)
 - **Nikon HE/HE\* NEF files can be edited** via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as editing a JPEG. RAW that cannot be demosaiced keeps showing its embedded preview instead of a grey tile.
 
 ### 🎨 Colour and lens
@@ -79,7 +88,9 @@ colour calibration, and a long list of speed work.
 
 - **Painting a mask stays responsive on big files** — about 32 ms per stroke tick on a 2200×3300 base. The photo is not re-rendered on every brush stamp; the overlay updates instead, and the edit renders once when you let go.
 - **Loading a photo with saved edits is much faster** — the sidecar is parsed once and shared, and mask coverage is stored at half resolution.
-- **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past.
+- **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block the visible ones (a stall on slower machines that needed a folder reload).
+- **Low-RAM machines keep the snappy gallery without the 24 GB prefetch.** Shared scroll defaults (idle-preload 120, 12 preload threads, hover full-res) are overlaid by the RAM tier, so an 8 GB machine no longer inherits those numbers.
+- **Compare zoom loads the real pixels.** Space / 100% requests full-resolution for the two on-screen photos, and a preview upgrading to sensor-res no longer copies its zoom onto the other pane.
 - **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.
 - **Missing gallery tiles come back.** A transient failure used to cache a grey placeholder permanently for the session.
 - **Trackpad scrolling is smooth**, no longer discarding sub-pixel movement.
@@ -93,6 +104,10 @@ colour calibration, and a long list of speed work.
 - **One typeface, everywhere, and slightly larger.** The app declared several different font stacks, and the most common one asked for a font that ships with neither macOS nor Windows — so it matched only as long as you did not happen to have that font installed, and split the interface across two typefaces if you did. There is now a single stack that resolves to each platform's own UI font, and the base size is a step up from the platform default.
 - **Drag the gallery scrollbar and it tells you the date.** A floating bubble follows the thumb showing when the photos you are passing were taken, so you can land on last October without waiting for a single thumbnail to decode — the capture date is known from EXIF long before any pixels are. It appears only while you are dragging the thumb, not on ordinary wheel or trackpad scrolling.
 - **Files this app writes appear in the gallery immediately** — no reopening the folder after an HDR merge, panorama or export.
+- **Photos lift under the cursor.** Rest on a thumbnail in the gallery and it grows slightly and comes forward, while the full-resolution decode starts in the background — so by the time you click, the photo is often already there. Passing the cursor over tiles, or scrolling with it held still, does nothing.
+- **Right-click in the gallery.** Open, share, rate, merge, discard and delete, all acting on the whole selection. Right-clicking a photo outside the current selection selects it first, so the menu and the action always mean the same photos. Rating from here works on many photos at once — previously the 1–5 keys only worked one photo at a time in single view.
+- **Multi-select then right-click to merge**: Standard Panorama, HDR Merge, Panorama HDR and Focus Stack are all one menu away from a gallery selection.
+- **Moving or renaming a folder outside RAWviewer no longer throws away what it knows about those photos.** Their search index — embeddings, places, faces, camera and lens — used to be lost for good, and every thumbnail in the folder was rebuilt from scratch. Both are now recognised at their new location and updated in place.
 - **An edited photo's gallery tile refreshes** after you visit it in the editor, instead of showing the embedded JPEG forever.
 - **Apply to Burst Group** applies tone, colour and noise settings across a burst while preserving each photo's crop and local masks.
 - **<kbd>↓</kbd> discards only in single-image view**, not while editing, and Looks (LUT/XMP) can be renamed in place.

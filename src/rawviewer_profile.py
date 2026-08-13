@@ -7,9 +7,13 @@ import os
 import sys
 import time
 
-# Gallery / navigation prefetch shared by Standard and Plus.
-# Previously Lite-only — that made Plus packaged builds feel slower when scrolling.
-# Applied before RAM-tier defaults so low-RAM caps do not kneecap gallery fill.
+# Gallery / navigation prefetch shared by Standard and Plus on machines that
+# can take it (16 GB+ after RAM-tier overlay). Previously Lite-only — that made
+# Plus packaged builds feel slower when scrolling.
+#
+# RAM-tier overlay (apply_memory_tier_defaults) replaces these on ≤16 GB so an
+# 8 GB Air does not inherit idle-preload 120 / 12 preload threads. User-exported
+# RAWVIEWER_* values are snapshotted before any setdefault and always win.
 #
 # Do NOT set RAWVIEWER_GALLERY_IDLE_PRELOAD_PRIORITY here. Leaving it unset lets
 # gallery_idle_load_priority() use PRELOAD_NEXT for snappy gallery fill, and only
@@ -54,9 +58,9 @@ LITE_PREFETCH_DEFAULTS: dict[str, str] = {
 }
 
 
-# RAM-tier defaults (setdefault at startup). Opt out: RAWVIEWER_MEMORY_TIER_AUTO=0
-# Indexing / decode concurrency only — do not undercut SHARED_SCROLL_PREFETCH_DEFAULTS
-# gallery idle batch / filmstrip radius (those made Plus feel slower than Standard).
+# RAM-tier defaults. Overlay profile/shared prefetch after startup so low-RAM
+# machines do not keep the 24 GB idle-preload numbers. Opt out:
+# RAWVIEWER_MEMORY_TIER_AUTO=0. User-exported RAWVIEWER_* always win.
 MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
     # ≤8 GB MacBook Air class — avoid OOM during semantic index + large folders
     "low": {
@@ -73,9 +77,24 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_RAW_LOAD_LIMIT": "2",
         "RAWVIEWER_UNPACK_CONCURRENCY": "1",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
+        "RAWVIEWER_NAV_PRELOAD_NEAR": "2",
         "RAWVIEWER_GALLERY_PREFETCH_SCREENS": "3",
         "RAWVIEWER_GALLERY_ENTRY_PREFETCH_RADIUS": "16",
         "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "16",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_MS": "600",
+        "RAWVIEWER_PRELOAD_THREADS": "4",
+        "RAWVIEWER_ADJACENT_PRELOAD_NEXT": "3",
+        "RAWVIEWER_ADJACENT_PRELOAD_PREV": "2",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "8",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_BATCH": "2",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_QUEUE_CAP": "6",
+        "RAWVIEWER_GALLERY_ACTIVE_CAP": "24",
+        "RAWVIEWER_GALLERY_ACTIVE_CAP_FAST": "16",
+        "RAWVIEWER_GALLERY_MAX_TASKS": "24",
+        "RAWVIEWER_GALLERY_MAX_WIDGETS": "28",
+        # Hover full-res decode steals both RAW slots from tile fill.
+        "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
     },
     # 10–12 GB unified memory
     "medium": {
@@ -85,10 +104,22 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_MEMORY_PREVIEW_MAX": "1536",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS": "10",
         "RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX": "16",
-        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_QUEUE_CAP": "10",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_QUEUE_CAP": "8",
+        "RAWVIEWER_IDLE_DISPLAY_PREFETCH_BATCH": "2",
         "RAWVIEWER_LOAD_MAX_WORKERS": "12",
         "RAWVIEWER_RAW_LOAD_LIMIT": "3",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "8",
+        "RAWVIEWER_NAV_PRELOAD_NEAR": "2",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "32",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_MS": "400",
+        "RAWVIEWER_PRELOAD_THREADS": "6",
+        "RAWVIEWER_ADJACENT_PRELOAD_NEXT": "4",
+        "RAWVIEWER_ADJACENT_PRELOAD_PREV": "3",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "12",
+        "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "8",
+        "RAWVIEWER_GALLERY_ACTIVE_CAP": "32",
+        "RAWVIEWER_GALLERY_MAX_TASKS": "32",
+        "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
     },
     # 16 GB — conservative index workers to avoid jetsam during semantic + face
     "balanced": {
@@ -106,6 +137,14 @@ MEMORY_TIER_DEFAULTS: dict[str, dict[str, str]] = {
         "RAWVIEWER_RAW_LOAD_LIMIT": "2",
         "RAWVIEWER_GALLERY_WARMUP_MAX_WORKERS": "6",
         "RAWVIEWER_NAV_PRELOAD_RADIUS_MAX": "6",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_BATCH": "48",
+        "RAWVIEWER_GALLERY_IDLE_PRELOAD_MS": "300",
+        "RAWVIEWER_PRELOAD_THREADS": "6",
+        "RAWVIEWER_ADJACENT_PRELOAD_NEXT": "4",
+        "RAWVIEWER_ADJACENT_PRELOAD_PREV": "3",
+        "RAWVIEWER_FILMSTRIP_PREFETCH_RADIUS": "16",
+        "RAWVIEWER_GALLERY_ACTIVE_CAP": "40",
+        "RAWVIEWER_GALLERY_HOVER_PREFETCH": "0",
     },
     # 24 GB — near stock full defaults
     "high": {
@@ -192,13 +231,34 @@ def ai_export_enabled() -> bool:
         return True
 
 
+_USER_RAWVIEWER_ENV: frozenset[str] | None = None
+
+
+def snapshot_user_rawviewer_env() -> frozenset[str]:
+    """Keys the user (or launch script) already exported, captured once.
+
+    Profile/shared defaults setdefault into os.environ, so a later RAM-tier
+    pass cannot tell them apart from a real export unless we snapshot first.
+    """
+    global _USER_RAWVIEWER_ENV
+    if _USER_RAWVIEWER_ENV is None:
+        _USER_RAWVIEWER_ENV = frozenset(
+            k
+            for k, v in os.environ.items()
+            if k.startswith("RAWVIEWER_") and str(v).strip()
+        )
+    return _USER_RAWVIEWER_ENV
+
+
 def apply_shared_scroll_prefetch_defaults() -> None:
     """Gallery/nav prefetch for both Standard and Plus (setdefault; env wins)."""
+    snapshot_user_rawviewer_env()
     for key, value in SHARED_SCROLL_PREFETCH_DEFAULTS.items():
         os.environ.setdefault(key, value)
 
 
 def apply_profile_runtime_defaults() -> None:
+    snapshot_user_rawviewer_env()
     apply_shared_scroll_prefetch_defaults()
     if not is_lite_build():
         return
@@ -269,20 +329,21 @@ def _write_memory_tier_note(tier: str, total_gb: float | None, applied: int) -> 
 
 
 def apply_memory_tier_defaults() -> str:
-    """Apply RAM-tier env defaults once per process (setdefault; user exports win)."""
+    """Apply RAM-tier env defaults (overlay shared prefetch; user exports win)."""
     if not memory_tier_auto_enabled():
         return "disabled"
+    preserve = snapshot_user_rawviewer_env()
     total_gb = system_total_ram_gb()
     tier = classify_memory_tier(total_gb)
     defaults = memory_tier_defaults(tier)
     applied = 0
     for key, value in defaults.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            applied += 1
-        elif not str(os.environ.get(key, "")).strip():
-            os.environ[key] = value
-            applied += 1
+        if key in preserve:
+            continue
+        if os.environ.get(key) == value:
+            continue
+        os.environ[key] = value
+        applied += 1
     _write_memory_tier_note(tier, total_gb, applied)
     return tier
 

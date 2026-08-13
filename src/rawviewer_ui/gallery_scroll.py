@@ -57,6 +57,75 @@ def trackpad_gain() -> float:
     return _env_float("RAWVIEWER_TRACKPAD_GAIN", 1.6, minimum=0.25)
 
 
+def bounce_max_px() -> int:
+    """How far the gallery may rubber-band past the first/last row, in px.
+
+    0 disables the effect (instant clamp, the old behaviour).
+    """
+    flag = os.environ.get("RAWVIEWER_GALLERY_BOUNCE", "1")
+    if str(flag).strip().lower() in ("0", "false", "no", "off"):
+        return 0
+    return _env_int("RAWVIEWER_GALLERY_BOUNCE_PX", 64, minimum=0)
+
+
+def apply_scroll_delta(
+    value: float,
+    lo: float,
+    hi: float,
+    delta: float,
+    overshoot: float,
+    limit: float,
+) -> tuple[float, float]:
+    """Integrate a scroll delta with rubber-band overshoot at the ends.
+
+    ``overshoot`` is signed: positive = pulled past the top, negative = past
+    the bottom. Returns ``(clamped_value, new_overshoot)``.
+    """
+    if limit <= 0:
+        proposed = value + delta
+        if proposed < lo:
+            return lo, 0.0
+        if proposed > hi:
+            return hi, 0.0
+        return proposed, 0.0
+
+    # Consume overshoot before moving content again.
+    if overshoot > 0 and delta > 0:
+        overshoot -= delta
+        if overshoot > 0:
+            return lo, overshoot
+        delta = -overshoot
+        overshoot = 0.0
+    elif overshoot < 0 and delta < 0:
+        overshoot -= delta
+        if overshoot < 0:
+            return hi, overshoot
+        delta = -overshoot
+        overshoot = 0.0
+
+    proposed = value + delta
+    if proposed < lo:
+        return lo, _rubber_grow(overshoot, lo - proposed, limit)
+    if proposed > hi:
+        return hi, _rubber_grow(overshoot, -(proposed - hi), limit)
+    return proposed, 0.0
+
+
+def _rubber_grow(current: float, add: float, limit: float) -> float:
+    """add is signed extra overshoot; resistance rises as we near ``limit``."""
+    room = limit - abs(current)
+    if room <= 0:
+        return max(-limit, min(limit, current))
+    factor = max(0.18, room / limit)
+    return max(-limit, min(limit, current + add * factor))
+
+
+def bounce_step(overshoot: float, *, decay: float = 0.72) -> float:
+    """One spring tick toward rest. Below half a pixel, snap to 0."""
+    nxt = overshoot * decay
+    return 0.0 if abs(nxt) < 0.5 else nxt
+
+
 def wheel_notch_gain(now: float | None = None, last_notch_t: float = 0.0) -> tuple[float, float]:
     """Return (gain, now_t) for a mouse-wheel notch; ramps toward fast gain on rapid spins."""
     now_t = time.perf_counter() if now is None else float(now)

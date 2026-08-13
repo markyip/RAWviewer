@@ -6,7 +6,15 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 
 from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
-from PyQt6.QtCore import Qt, QTimer, QRect, QEvent, QSize
+from PyQt6.QtCore import (
+    Qt,
+    QTimer,
+    QRect,
+    QEvent,
+    QSize,
+    QEasingCurve,
+    QPropertyAnimation,
+)
 from PyQt6.QtGui import QPixmap, QImage, QFont, QTransform
 
 try:
@@ -451,6 +459,9 @@ class JustifiedGallery(QWidget):
         # Input gain: keys / wheel / trackpad share rawviewer_ui.gallery_scroll
         # so arrow-key singleStep*N stays aligned with wheel/trackpad feel.
         from rawviewer_ui.gallery_scroll import (
+            apply_scroll_delta,
+            bounce_max_px,
+            bounce_step,
             trackpad_gain,
             wheel_base_gain,
             wheel_fast_gain,
@@ -459,6 +470,12 @@ class JustifiedGallery(QWidget):
         self._wheel_base_gain = wheel_base_gain()
         self._wheel_fast_gain = wheel_fast_gain()
         self._trackpad_gain = trackpad_gain()
+        self._bounce_limit_px = bounce_max_px()
+        self._overshoot_px = 0.0
+        self._bounce_timer = QTimer(self)
+        self._bounce_timer.setSingleShot(False)
+        self._bounce_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._bounce_timer.timeout.connect(self._tick_overshoot_bounce)
         # Sub-pixel remainder carried between trackpad wheel events.
         self._trackpad_accum_px = 0.0
         self._wheel_last_notch_t = 0.0
@@ -498,6 +515,16 @@ class JustifiedGallery(QWidget):
         self._last_scroll_settle_t = 0.0
         self._thumb_first_after_scroll_t = None
         self._thumb_first_after_settle_t = None
+
+        # Hover-expand state. While a tile is grown it is exempt from the
+        # layout passes' geometry reset, which would otherwise snap it back
+        # on the very next pass; see load_visible_images.
+        self._hover_expand_widget = None
+        self._hover_expand_path = None
+        self._hover_expand_base_rect = None
+        self._hover_expand_anim = None
+        self._hover_collapse_anim = None
+        self._hover_expand_pending_path = None
 
         # Defer heavier init to the next event-loop tick to avoid hangs during construction
         self.load_manager = None
@@ -651,6 +678,8 @@ class JustifiedGallery(QWidget):
             w.file_path = path
             w.index = idx
             display_rect = self._content_rect_to_viewport(rect)
+            if self._sync_hover_expanded_geometry(w, display_rect):
+                continue
             w.setGeometry(display_rect)
             w.setFixedSize(display_rect.size())
         for child in self.findChildren(ThumbnailLabel):
@@ -759,7 +788,19 @@ class JustifiedGallery(QWidget):
         """Remove phantom or stale in-flight markers so visible loads can proceed."""
         now = time.time()
         to_remove: list[str] = []
+        lm = self.load_manager
         for path in self._active_tasks:
+            # Distant-queue cancel / flush drops ILM work without task_completed,
+            # so the gallery's parallel map kept counting those CURRENT thumbs
+            # against active_cap until the 4s sweep — visible tiles then sat
+            # blank on low-end machines until a folder reload.
+            if lm is not None and hasattr(lm, "has_active_work_for_path"):
+                try:
+                    if not lm.has_active_work_for_path(path):
+                        to_remove.append(path)
+                        continue
+                except Exception:
+                    pass
             ts = self._active_task_started_ts(path) or now
             if now - ts > max_age_s:
                 to_remove.append(path)
@@ -801,7 +842,148 @@ class JustifiedGallery(QWidget):
 
     def _is_actively_scrolling(self) -> bool:
         """True during an in-progress scroll gesture (trackpad, wheel, or scrollbar)."""
+        if abs(getattr(self, "_overshoot_px", 0.0)) > 0.5:
+            return True
         return (time.time() - self._last_scroll_event_t) < 0.18
+
+    # Qt's "no maximum" sentinel; needed to lift the setFixedSize() pin that
+    # would otherwise refuse the hover animation's geometry changes.
+    _QWIDGETSIZE_MAX = 16777215
+
+    def _hover_expand_enabled(self) -> bool:
+        return _env_true("RAWVIEWER_GALLERY_HOVER_EXPAND", default=True)
+
+    def _expanded_rect(self, base: QRect) -> QRect:
+        """The hovered tile's grown rect: same centre, clamped to the viewport.
+
+        Tiles are absolutely positioned, so growing one overlaps its
+        neighbours instead of reflowing the grid -- which is the point. The
+        clamp keeps an edge tile from growing out of view.
+        """
+        scale = _env_float("RAWVIEWER_GALLERY_HOVER_EXPAND_SCALE", 1.07, minimum=1.0)
+        dw = int(round(base.width() * (scale - 1.0)))
+        dh = int(round(base.height() * (scale - 1.0)))
+        grown = QRect(
+            base.x() - dw // 2, base.y() - dh // 2,
+            base.width() + dw, base.height() + dh,
+        )
+        view = self.rect()
+        if grown.left() < view.left():
+            grown.moveLeft(view.left())
+        if grown.top() < view.top():
+            grown.moveTop(view.top())
+        if grown.right() > view.right():
+            grown.moveRight(view.right())
+        if grown.bottom() > view.bottom():
+            grown.moveBottom(view.bottom())
+        return grown
+
+    def _sync_hover_expanded_geometry(self, widget, display_rect: QRect) -> bool:
+        """Keep an expanded tile expanded across a layout pass.
+
+        Returns True when the caller must NOT apply ``display_rect`` itself.
+        The layout passes reset every visible tile's geometry, which would snap
+        the hovered tile back on the next pass and cancel the animation
+        mid-flight. The tile's underlying rect can still move (a resize
+        reflows the grid), so the base rect is re-recorded here rather than
+        assumed fixed.
+
+        A tile grown while the grid is scrolling would slide around under the
+        cursor, so scrolling collapses it instead.
+        """
+        if getattr(self, "_hover_expand_widget", None) is not widget:
+            return False
+        if self._is_actively_scrolling():
+            self._collapse_hover_expand(immediate=True)
+            widget.setGeometry(display_rect)
+            widget.setFixedSize(display_rect.size())
+            return True
+        self._hover_expand_base_rect = QRect(display_rect)
+        anim = getattr(self, "_hover_expand_anim", None)
+        if anim is not None and anim.state() == QPropertyAnimation.State.Running:
+            return True  # let the animation finish against the new base
+        target = self._expanded_rect(display_rect)
+        if widget.geometry() != target:
+            widget.setGeometry(target)
+        return True
+
+    def _fire_hover_expand(self, path: str, widget) -> None:
+        """Grow the tile the cursor settled on."""
+        if getattr(self, "_hover_expand_pending_path", None) != path:
+            return
+        if self._is_actively_scrolling():
+            return
+        # The widget pool recycles tiles; by now this one may be showing a
+        # different photo entirely.
+        if getattr(widget, "file_path", None) != path:
+            return
+        if getattr(self, "_hover_expand_widget", None) is widget:
+            return
+        self._collapse_hover_expand(immediate=True)
+
+        base = QRect(widget.geometry())
+        self._hover_expand_widget = widget
+        self._hover_expand_path = path
+        self._hover_expand_base_rect = base
+
+        # setFixedSize() pins the widget; release it or the animation is a no-op.
+        widget.setMinimumSize(0, 0)
+        widget.setMaximumSize(self._QWIDGETSIZE_MAX, self._QWIDGETSIZE_MAX)
+        widget.raise_()
+
+        anim = QPropertyAnimation(widget, b"geometry", self)
+        anim.setDuration(_env_int("RAWVIEWER_GALLERY_HOVER_EXPAND_MS", 140, minimum=0))
+        anim.setStartValue(base)
+        anim.setEndValue(self._expanded_rect(base))
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._hover_expand_anim = anim
+        anim.start()
+
+    def _collapse_hover_expand(self, path: Optional[str] = None, immediate: bool = False) -> None:
+        """Return the expanded tile to its layout rect.
+
+        ``path``: only collapse if that photo is the expanded one (so a leave
+        event from a tile the cursor already left cannot cancel a newer hover).
+        """
+        widget = getattr(self, "_hover_expand_widget", None)
+        if widget is None:
+            return
+        if path is not None and getattr(self, "_hover_expand_path", None) != path:
+            return
+
+        anim = getattr(self, "_hover_expand_anim", None)
+        if anim is not None:
+            anim.stop()
+        base = getattr(self, "_hover_expand_base_rect", None)
+        self._hover_expand_widget = None
+        self._hover_expand_path = None
+        self._hover_expand_base_rect = None
+        self._hover_expand_anim = None
+
+        def _restore():
+            try:
+                if base is not None:
+                    widget.setGeometry(base)
+                    # Re-pin: the layout passes assume a fixed-size tile.
+                    widget.setFixedSize(base.size())
+            except RuntimeError:
+                pass  # widget destroyed while collapsing
+
+        if immediate or not self._hover_expand_enabled():
+            _restore()
+            return
+
+        try:
+            back = QPropertyAnimation(widget, b"geometry", self)
+            back.setDuration(_env_int("RAWVIEWER_GALLERY_HOVER_EXPAND_MS", 140, minimum=0))
+            back.setStartValue(QRect(widget.geometry()))
+            back.setEndValue(base)
+            back.setEasingCurve(QEasingCurve.Type.OutCubic)
+            back.finished.connect(_restore)
+            self._hover_collapse_anim = back
+            back.start()
+        except RuntimeError:
+            _restore()
 
     def _on_gallery_thumb_hover(self, widget, *, entered: bool) -> None:
         """Warm the sensor-res decode for a tile the cursor rests on (not scrolls past).
@@ -818,6 +1000,14 @@ class JustifiedGallery(QWidget):
         debounce timer fires) plus a per-tile debounce so a fast mouse
         sweep across many tiles queues nothing: only a tile the cursor
         stays on past the debounce window actually triggers a decode.
+
+        Two debounces, not one. They want different numbers: the decode is
+        expensive and 220ms is what keeps a sweep from queueing a dozen of
+        them, but a visual response at 220ms feels like lag. The expand runs
+        on its own, shorter timer -- long enough to still ignore a sweep,
+        short enough to feel like an answer to the cursor. Both are cancelled
+        by the same leave and the same scroll guard, so they can never
+        disagree about which tile the cursor is on.
         """
         path = getattr(widget, "file_path", None)
         if not path:
@@ -825,9 +1015,22 @@ class JustifiedGallery(QWidget):
         if not entered:
             if getattr(self, "_hover_prefetch_pending_path", None) == path:
                 self._hover_prefetch_pending_path = None
+            if getattr(self, "_hover_expand_pending_path", None) == path:
+                self._hover_expand_pending_path = None
+            self._collapse_hover_expand(path=path)
             return
         if self._is_actively_scrolling():
             return
+
+        if self._hover_expand_enabled():
+            self._hover_expand_pending_path = path
+            expand_ms = _env_int(
+                "RAWVIEWER_GALLERY_HOVER_EXPAND_DELAY_MS", 110, minimum=0
+            )
+            QTimer.singleShot(
+                expand_ms, lambda p=path, w=widget: self._fire_hover_expand(p, w)
+            )
+
         if not _env_true("RAWVIEWER_GALLERY_HOVER_PREFETCH", default=True):
             return
         self._hover_prefetch_pending_path = path
@@ -897,6 +1100,12 @@ class JustifiedGallery(QWidget):
 
     def _clear_widget_thumbnail(self, widget) -> None:
         """Drop stale pixmap/text before reassigning a pooled thumbnail widget."""
+        # Every pool return and every reassignment comes through here, so this
+        # is the one place that guarantees a recycled tile is not still
+        # carrying the previous photo's hover expansion -- which would show
+        # the next photo oversized and pinned above its neighbours.
+        if getattr(self, "_hover_expand_widget", None) is widget:
+            self._collapse_hover_expand(immediate=True)
         widget.clear()
         widget.original_pixmap = None
         widget.setText("")
@@ -2514,12 +2723,7 @@ class JustifiedGallery(QWidget):
                     step = int(self._trackpad_accum_px)
                     self._trackpad_accum_px -= step
                     if step:
-                        sb.setValue(
-                            max(
-                                sb.minimum(),
-                                min(sb.maximum(), sb.value() + step),
-                            )
-                        )
+                        self._nudge_scrollbar(step)
                     self._last_scroll_event_t = time.time()
                     event.accept()
                     return True
@@ -2550,6 +2754,71 @@ class JustifiedGallery(QWidget):
             return True
 
         return super().eventFilter(obj, event)
+
+    def _nudge_scrollbar(self, delta: float) -> None:
+        """Move the gallery, rubber-banding at the first/last row."""
+        from rawviewer_ui.gallery_scroll import apply_scroll_delta, bounce_max_px
+
+        if not self._scroll_area:
+            return
+        sb = self._scroll_area.verticalScrollBar()
+        if sb is None:
+            return
+        limit = getattr(self, "_bounce_limit_px", None)
+        if limit is None:
+            limit = bounce_max_px()
+            self._bounce_limit_px = limit
+        value, overshoot = apply_scroll_delta(
+            float(sb.value()),
+            float(sb.minimum()),
+            float(sb.maximum()),
+            float(delta),
+            float(getattr(self, "_overshoot_px", 0.0)),
+            float(limit),
+        )
+        if int(value) != sb.value():
+            sb.setValue(int(value))
+        self._overshoot_px = overshoot
+        self._apply_overshoot_visual()
+        if abs(overshoot) > 0.5:
+            self._arm_overshoot_bounce()
+
+    def _apply_overshoot_visual(self) -> None:
+        sa = getattr(self, "_scroll_area", None)
+        if sa is None:
+            return
+        w = sa.widget()
+        sb = sa.verticalScrollBar()
+        if w is None or sb is None:
+            return
+        y = -sb.value() + int(round(getattr(self, "_overshoot_px", 0.0)))
+        if w.y() != y:
+            w.move(w.x(), y)
+
+    def _arm_overshoot_bounce(self) -> None:
+        timer = getattr(self, "_bounce_timer", None)
+        if timer is None:
+            return
+        if not timer.isActive():
+            timer.start(8)
+
+    def _tick_overshoot_bounce(self) -> None:
+        from rawviewer_ui.gallery_scroll import bounce_step
+
+        # Keep stretching while the wheel/trackpad is still feeding the edge.
+        if abs(getattr(self, "_wheel_accum_px", 0.0)) >= 1.0:
+            return
+        if (time.time() - getattr(self, "_last_scroll_event_t", 0.0)) < 0.05:
+            return
+        nxt = bounce_step(float(getattr(self, "_overshoot_px", 0.0)))
+        self._overshoot_px = nxt
+        self._apply_overshoot_visual()
+        if nxt == 0.0:
+            timer = getattr(self, "_bounce_timer", None)
+            if timer is not None:
+                timer.stop()
+            if self._scroll_settle_timer is not None:
+                self._scroll_settle_timer.start(80)
 
     def _apply_wheel_scroll_step(self):
         if not self._scroll_area:
@@ -2600,20 +2869,7 @@ class JustifiedGallery(QWidget):
             step = self._wheel_accum_px
         
         self._wheel_accum_px -= step
-
-        current_val = sb.value()
-        new_val = int(current_val + step)
-        
-        # Boundary check: if we hit top/bottom, clear accumulation to stop instantly
-        if (new_val <= sb.minimum() and step < 0) or (new_val >= sb.maximum() and step > 0):
-            sb.setValue(sb.minimum() if step < 0 else sb.maximum())
-            self._wheel_accum_px = 0.0
-            self._wheel_timer.stop()
-            if self._scroll_settle_timer is not None:
-                self._scroll_settle_timer.start(120)
-            return
-
-        sb.setValue(new_val)
+        self._nudge_scrollbar(step)
 
     # --- capture-date bubble while dragging the scrollbar ------------------
 
@@ -2695,6 +2951,8 @@ class JustifiedGallery(QWidget):
 
     def _on_scroll(self, value):
         now = time.time()
+        if abs(getattr(self, "_overshoot_px", 0.0)) > 0.5:
+            self._apply_overshoot_visual()
 
         # Follows the thumb during a drag. Cheap enough to run per tick: it is
         # a binary search over the layout rects plus a dict lookup, and no
@@ -2749,10 +3007,9 @@ class JustifiedGallery(QWidget):
         # than the wheel event: a trackpad emits 60-120 of those a second and
         # re-scoring costs ~2 ms for a few hundred tasks.
         #
-        # The gallery's own cancel diff only runs once scrolling has settled,
-        # which is precisely when the queue is no longer flooded. During a
-        # fast scroll -- when it is -- nothing was being dropped, so the tile
-        # arriving on screen queued behind everything already left behind.
+        # Visible-pass cancel also runs while scrolling, but that pass is
+        # throttled (50–150ms). Re-aim here drops queued work that is already
+        # well behind the viewport so a newly visible tile is not stuck.
         self._reaim_queue_at_viewport()
 
         # Throttle (do NOT restart continuously): allow periodic updates while scrolling.
@@ -2818,10 +3075,16 @@ class JustifiedGallery(QWidget):
             return
         try:
             manager.reprioritise(self._viewport_row_distance)
-            if self._is_scrolling_fast:
+            if self._is_actively_scrolling() or self._is_scrolling_fast:
                 manager.cancel_distant_queued_tasks(
                     self._viewport_row_distance, self._REAIM_CANCEL_DISTANCE
                 )
+                for path in list(self._active_tasks):
+                    try:
+                        if not manager.has_active_work_for_path(path):
+                            self._active_tasks.pop(path, None)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -3291,8 +3554,6 @@ class JustifiedGallery(QWidget):
             self._request_load_visible_images(50)
             return
         actively_scrolling = self._is_actively_scrolling()
-
-        actively_scrolling = self._is_actively_scrolling()
         buffer_screens = (
             _gallery_scroll_buffer_screens()
             if actively_scrolling
@@ -3484,6 +3745,8 @@ class JustifiedGallery(QWidget):
             )
         pass_processed = 0
         pass_budget_exhausted = False
+        sync_base_fetches = 0
+        sync_base_cap = _env_int("RAWVIEWER_GALLERY_SYNC_FETCH_PER_PASS", 2, minimum=0)
         for idx, item in visible_indices_items:
             if (
                 pass_processed > 0
@@ -3512,6 +3775,19 @@ class JustifiedGallery(QWidget):
                 w.setFixedSize(display_rect.size())
                 def _on_thumb_press(e, _w=w):
                     try:
+                        if e.button() == Qt.MouseButton.RightButton:
+                            # file_path is read off the pooled widget at event
+                            # time, so tile recycling cannot stale it.
+                            target_path = getattr(_w, "file_path", None)
+                            pv = self.parent_viewer
+                            if target_path and pv is not None and hasattr(
+                                pv, "_on_gallery_context_menu_requested"
+                            ):
+                                e.accept()
+                                pv._on_gallery_context_menu_requested(
+                                    target_path, e.globalPosition().toPoint()
+                                )
+                                return
                         if e.button() == Qt.MouseButton.LeftButton:
                             e.accept()
                             target_path = getattr(_w, "file_path", None)
@@ -3592,10 +3868,11 @@ class JustifiedGallery(QWidget):
                 w.file_path = path
                 w.index = idx
                 display_rect = self._content_rect_to_viewport(rect)
-                if w.geometry() != display_rect:
-                    w.setGeometry(display_rect)
-                if w.size() != display_rect.size():
-                    w.setFixedSize(display_rect.size())
+                if not self._sync_hover_expanded_geometry(w, display_rect):
+                    if w.geometry() != display_rect:
+                        w.setGeometry(display_rect)
+                    if w.size() != display_rect.size():
+                        w.setFixedSize(display_rect.size())
 
             cache_hit = False
             # Account for Device Pixel Ratio (Retina/4K)
@@ -3663,7 +3940,12 @@ class JustifiedGallery(QWidget):
                         # Re-fetching every 16ms pass cost ~5ms/tile and starved
                         # the rest of the viewport after a cold section jump.
                         pass
+                    elif sync_base_fetches >= sync_base_cap:
+                        # Rest of the viewport goes async so this pass stays
+                        # inside the frame budget after a cold settle.
+                        pass
                     else:
+                        sync_base_fetches += 1
                         try:
                             max_dim = max(physical_size.width(), physical_size.height())
 
@@ -3948,8 +4230,9 @@ class JustifiedGallery(QWidget):
 
         # If everything visible/prefetched is already loaded, schedule idle background preloading
         if scheduled_tasks == 0 and len(self._active_tasks) == 0:
-            if self._visible_viewport_needs_thumbnails():
-                self._request_load_visible_images(300)
+            holes = len(visible_indices_items) > len(self._visible_widgets or {})
+            if holes or self._visible_viewport_needs_thumbnails():
+                self._request_load_visible_images(16 if holes else 300)
             else:
                 self._idle_preload_timer.start(1000)  # 1 second of sustained idle
         elif scheduled_tasks == 0 and len(self._active_tasks) > 0:
@@ -3977,6 +4260,10 @@ class JustifiedGallery(QWidget):
             from common_image_loader import io_pressure_active
 
             if io_pressure_active():
+                # Visible CURRENT tiles still load; only idle fill yields.
+                # Restart so fill resumes when the pressure window ends —
+                # a bare return left the gallery frozen until a folder reload.
+                self._idle_preload_timer.start(2000)
                 return
         except Exception:
             pass

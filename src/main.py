@@ -1083,8 +1083,16 @@ from PyQt6.QtGui import (QPixmap, QImage, QAction, QKeySequence, QShortcut, QDra
 safe_print("PyQt6 imported successfully", flush=True)
 
 
-def _qta_icon(name: str, *, color: str = theme.INK_MUTED) -> QIcon:
-    """qtawesome icon with a stable PyQt6 QIcon type for the type checker."""
+def _qta_icon(name: str, *, color: str = theme.INK_MUTED, size: int = 20) -> QIcon:
+    """Chrome line icon when we have one; qtawesome only as a last resort."""
+    try:
+        from rawviewer_ui.chrome_icons import icon as chrome_icon
+
+        ic = chrome_icon(name, color=color, size=size)
+        if ic is not None and not ic.isNull():
+            return ic
+    except Exception:
+        pass
     if qta is None:
         return QIcon()
     return cast(QIcon, qta.icon(name, color=color))
@@ -6455,14 +6463,74 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
 
+    def _compare_pane_covers_sensor(self, path: str, view) -> bool:
+        if not path or view is None or not view.has_pixmap():
+            return False
+        try:
+            from common_image_loader import image_covers_sensor_resolution
+
+            return image_covers_sensor_resolution(
+                int(view._img_w),
+                int(view._img_h),
+                self._compare_exif_for_path(path),
+            )
+        except Exception:
+            return self._compare_pane_max_dim(view) >= 3000
+
+    def _compare_ensure_full_res_for_visible_panes(self) -> None:
+        """Request sensor-res buffers for the two on-screen panes when zoomed."""
+        session = getattr(self, "_comparison_session", None)
+        if session is None or getattr(self, "view_mode", "") != "compare":
+            return
+        for path, view in (
+            (session.select, getattr(self, "compare_select_view", None)),
+            (session.candidate, getattr(self, "compare_candidate_view", None)),
+        ):
+            if not path:
+                continue
+            if self._compare_pane_covers_sensor(path, view):
+                continue
+            self._queue_compare_pane_decode(path)
+
     def _queue_compare_session_decodes(self) -> None:
         session = getattr(self, "_comparison_session", None)
         if session is None:
             return
-        for path in session.visible_members():
-            if path:
-                self._ensure_compare_exif_ready(path)
-                self._queue_compare_pane_decode(path)
+        # Only the two on-screen photos take CURRENT full-res slots. Queuing
+        # the whole burst used to fill the small interactive pool so neither
+        # visible pane ever reached sensor resolution (common on low-end).
+        seen = set()
+        for path in (session.select, session.candidate):
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            self._ensure_compare_exif_ready(path)
+            self._queue_compare_pane_decode(path)
+        nxt = None
+        try:
+            nxt = (session.queue or [None])[0]
+        except Exception:
+            nxt = None
+        if nxt and nxt not in seen:
+            try:
+                raw_limit = int(getattr(self.image_manager, "_raw_load_limit", 4) or 4)
+            except Exception:
+                raw_limit = 4
+            # Two on-screen full decodes already fill a low-end RAW slot budget.
+            if raw_limit > 2:
+                try:
+                    from image_load_manager import Priority
+
+                    self._ensure_compare_exif_ready(nxt)
+                    self.image_manager.load_image(
+                        nxt,
+                        priority=Priority.PRELOAD_NEXT,
+                        cancel_existing=False,
+                        use_full_resolution=True,
+                        stages={"exif", "thumbnail", "full"},
+                    )
+                except Exception:
+                    pass
 
     def _compare_upgrade_view_image(self, file_path: str, image) -> bool:
         """Apply a higher-resolution buffer to the matching compare pane, if any."""
@@ -6505,10 +6573,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._compare_update_focus_overlay_for_view(view)
             return True
         preserve = not view.is_fit_mode()
-        view.set_pixmap(pm, preserve_view=preserve)
+        # set_pixmap emits zoomChanged. Without a guard, mode-A sync copies
+        # that pane's new fit-relative zoom onto the other pane — which is
+        # still a preview — so the two zooms jump apart and the preview never
+        # looks like 100% of the photo.
+        self._compare_sync_guard = True
+        try:
+            view.set_pixmap(pm, preserve_view=preserve)
+        finally:
+            self._compare_sync_guard = False
         if getattr(self, "_compare_focus_outline_active", False):
             self._compare_update_focus_overlay_for_view(view)
         self._compare_refresh_stale_pane_orientations(exclude_path=file_path)
+        if preserve and not self._compare_pane_covers_sensor(file_path, view):
+            self._queue_compare_pane_decode(file_path)
         return True
 
     def _compare_refresh_stale_pane_orientations(self, *, exclude_path: str | None = None) -> None:
@@ -6769,6 +6847,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     view.fit_to_window()
         finally:
             self._compare_sync_guard = False
+        self._compare_ensure_full_res_for_visible_panes()
 
     def _compare_toggle_zoom_mode_a(self) -> None:
         if getattr(self, "_compare_sync_mode", "A") != "A":
@@ -6837,6 +6916,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._compare_sync_guard = False
         # Panes land on different centers; pause mirror sync until fit again.
         self._compare_sync_paused = True
+        self._compare_ensure_full_res_for_visible_panes()
 
     def _compare_apply_focus_sync_mode(self) -> None:
         select_view = self.compare_select_view
@@ -6883,6 +6963,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         if not source_view.has_pixmap() or not target_view.has_pixmap():
             return
+        a = max(int(source_view._img_w), int(source_view._img_h))
+        b = max(int(target_view._img_w), int(target_view._img_h))
+        if a > 0 and b > 0 and max(a, b) / max(1, min(a, b)) > 1.25:
+            # Preview vs sensor-res: copying fit-relative zoom misaligns the crop.
+            return
         relative = self._compare_relative_zoom(source_view)
         u, v = self._compare_normalized_viewport_center(source_view)
         self._compare_sync_guard = True
@@ -6899,6 +6984,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
     def _on_compare_zoom_changed(self, source_view) -> None:
         if getattr(self, "view_mode", "") != "compare":
             return
+        if source_view is not None and not source_view.is_fit_mode():
+            self._compare_ensure_full_res_for_visible_panes()
         if getattr(self, "_compare_sync_guard", False):
             return
         if getattr(self, "_compare_sync_mode", "A") == "B":
@@ -7177,6 +7264,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not file_path:
             return
         try:
+            mgr = getattr(self, "image_manager", None)
+            if mgr is not None and hasattr(mgr, "has_active_full_stage_for_path"):
+                if mgr.has_active_full_stage_for_path(file_path):
+                    return
             preview = self.image_cache.get_preview_memory_only(file_path)
             exif = self.image_cache.get_exif(file_path)
             if preview is not None and image_covers_sensor_resolution(
@@ -7674,6 +7765,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             from image_load_manager import Priority
             if hasattr(lm, "cancel_tasks_by_priority"):
                 lm.cancel_tasks_by_priority(Priority.PRELOAD_NEXT)
+                lm.cancel_tasks_by_priority(Priority.PRELOAD_PREV)
                 lm.cancel_tasks_by_priority(Priority.BACKGROUND)
         except Exception:
             pass
@@ -17321,6 +17413,20 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             except Exception:
                 pass
         self.current_file_path = file_path
+        # Drop queued gallery thumbs immediately so the foreground decode is
+        # not stuck behind tiles the click just left. _show_single_view does
+        # this again; doing it here frees workers during the instant paint.
+        try:
+            mgr = getattr(self, "image_manager", None)
+            if mgr is not None and hasattr(mgr, "cancel_gallery_tasks"):
+                mgr.cancel_gallery_tasks()
+            gj = getattr(self, "gallery_justified", None)
+            if gj is not None:
+                gj._background_loading_active = False
+                if hasattr(gj, "_load_queue") and gj._load_queue is not None:
+                    gj._load_queue.clear()
+        except Exception:
+            pass
         
         # Mark that we're loading from gallery view - this will trigger full resolution load
         self._loading_from_gallery = True
@@ -27269,10 +27375,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         menu.exec(pos)
 
     def _show_gallery_open_share_menu(self, paths: List[str]) -> None:
-        """Open in another app and/or share for one or more gallery targets."""
+        """Open in another app and/or share for one or more gallery targets.
+
+        Anchored under the share button. The right-click menu shares these
+        actions via _populate_share_open_actions but anchors at the cursor --
+        see _show_gallery_context_menu.
+        """
+        menu = QMenu(self)
+        self._populate_share_open_actions(menu, list(paths))
+        self._populate_stitch_actions(menu, list(paths))
+        self._exec_share_anchor_menu(menu)
+
+    def _populate_share_open_actions(self, menu, paths: List[str]) -> None:
+        """Open-with and share entries, shared by the share button and right-click."""
         paths = list(paths)
         n = len(paths)
-        menu = QMenu(self)
 
         if sys.platform == "win32":
             last_exe = str(
@@ -27342,6 +27459,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
                 menu.addAction(copy_action)
 
+    def _populate_stitch_actions(self, menu, paths: List[str]) -> None:
+        """Stitch & Merge submenu. Only meaningful for a multi-photo selection."""
+        paths = list(paths)
+        n = len(paths)
         if n >= 2:
             menu.addSeparator()
             stitch_menu = QMenu("🌌 Stitch & Merge", menu)
@@ -27359,6 +27480,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             stitch_menu.addAction(hdr_act)
 
             hdr_pano_act = QAction("🌅 Panorama HDR Merge...", self)
+            hdr_pano_act.setEnabled(n >= 4)
+            if n < 4:
+                hdr_pano_act.setToolTip(
+                    "Needs at least 4 photos (two or more bracketed panels)"
+                )
             hdr_pano_act.triggered.connect(
                 lambda _checked=False, ps=list(paths): self._open_hdr_panorama_dialog("hdr_panorama", ps)
             )
@@ -27372,7 +27498,94 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
             menu.addMenu(stitch_menu)
 
-        self._exec_share_anchor_menu(menu)
+    def _show_gallery_context_menu(self, paths: List[str], global_pos) -> None:
+        """Right-click menu for the gallery, anchored at the cursor.
+
+        Not _exec_share_anchor_menu: that anchors under the share button, which
+        is right for the share flow and wrong for a context menu.
+        """
+        menu = self._build_gallery_context_menu(paths)
+        if menu is not None:
+            menu.exec(global_pos)
+
+    def _build_gallery_context_menu(self, paths: List[str]):
+        """The gallery right-click menu, built but not shown.
+
+        Ordering is by how recoverable each action is: open/share, then rating,
+        then the multi-photo merges, and the two that remove a photo from the
+        folder last behind a separator. Both of those confirm before acting.
+        """
+        paths = [p for p in list(paths) if p]
+        if not paths:
+            return None
+        n = len(paths)
+        menu = QMenu(self)
+
+        header = QAction(
+            f"{n} photos selected" if n > 1 else os.path.basename(paths[0]), self
+        )
+        header.setEnabled(False)
+        menu.addAction(header)
+        menu.addSeparator()
+
+        self._populate_share_open_actions(menu, paths)
+
+        menu.addSeparator()
+        rate_menu = QMenu("⭐ Rate", menu)
+        for stars in (5, 4, 3, 2, 1):
+            act = QAction("⭐" * stars, self)
+            act.triggered.connect(
+                lambda _checked=False, r=stars: self.rate_gallery_selection(r)
+            )
+            rate_menu.addAction(act)
+        rate_menu.addSeparator()
+        clear_act = QAction("Clear rating", self)
+        clear_act.triggered.connect(lambda _checked=False: self.rate_gallery_selection(0))
+        rate_menu.addAction(clear_act)
+        menu.addMenu(rate_menu)
+
+        self._populate_stitch_actions(menu, paths)
+
+        menu.addSeparator()
+        discard_act = QAction(
+            f"Move {n} to Discard" if n > 1 else "Move to Discard", self
+        )
+        discard_act.triggered.connect(lambda _checked=False: self.discard_gallery_selection())
+        menu.addAction(discard_act)
+
+        delete_act = QAction(f"Delete {n}…" if n > 1 else "Delete…", self)
+        delete_act.triggered.connect(lambda _checked=False: self.delete_gallery_selection())
+        menu.addAction(delete_act)
+
+        return menu
+
+    def _on_gallery_context_menu_requested(self, file_path: str, global_pos) -> None:
+        """Gallery tile right-clicked.
+
+        Right-clicking outside the selection makes that photo the selection
+        first, the way every file manager behaves -- otherwise the menu would
+        say one thing and Delete would act on something else entirely.
+        """
+        if not file_path:
+            return
+        try:
+            selected = self._gallery_selected_canonical_paths()
+        except Exception:
+            selected = []
+        canonical = os.path.normcase(os.path.abspath(file_path))
+        in_selection = any(
+            os.path.normcase(os.path.abspath(p)) == canonical for p in selected
+        )
+        if not in_selection:
+            try:
+                self._clear_gallery_selection()
+                self._gallery_toggle_path_selection(file_path)
+                selected = self._gallery_selected_canonical_paths()
+            except Exception:
+                selected = []
+            if not selected:
+                selected = [file_path]
+        self._show_gallery_context_menu(selected, global_pos)
 
     def _open_hdr_panorama_dialog(self, mode: str, paths: List[str]) -> None:
         """Launch the HDR / Panorama tuning dialog and process selected images."""
@@ -27396,9 +27609,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         fix_parallax = (
             dlg.should_correct_parallax() if hasattr(dlg, "should_correct_parallax") else True
         )
+        group_size = dlg.get_group_size() if hasattr(dlg, "get_group_size") else None
+        # Whatever the user settled on in the tuning preview, applied to the
+        # full-resolution merge.
+        image_weights = dlg.get_image_weights() if hasattr(dlg, "get_image_weights") else None
+        focus_points = dlg.get_focus_points() if hasattr(dlg, "get_focus_points") else None
 
         self._start_hdr_panorama_worker(
-            mode, active_paths, auto_crop, weights, do_align, fix_parallax
+            mode, active_paths, auto_crop, weights, do_align, fix_parallax, group_size,
+            image_weights, focus_points,
         )
 
     def _start_hdr_panorama_worker(
@@ -27409,6 +27628,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         weights: dict,
         do_align: bool = True,
         fix_parallax: bool = True,
+        group_size: Optional[int] = None,
+        image_weights: Optional[List[float]] = None,
+        focus_points: Optional[List[tuple]] = None,
     ) -> None:
         """Run stitching in a background thread."""
         # One merge at a time: a second launch would overwrite _stitch_signals
@@ -27443,23 +27665,91 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 merge_hdr_panorama,
                 stitch_panorama,
                 align_hdr_images,
+                to_display_referred,
                 StitchResult,
             )
-            processor = UnifiedImageProcessor()
-            images = []
-            valid_paths = []
-            for p in paths:
-                base = processor.decode_raw_edit_base(p, use_full_resolution=False)
-                if base is not None:
-                    images.append(base)
-                    valid_paths.append(p)
-
-            if len(images) < 2:
-                return False, "Failed to decode edit base for selected photos.", valid_paths
 
             def update_progress(pct, msg):
                 # Cross-thread: emit to the GUI thread, never touch the widget.
                 signals.progress.emit(f"{msg} ({pct}%)")
+
+            processor = UnifiedImageProcessor()
+
+            def decode_all(full_res: bool):
+                """Decode every source and convert it to the merge domain.
+
+                The edit base is scene-linear; every engine downstream is built
+                for display-referred data (see raw_stitching's module
+                docstring), and the output is written as an ordinary image
+                file, so the BT.709 encode happens once, here. Encoding to
+                uint16 also halves what a full-resolution set costs in RAM
+                versus the float32 base.
+                """
+                out_imgs, out_paths = [], []
+                for i, p in enumerate(paths):
+                    update_progress(
+                        int(8 * i / max(1, len(paths))),
+                        f"Decoding {i + 1}/{len(paths)}"
+                        + (" (full resolution)" if full_res else ""),
+                    )
+                    base = processor.decode_raw_edit_base(p, use_full_resolution=full_res)
+                    if base is not None:
+                        out_imgs.append(to_display_referred(base))
+                        out_paths.append(p)
+                        del base
+                return out_imgs, out_paths
+
+            def fits_in_memory(h, w):
+                """Can the whole set be merged at this frame size?
+
+                Checked off the FIRST frame, before the rest are decoded -- a
+                guard that only reports after N full-resolution frames are
+                already resident has let the spike it exists to prevent happen.
+                Estimate: uint16 RGB per frame, x3 for the fusion's working
+                copies, against 70% of free RAM.
+                """
+                need = len(paths) * h * w * 3 * 2 * 3.0
+                try:
+                    import psutil
+
+                    available = float(psutil.virtual_memory().available)
+                except Exception:
+                    return True, 0.0, 0.0
+                return need <= available * 0.7, need, available
+
+            # Merges used to run on the half-size editing base, so a 45MP body
+            # produced an ~11MP "final". Full resolution is the default now,
+            # falling back to half for a set too large for the machine rather
+            # than taking the app down with it.
+            update_progress(1, "Decoding 1/%d (full resolution)" % len(paths))
+            probe = processor.decode_raw_edit_base(paths[0], use_full_resolution=True)
+            full_res = True
+            if probe is not None:
+                ph, pw = probe.shape[:2]
+                ok, need, available = fits_in_memory(ph, pw)
+                if not ok:
+                    full_res = False
+                    logging.getLogger(__name__).warning(
+                        "[STITCH] full-res merge needs ~%.1f GB of %.1f GB available; "
+                        "falling back to half resolution", need / 1e9, available / 1e9,
+                    )
+                    stack_warnings.append(
+                        f"Merged at half resolution: {len(paths)} frames at "
+                        f"{pw}x{ph} would need about {need / 1e9:.1f} GB and only "
+                        f"{available / 1e9:.1f} GB is free."
+                    )
+            del probe  # decode_all re-reads it; full-res bases are not cached
+
+            images, valid_paths = decode_all(full_res=full_res)
+
+            if len(images) < 2:
+                return False, "Failed to decode edit base for selected photos.", valid_paths
+
+            from rawviewer_ui.merge_tuning import realign_tuning_to_decoded
+
+            image_weights, focus_points = realign_tuning_to_decoded(
+                paths, valid_paths, image_weights, focus_points
+            )
 
             if mode == "focus_stack":
                 from focus_stacking import focus_stack
@@ -27471,22 +27761,44 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     local_align=fix_parallax,
                     auto_crop=auto_crop,
                     progress_callback=update_progress,
+                    frame_weights=image_weights,
+                    focus_points=focus_points,
                 )
                 if getattr(res, "alignment_warnings", None):
                     stack_warnings.extend(res.alignment_warnings)
             elif mode == "hdr":
-                aligned, _ = align_hdr_images(images)
+                aligned = images
+                if do_align:
+                    update_progress(20, "Aligning handheld exposures…")
+                    aligned, align_ok = align_hdr_images(images)
+                    if not align_ok:
+                        stack_warnings.append(
+                            "Auto-align could not register these exposures; they were "
+                            "merged as shot. Handheld frames may show doubled edges."
+                        )
+                update_progress(45, "Fusing exposures…")
                 res_img = merge_hdr_exposure_fusion(
                     aligned,
                     highlight_weight=weights.get("highlight", 1.0),
                     shadow_weight=weights.get("shadow", 1.0),
                     midtone_weight=weights.get("midtone", 1.0),
+                    image_weights=image_weights,
                 )
+                update_progress(95, "Finalizing HDR merge…")
                 res = StitchResult(success=True, image=res_img)
             elif mode == "panorama":
                 res = stitch_panorama(images, paths=valid_paths, auto_crop=auto_crop, progress_callback=update_progress)
             else:
-                res = merge_hdr_panorama(images, paths=valid_paths, weights=weights, auto_crop=auto_crop, progress_callback=update_progress)
+                res = merge_hdr_panorama(
+                    images,
+                    paths=valid_paths,
+                    weights=weights,
+                    auto_crop=auto_crop,
+                    group_size=group_size,
+                    align=do_align,
+                    image_weights=image_weights,
+                    progress_callback=update_progress,
+                )
 
             if not res.success or res.image is None:
                 return False, res.error_message or "Stitching failed", res.rejected_paths
@@ -27503,9 +27815,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             out_name = f"{prefix}_{timestamp}.tif"
             out_path = os.path.join(first_dir, out_name)
 
-            if res.image.dtype == np.uint8:
-                save_img = cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR)
-            elif res.image.dtype == np.uint16:
+            # Display-referred since decode_all encoded the sources, so this
+            # writes an ordinary image file: the gallery thumbnail, an external
+            # editor and the merge itself finally agree on how bright it is.
+            # (It used to be written scene-linear, which rendered an 18% grey at
+            # 41/255 in browse and 46/255 in Photoshop against the 118 it is.)
+            if res.image.dtype in (np.uint8, np.uint16):
                 save_img = cv2.cvtColor(res.image, cv2.COLOR_RGB2BGR)
             else:
                 save_img = cv2.cvtColor((np.clip(res.image, 0.0, 1.0) * 65535.0).astype(np.uint16), cv2.COLOR_RGB2BGR)
@@ -27546,9 +27861,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     f"Successfully created {os.path.basename(msg)}", 4000
                 )
             if warnings:
+                # Not "Focus Stack" any more: alignment fallbacks and the
+                # half-resolution memory fallback raise notes on every mode.
                 QMessageBox.information(
                     self,
-                    "Focus Stack — Alignment Notes",
+                    "Merge Complete — Notes",
                     os.path.basename(msg)
                     + " was created, with:\n\n• "
                     + "\n• ".join(warnings),
@@ -31463,7 +31780,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     next_file, priority=Priority.PRELOAD_NEXT, zoomed=zoomed
                 )
                 continue
-            if self.image_cache.get_thumbnail(next_file) is not None:
+            if self.image_cache.has_warm_thumbnail_in_memory(next_file):
                 continue
             cached_item, _cache_type = check_memory_cache_for_image(
                 next_file, use_full_resolution=False
@@ -31488,7 +31805,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     prev_file, priority=Priority.PRELOAD_PREV, zoomed=zoomed
                 )
                 continue
-            if self.image_cache.get_thumbnail(prev_file) is not None:
+            if self.image_cache.has_warm_thumbnail_in_memory(prev_file):
                 continue
             cached_item, _cache_type = check_memory_cache_for_image(
                 prev_file, use_full_resolution=False
@@ -32019,17 +32336,46 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         sb.setValue(nval)
         return True
 
-    def rate_current_image(self, rating: int):
-        """Set or clear the rating of the active image and update caches."""
+    def rate_gallery_selection(self, rating: int) -> None:
+        """Rate every photo selected in the gallery.
+
+        The gallery had no way to rate at all -- the 0-5 keys are handled only
+        in single view -- so this is the multi-photo path behind the right-click
+        menu. The gallery repaint and the status message are hoisted out of the
+        loop: per file they would rebuild the badges once per photo, which on a
+        fifty-photo selection is fifty full refreshes of the same grid.
+        """
         if rating < 0 or rating > 5:
             return
-            
-        path = getattr(self, "current_file_path", None)
-        if not path or not os.path.isfile(path):
-            self.status_bar.showMessage("No active image to rate", 2000)
+        paths = [p for p in self._gallery_selected_canonical_paths() if os.path.isfile(p)]
+        if not paths:
+            self.status_bar.showMessage("No images selected in gallery", 2500)
             return
 
-        # 1. Update rating in memory/persistent EXIF cache
+        failed = 0
+        for path in paths:
+            if not self._apply_rating_to_path(path, rating):
+                failed += 1
+
+        self._bump_gallery_rating_presence_epoch()
+        self._refresh_rating_visuals_for_paths(paths)
+
+        stars_str = "⭐" * rating if rating > 0 else "cleared"
+        noun = "photo" if len(paths) == 1 else "photos"
+        self.status_bar.showMessage(
+            f"Rating {stars_str} applied to {len(paths)} {noun}"
+            + (f" ({failed} could not be saved)" if failed else ""),
+            3000,
+        )
+        self.schedule_save_session_state()
+
+    def _apply_rating_to_path(self, path: str, rating: int) -> bool:
+        """Write one photo's rating to the EXIF cache and its XMP sidecar.
+
+        Returns False if the sidecar write failed (the in-memory rating is
+        still set, but it would not survive a restart). Deliberately does no
+        repainting -- callers batch that, see rate_gallery_selection.
+        """
         exif_data = self.image_cache.get_exif(path)
         if exif_data is None:
             exif_data = {
@@ -32039,45 +32385,54 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 'exif_data': {},
                 'capture_time': None,
                 'original_width': None,
-                'original_height': None
+                'original_height': None,
             }
         else:
             exif_data = exif_data.copy()
-            
+
         exif_data['rating'] = rating
         if 'exif_data' in exif_data and isinstance(exif_data['exif_data'], dict):
             exif_data['exif_data'] = exif_data['exif_data'].copy()
             exif_data['exif_data']['rating'] = rating
-            
         self.image_cache.put_exif(path, exif_data)
 
-        # 1b. Persist to the XMP sidecar so the rating survives a restart
-        # (in-memory/EXIF-cache updates above are lost when the app closes).
+        if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
+            self._gallery_bulk_metadata.setdefault(path, {})['rating'] = rating
+
+        gj = getattr(self, "gallery_justified", None)
+        if gj is not None and hasattr(gj, "_metadata_cache"):
+            gj._metadata_cache.setdefault(path, {})['rating'] = rating
+
+        bar = self._filmstrip_bar()
+        if bar is not None and hasattr(bar, "_metadata_cache"):
+            bar._metadata_cache.setdefault(path, {})['rating'] = rating
+
         try:
             from raw_adjustments import write_rating_for_file
 
             write_rating_for_file(path, rating)
+            return True
         except Exception:
             logging.getLogger(__name__).warning(
                 "Failed to write rating to XMP sidecar for %s", path, exc_info=True
             )
-            self.status_bar.showMessage("Rating set, but couldn't save to XMP sidecar", 3000)
+            return False
 
-        # 2. Update local caches (bulk metadata and justified gallery)
-        if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
-            if path not in self._gallery_bulk_metadata:
-                self._gallery_bulk_metadata[path] = {}
-            self._gallery_bulk_metadata[path]['rating'] = rating
-        self._bump_gallery_rating_presence_epoch()
-
+    def _refresh_rating_visuals_for_paths(self, paths: List[str]) -> None:
+        """Repaint rating badges once for a batch of newly-rated photos."""
         gj = getattr(self, "gallery_justified", None)
-        if gj is not None and hasattr(gj, "_metadata_cache"):
-            if path not in gj._metadata_cache:
-                gj._metadata_cache[path] = {}
-            gj._metadata_cache[path]['rating'] = rating
-            if hasattr(gj, "refresh_visible_tile_for_path"):
+        if gj is not None:
+            for path in paths:
+                if hasattr(gj, "refresh_visible_tile_for_path"):
+                    try:
+                        gj.refresh_visible_tile_for_path(path)
+                    except Exception:
+                        pass
+            # refresh_visible_tile_for_path only repaints the pixmap; badges
+            # are a separate sync pass, same as bookmark/burst/edited.
+            if hasattr(gj, "refresh_gallery_rating_visuals"):
                 try:
-                    gj.refresh_visible_tile_for_path(path)
+                    gj.refresh_gallery_rating_visuals()
                 except Exception:
                     pass
             elif hasattr(gj, "update_visible_images"):
@@ -32085,32 +32440,40 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     gj.update_visible_images()
                 except Exception:
                     pass
-            # refresh_visible_tile_for_path only repaints the pixmap (e.g.
-            # after rotation); badges are a separate sync pass, same as
-            # bookmark/burst/edited.
-            if hasattr(gj, "refresh_gallery_rating_visuals"):
-                try:
-                    gj.refresh_gallery_rating_visuals()
-                except Exception:
-                    pass
 
         bar = self._filmstrip_bar()
-        if bar is not None and hasattr(bar, "_metadata_cache"):
-            if path not in bar._metadata_cache:
-                bar._metadata_cache[path] = {}
-            bar._metadata_cache[path]['rating'] = rating
-            if hasattr(bar, "refresh_cell_for_path"):
-                try:
-                    bar.refresh_cell_for_path(path)
-                except Exception:
-                    pass
-            elif hasattr(bar, "update"):
+        if bar is not None:
+            for path in paths:
+                if hasattr(bar, "refresh_cell_for_path"):
+                    try:
+                        bar.refresh_cell_for_path(path)
+                    except Exception:
+                        pass
+            if not hasattr(bar, "refresh_cell_for_path") and hasattr(bar, "update"):
                 bar.update()
 
-        # 4. Update visual ratings display and status bar
+    def rate_current_image(self, rating: int):
+        """Set or clear the rating of the active image and update caches."""
+        if rating < 0 or rating > 5:
+            return
+
+        path = getattr(self, "current_file_path", None)
+        if not path or not os.path.isfile(path):
+            self.status_bar.showMessage("No active image to rate", 2000)
+            return
+
+        # Same per-file work the gallery's multi-select rating does; only the
+        # single-view star display and the message differ.
+        saved = self._apply_rating_to_path(path, rating)
+        self._bump_gallery_rating_presence_epoch()
+        self._refresh_rating_visuals_for_paths([path])
         self._update_single_view_rating_display(rating)
-        stars_str = "⭐" * rating if rating > 0 else "Cleared"
-        self.status_bar.showMessage(f"Rating set to: {stars_str}", 2000)
+
+        if not saved:
+            self.status_bar.showMessage("Rating set, but couldn't save to XMP sidecar", 3000)
+        else:
+            stars_str = "⭐" * rating if rating > 0 else "Cleared"
+            self.status_bar.showMessage(f"Rating set to: {stars_str}", 2000)
 
     def _update_single_view_rating_display(self, rating: int):
         """Update the bottom-bar star rating control for the current image."""
@@ -36115,6 +36478,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             gj = getattr(self, "gallery_justified", None)
             if gj is not None and hasattr(gj, "_idle_preload_timer"):
                 gj._idle_preload_timer.stop()
+            if gj is not None and hasattr(gj, "_request_load_visible_images"):
+                gj._request_load_visible_images(400)
         except Exception:
             pass
 

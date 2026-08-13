@@ -1149,7 +1149,13 @@ class PersistentThumbnailCache:
         self._file_stats_cache = {}
         self._file_stats_cache_lock = threading.RLock()
         self._file_stats_cache_max_size = 1000
-        
+
+        # Paths whose moved-entry recovery already came up empty; see
+        # _rekey_moved_entry. Keeps the scroll path to one extra query per
+        # uncached file, ever.
+        self._rekey_misses: set = set()
+        self._rekey_lock = threading.RLock()
+
         self._init_db()
     
     def _get_connection(self):
@@ -1186,10 +1192,76 @@ class PersistentThumbnailCache:
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
                 """)
+                self._ensure_identity_index(conn)
                 conn.commit()
             except Exception:
                 pass
-    
+
+    @staticmethod
+    def _ensure_identity_index(conn) -> None:
+        """Index the (size, mtime) identity used to recognise a moved file."""
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_file_identity "
+                "ON thumbnail_cache(file_size, file_mtime)"
+            )
+        except Exception:
+            pass
+
+    def _rekey_moved_entry(self, file_path: str, key: str, file_size: int, file_mtime: float):
+        """Recover this file's cache entry from its old path after a move.
+
+        Entries are keyed by path, so moving or renaming a folder in Finder or
+        Explorer orphans every thumbnail, grid tile and preview in it and the
+        whole folder is decoded again from the RAW. The size and mtime a move
+        preserves are already stored, so the entry can be found and re-pointed.
+
+        Returns the row's ``cache_file`` on success, else None.
+
+        This runs ONLY after the path lookup missed, and a path that finds
+        nothing is remembered so a genuinely-uncached file pays one indexed
+        empty SELECT once and never again -- this is the gallery scroll path,
+        where an unconditional second query per tile would be felt.
+        """
+        with self._rekey_lock:
+            if key in self._rekey_misses:
+                return None
+        try:
+            conn = self._get_connection()
+            rows = conn.execute(
+                "SELECT file_path, cache_file FROM thumbnail_cache "
+                "WHERE file_size = ? AND file_mtime = ?",
+                (file_size, file_mtime),
+            ).fetchall()
+            basename = os.path.basename(file_path).lower()
+            for old_path, cache_file in rows:
+                if os.path.basename(str(old_path)).lower() != basename:
+                    continue
+                # Both present means this is a COPY, not a move; stealing the
+                # original's entry would evict a cache that is still in use.
+                if os.path.exists(str(old_path)):
+                    continue
+                jailed = self._jailed_cache_file(cache_file)
+                if not jailed or not os.path.exists(jailed):
+                    continue
+                with self.lock:
+                    try:
+                        conn.execute(
+                            "UPDATE thumbnail_cache SET file_path = ? WHERE file_path = ?",
+                            (key, old_path),
+                        )
+                        conn.commit()
+                    except sqlite3.IntegrityError:
+                        continue
+                return jailed
+        except Exception:
+            pass
+        with self._rekey_lock:
+            if len(self._rekey_misses) > 20000:
+                self._rekey_misses.clear()
+            self._rekey_misses.add(key)
+        return None
+
     def _get_file_hash(self, file_path: str) -> Tuple[int, float]:
         """Get file size and modification time for cache validation."""
         # Check cache first to avoid repeated os.stat() calls
@@ -1240,6 +1312,8 @@ class PersistentThumbnailCache:
             if row and row[0] == file_size and row[1] == file_mtime:
                 cache_file = self._jailed_cache_file(row[2])
                 return bool(cache_file) and os.path.exists(cache_file)
+            if row is None:
+                return bool(self._rekey_moved_entry(file_path, key, file_size, file_mtime))
         except Exception:
             pass
         return False
@@ -1269,9 +1343,15 @@ class PersistentThumbnailCache:
                 else:
                     # Cache file missing, remove from database
                     self.remove(file_path)
+            elif row is None:
+                # No row for this path -- the file may have been moved here.
+                recovered = self._rekey_moved_entry(file_path, key, file_size, file_mtime)
+                if recovered:
+                    with open(recovered, 'rb') as f:
+                        return f.read()
         except Exception:
             pass
-        
+
         return None
     
     def put(self, file_path: str, jpeg_data: bytes) -> bool:
@@ -1495,6 +1575,7 @@ class PersistentGridCache(PersistentThumbnailCache):
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
                 """)
+                self._ensure_identity_index(conn)
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             except Exception:
@@ -1539,6 +1620,7 @@ class PersistentPreviewCache(PersistentThumbnailCache):
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_file_path ON thumbnail_cache(file_path)
                 """)
+                self._ensure_identity_index(conn)
                 conn.commit()
             except Exception:
                 pass

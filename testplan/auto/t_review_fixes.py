@@ -260,12 +260,35 @@ def test_range_masks_measure_in_display_space():
     )
 
 
+def test_mask_dehaze_respects_preview_flag():
+    """Export used to force preview=True, so a mask Dehaze looked softer than global."""
+    import raw_effects
+    from raw_mask_layers import _apply_layer_adjustments
+
+    seen = []
+    original = raw_effects.apply_dehaze
+
+    def spy(img, amount, *, preview=False):
+        seen.append(preview)
+        return original(img, amount, preview=preview)
+
+    raw_effects.apply_dehaze = spy
+    try:
+        img = np.full((8, 8, 3), 0.4, np.float32)
+        _apply_layer_adjustments(img, {"Dehaze": 20.0}, preview=False)
+        _apply_layer_adjustments(img, {"Dehaze": 20.0}, preview=True)
+    finally:
+        raw_effects.apply_dehaze = original
+    check("export path asks for full dehaze", seen == [False, True], str(seen))
+
+
 def main() -> int:
     test_mask_load_is_deterministic_and_never_overwrites_after_truncation()
     test_blur_focus_zero_survives_a_save()
     test_depth_blur_keeps_the_other_adjustments_masked()
     test_heal_cache_hit_skips_the_full_frame_prelude()
     test_range_masks_measure_in_display_space()
+    test_mask_dehaze_respects_preview_flag()
     if FAILURES:
         print(f"\nFAILED: {FAILURES}")
         return 1

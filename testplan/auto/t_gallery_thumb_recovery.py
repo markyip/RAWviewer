@@ -130,6 +130,27 @@ def main() -> int:
     check("retry-all resets every placeholder", G.retry_placeholder_thumbnails(host) == 2)
     check("none left", not host._placeholder_thumb_paths)
 
+    # --- cancelled ILM work must not keep occupying gallery active_cap ---
+    class _DeadManager:
+        def has_active_work_for_path(self, path):
+            return False
+
+        def cancel_task(self, path):
+            pass
+
+    host = _Host(2)
+    host.load_manager = _DeadManager()
+    host._active_tasks = {
+        "/f/IMG_00000.CR3": (time.time(), None),
+        "/f/IMG_00001.CR3": (time.time(), None),
+    }
+    n = G._evict_stale_active_tasks(host, max_age_s=60.0)
+    check(
+        "phantom in-flight thumbs are dropped without waiting 4s",
+        n == 2 and not host._active_tasks,
+        f"evicted={n} remaining={list(host._active_tasks)}",
+    )
+
     print(f"\n{len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0
 
