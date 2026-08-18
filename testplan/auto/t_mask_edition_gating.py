@@ -39,7 +39,7 @@ p = P(); p.show(); p._panel_tabs.set_current(1)
 def shown(attr):
     b = getattr(p, attr, None)
     return bool(b is not None and b.parent() is not None and b.isVisible())
-# The creation tools are the five buttons in the Create new mask section,
+# The creation tools are the buttons in the Create new mask section,
 # so that is where the edition gate has to hold. The buttons behind it stay as
 # the arming state machine and are deliberately unparented.
 _items = [b.text() for b in p._mask_create_buttons.values()]
@@ -60,6 +60,7 @@ print("@@" + json.dumps({
     "subject": offered("Smart Object"),
     "sky": offered("Sky"),
     "depth": offered("Depth"),
+    "bokeh": offered("Blur background"),
     "click": offered("AI Selection"),
     "brush_item": offered("Brush"),
     "ai_btns_enabled": bool(p._mask_ai_subject_btn.isEnabled()),
@@ -101,6 +102,7 @@ def main() -> int:
     check("Plus offers Smart Object", plus["subject"])
     check("Plus offers Sky", plus["sky"])
     check("Plus offers Depth", plus["depth"])
+    check("Plus offers Blur background", plus["bokeh"])
     check("Plus offers AI Selection", plus["click"])
 
     # --- Standard: no AI mask reaches the user, and none can download ---
@@ -108,6 +110,7 @@ def main() -> int:
     check("Standard hides Smart Object", not std["subject"])
     check("Standard hides Sky", not std["sky"])
     check("Standard hides Depth", not std["depth"])
+    check("Standard hides Blur background", not std["bokeh"])
     check("Standard hides AI Selection", not std["click"])
     check(
         "Standard reports every AI op unavailable",

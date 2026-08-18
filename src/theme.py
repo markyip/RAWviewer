@@ -143,3 +143,164 @@ def ui_font(size_px: int, weight=None):
     if weight is not None:
         f.setWeight(weight)
     return f
+
+
+def form_dialog_stylesheet() -> str:
+    """QSS for option/form dialogs (export, share, keywords).
+
+    Matches HDR / ColorChecker chrome: VOID surround, SURFACE fields, LINE
+    borders, EMBER only for the primary action and checked radios. No
+    ``font-family`` — the app font is set once at startup.
+    """
+    return f"""
+        QDialog {{
+            background-color: {VOID};
+            color: {INK};
+        }}
+        QLabel {{
+            color: {INK};
+            font-size: 13px;
+            background: transparent;
+        }}
+        QLineEdit, QPlainTextEdit {{
+            background-color: {SURFACE};
+            color: {INK};
+            border: 1px solid {LINE};
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 13px;
+            selection-background-color: {EMBER_DIM};
+            selection-color: {INK};
+        }}
+        QLineEdit:focus, QPlainTextEdit:focus {{
+            border: 1px solid {EMBER};
+        }}
+        QLineEdit::placeholder, QPlainTextEdit::placeholder {{
+            color: {INK_MUTED};
+        }}
+        QComboBox {{
+            background-color: {RAISED};
+            border: 1px solid {LINE};
+            border-radius: 6px;
+            color: {INK};
+            font-size: 13px;
+            padding: 4px 8px;
+            min-height: 22px;
+        }}
+        QComboBox:hover {{
+            border-color: {rgba(INK_RGB, 70)};
+        }}
+        QComboBox:focus {{
+            border: 1px solid {EMBER};
+        }}
+        QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 0px;
+            border: none;
+            background: transparent;
+        }}
+        QComboBox::down-arrow {{
+            image: none;
+            width: 0px;
+            height: 0px;
+            border: none;
+        }}
+        QComboBox QAbstractItemView {{
+            background-color: {SURFACE};
+            border: 1px solid {LINE};
+            color: {INK};
+            selection-background-color: {rgba(EMBER_RGB, 140)};
+            selection-color: {INK};
+            outline: none;
+            font-size: 13px;
+            padding: 2px;
+        }}
+        QComboBox QAbstractItemView::item {{
+            min-height: 22px;
+            padding: 2px 6px;
+        }}
+        QComboBox QAbstractItemView::item:hover {{
+            background-color: {rgba(EMBER_RGB, 90)};
+            color: {INK};
+        }}
+        QCheckBox, QRadioButton {{
+            color: {INK};
+            font-size: 13px;
+            spacing: 8px;
+            background: transparent;
+        }}
+        QCheckBox::indicator, QRadioButton::indicator {{
+            width: 14px;
+            height: 14px;
+            border: 1px solid {LINE};
+            background: {RAISED};
+        }}
+        QCheckBox::indicator {{
+            border-radius: 3px;
+        }}
+        QRadioButton::indicator {{
+            border-radius: 8px;
+        }}
+        QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+            border-color: {INK_FAINT};
+        }}
+        QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
+            background-color: {EMBER};
+            border-color: {EMBER};
+        }}
+        QCheckBox:disabled, QRadioButton:disabled {{
+            color: {INK_FAINT};
+        }}
+    """
+
+
+def form_secondary_button_stylesheet() -> str:
+    """Cancel / Browse — same padding and radius as HDR / calibrate actions."""
+    return f"""
+        QPushButton {{
+            background-color: {SURFACE};
+            color: {INK};
+            border: 1px solid {LINE};
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            padding: 0px 16px;
+        }}
+        QPushButton:hover {{
+            background-color: {RAISED};
+            border-color: {INK_FAINT};
+        }}
+        QPushButton:pressed {{
+            background-color: {RAISED_HI};
+        }}
+        QPushButton:disabled {{
+            color: {INK_FAINT};
+            border-color: {LINE_SOFT};
+        }}
+    """
+
+
+def form_primary_button_stylesheet() -> str:
+    """Confirm / Share / Start export — EMBER fill, same radius as HDR merge."""
+    return f"""
+        QPushButton {{
+            background-color: {EMBER};
+            color: {INK};
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            padding: 0px 16px;
+        }}
+        QPushButton:hover {{
+            background-color: {rgba(EMBER_RGB, 220)};
+        }}
+        QPushButton:pressed {{
+            background-color: {rgba(EMBER_RGB, 180)};
+        }}
+        QPushButton:disabled {{
+            background-color: {SURFACE};
+            color: {INK_FAINT};
+        }}
+    """

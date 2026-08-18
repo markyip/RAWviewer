@@ -573,19 +573,22 @@ Constants: `RECOVERY_BASELINE_SHADOWS2012`, `RECOVERY_BASELINE_HIGHLIGHTS2012` i
 
 ### One-press estimators (`raw_auto_adjust.py`)
 
-Three AUTO buttons: **Auto WB** (Color / WB, beside the dropper), **Auto Tone**
-(top of Light) and **Auto straighten** (on the Straighten slider row). All
-three share one contract, and it is the reason they live outside the pipeline:
+One **Auto** button at the top of Light. One press writes Temperature / Tint,
+the six PV2012 Light sliders, and CropAngle in a single save (one Ctrl+Z).
+Saturation, Vibrance and HSL are never written — colour after Auto is
+hand-graded in **Color / WB** (presets, dropper, Temp/Tint, Vibrance) and
+the HSL mixer. The three estimators in this module still share one contract,
+which is why they live outside the pipeline:
 
 - they **read the un-adjusted edit base** (`_adjust_preview_base_rgb`) and
   **write existing slider values** — never pixels. The user sees which sliders
   moved, refines them normally, and Ctrl+Z undoes the lot;
 - the values are **absolute, not deltas**, so applying is an overwrite and
-  pressing a button twice is a no-op rather than a compounding edit;
+  pressing Auto twice is a no-op rather than a compounding edit;
 - each **refuses rather than guesses** — `None` when the image gives no
-  reliable estimate, surfaced as a status message.
+  reliable estimate; the status bar reports what ran and what was skipped.
 
-`raw_tone_recovery.py` is deliberately *not* the donor for Auto Tone despite
+`raw_tone_recovery.py` is deliberately *not* the donor for Auto despite
 covering similar ground: it renders display pixels for the **P**-key preview,
 so there are no slider values behind it to record or write to a sidecar.
 
@@ -690,7 +693,7 @@ Written on slider / curve release and before export:
 | `raw_adjustments.py` | XMP I/O, defaults, `apply_adjustments_to_linear`; identity tone-curve helpers |
 | `raw_effects.py` | Post-crop vignette (paint overlay + Midpoint) + dehaze |
 | `raw_dodge_burn.py` | Local dodge/burn mask + `DodgeBurnStrength` |
-| `raw_auto_adjust.py` | One-press estimators: Auto WB, Auto tone, Auto straighten (see below) |
+| `raw_auto_adjust.py` | Estimators for the single **Auto** button (WB + tone + straighten; colour sliders untouched) |
 | `raw_lut.py` | Creative `.cube` LUT apply |
 | `raw_xmp_presets.py` | Managed XMP preset library (import / list / apply / remove) |
 | `display_brightness.py` | Best-effort macOS display brightness bump while Adjust is open |

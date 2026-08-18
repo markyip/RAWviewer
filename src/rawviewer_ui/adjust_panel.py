@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from typing import Callable, Dict, Sequence
 
-from PyQt6.QtCore import QRectF, QSettings, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QObject,
+    QRectF,
+    QRunnable,
+    QSettings,
+    Qt,
+    QSize,
+    QThreadPool,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QAction,
     QBrush,
@@ -14,6 +25,7 @@ from PyQt6.QtGui import (
     QDragEnterEvent,
     QDropEvent,
     QIcon,
+    QImage,
     QLinearGradient,
     QPainter,
     QPalette,
@@ -37,6 +49,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QSizePolicy,
@@ -218,6 +231,7 @@ _MASK_CREATE_ICONS = {
     "subject": "fa5s.magic",
     "sky": "fa5s.cloud",
     "depth": "fa5s.mountain",
+    "bokeh": "fa5s.dot-circle",
     "luma": "fa5s.adjust",
     "color": "fa5s.eye-dropper",
 }
@@ -400,6 +414,78 @@ class _LutDropFrame(_FileDropFrame):
 
 
 _LOOKS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+_LOOKS_NONE_KIND = "none"
+_LOOKS_THUMB_PX = 72
+_LUT_THUMB_CACHE_MAX = 160
+_LUT_THUMB_DEBOUNCE_MS = 140
+
+
+class _LutThumbSignals(QObject):
+    finished = pyqtSignal(int, object)  # token, dict[lut_id -> ndarray]|None
+
+
+class _LutThumbWorker(QRunnable):
+    """Apply each .cube to a tiny as-shot display copy. No RAW decode, no user adj."""
+
+    def __init__(
+        self,
+        token: int,
+        display_u8,
+        lut_names: list[str],
+        amount: float,
+        space: str,
+        signals: _LutThumbSignals,
+    ):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.token = int(token)
+        self.display_u8 = display_u8
+        self.lut_names = list(lut_names)
+        self.amount = float(amount)
+        self.space = str(space)
+        self.signals = signals
+
+    def run(self) -> None:
+        out = None
+        try:
+            import numpy as np
+
+            from raw_lut import render_lut_chooser_previews
+
+            base = self.display_u8
+            if base is None:
+                self.signals.finished.emit(self.token, None)
+                return
+            tiny = np.asarray(base)
+            if str(getattr(tiny, "dtype", "")) != "uint8":
+                tiny = np.clip(
+                    np.asarray(tiny, dtype=np.float32) * 255.0 + 0.5, 0, 255
+                ).astype(np.uint8)
+            out = render_lut_chooser_previews(
+                tiny, self.lut_names, amount=self.amount, space=self.space
+            )
+        except Exception:
+            out = None
+        self.signals.finished.emit(self.token, out)
+
+
+def _u8_rgb_to_pixmap(rgb) -> QPixmap | None:
+    """GUI-thread QPixmap from contiguous uint8 HxWx3."""
+    try:
+        import numpy as np
+
+        if rgb is None or getattr(rgb, "ndim", 0) != 3:
+            return None
+        arr = np.ascontiguousarray(rgb)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        if h < 1 or w < 1 or int(arr.shape[2]) < 3:
+            return None
+        img = QImage(arr.data, w, h, int(arr.strides[0]), QImage.Format.Format_RGB888)
+        return QPixmap.fromImage(img.copy())
+    except Exception:
+        return None
 
 
 class _LooksNameEdit(QLineEdit):
@@ -462,7 +548,7 @@ class _LooksNameEdit(QLineEdit):
 
 
 class _LooksRowWidget(QWidget):
-    """One Looks list row: name + type badge + remove (×)."""
+    """One Looks list row: optional LUT thumb + name + type badge + remove (×)."""
 
     remove_clicked = pyqtSignal()
     rename_requested = pyqtSignal(str)
@@ -470,46 +556,93 @@ class _LooksRowWidget(QWidget):
     def __init__(self, name: str, kind: str, parent=None):
         super().__init__(parent)
         self._suppress_item_click = False
+        self._kind = kind
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 2, 2, 2)
         row.setSpacing(6)
 
-        title = _LooksNameEdit(name)
-        title.setToolTip("Double-click to rename")
-        title.rename_committed.connect(self.rename_requested.emit)
-        title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._title = title
-        row.addWidget(title, 1)
-
-        badge = QLabel(".cube" if kind == "cube" else ".xmp")
-        badge.setStyleSheet(
-            f"color: {theme.INK_FAINT}; font-size: 11px; background: transparent;"
+        self._preview = QLabel()
+        self._preview.setFixedSize(_LOOKS_THUMB_PX, _LOOKS_THUMB_PX)
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setStyleSheet(
+            f"background: {theme.VOID}; border-radius: 3px; border: 1px solid {theme.LINE};"
         )
-        row.addWidget(badge)
+        self._preview.hide()
+        row.addWidget(self._preview)
 
-        rem = QPushButton("×")
-        rem.setFixedSize(22, 22)
-        rem.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        rem.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        rem.setToolTip("Remove from library")
-        rem.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: transparent;
-                color: {theme.INK_MUTED};
-                border: none;
-                border-radius: 4px;
-                font-size: 15px;
-                padding: 0;
-            }}
-            QPushButton:hover {{
-                background: {theme.RAISED_HI};
-                color: {theme.INK};
-            }}
-            """
+        if kind == _LOOKS_NONE_KIND:
+            title = QLabel(name)
+            title.setStyleSheet(f"color: {theme.INK}; font-size: 12px; background: transparent;")
+            title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self._title = title
+            row.addWidget(title, 1)
+        else:
+            title = _LooksNameEdit(name)
+            title.setToolTip("Double-click to rename")
+            title.rename_committed.connect(self.rename_requested.emit)
+            title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self._title = title
+            row.addWidget(title, 1)
+
+            badge = QLabel(".cube" if kind == "cube" else ".xmp")
+            badge.setStyleSheet(
+                f"color: {theme.INK_FAINT}; font-size: 11px; background: transparent;"
+            )
+            row.addWidget(badge)
+
+            rem = QPushButton("×")
+            rem.setFixedSize(22, 22)
+            rem.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            rem.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            rem.setToolTip("Remove from library")
+            rem.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background: transparent;
+                    color: {theme.INK_MUTED};
+                    border: none;
+                    border-radius: 4px;
+                    font-size: 15px;
+                    padding: 0;
+                }}
+                QPushButton:hover {{
+                    background: {theme.RAISED_HI};
+                    color: {theme.INK};
+                }}
+                """
+            )
+            rem.clicked.connect(self._on_remove_clicked)
+            row.addWidget(rem)
+
+    def set_preview(self, pixmap: QPixmap | None) -> None:
+        """Show a LUT (or identity) thumb; hide when there is no current image."""
+        if pixmap is None or pixmap.isNull():
+            self._preview.hide()
+            self._preview.clear()
+            self._sync_list_item_size()
+            return
+        scaled = pixmap.scaled(
+            _LOOKS_THUMB_PX,
+            _LOOKS_THUMB_PX,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
         )
-        rem.clicked.connect(self._on_remove_clicked)
-        row.addWidget(rem)
+        self._preview.setPixmap(scaled)
+        self._preview.show()
+        self._sync_list_item_size()
+
+    def _sync_list_item_size(self) -> None:
+        parent = self.parent()
+        while parent is not None and not isinstance(parent, QListWidget):
+            parent = parent.parent()
+        if parent is None:
+            return
+        hint = QSize(0, max(28, self.sizeHint().height()))
+        for i in range(parent.count()):
+            item = parent.item(i)
+            if parent.itemWidget(item) is self:
+                item.setSizeHint(hint)
+                break
 
     def _on_remove_clicked(self) -> None:
         self._suppress_item_click = True
@@ -1246,6 +1379,51 @@ class AdjustSlider(QSlider):
         painter.end()
 
 
+ADJUST_DOCK_SETTINGS_KEY = "adjust/dock"
+ADJUST_DOCK_DEFAULT = "right"
+
+
+def normalize_adjust_dock(value) -> str:
+    """``left`` or ``right`` (default). Unknown values fall back to right."""
+    side = str(value or "").strip().lower()
+    return "left" if side == "left" else ADJUST_DOCK_DEFAULT
+
+
+def apply_adjust_splitter_dock(splitter: QSplitter, image_widget, panel, side: str) -> str:
+    """Put the Adjust panel on the left or right of a horizontal QSplitter.
+
+    Same layout model as today: the panel is a splitter child and reserves
+    width. Hidden panels keep order so the next open lands on the saved side.
+    """
+    side = normalize_adjust_dock(side)
+    if splitter is None or image_widget is None or panel is None:
+        return side
+    if splitter.indexOf(image_widget) < 0 or splitter.indexOf(panel) < 0:
+        return side
+    sizes = splitter.sizes()
+    pan_i = splitter.indexOf(panel)
+    old_panel_w = sizes[pan_i] if 0 <= pan_i < len(sizes) else 0
+    target = 0 if side == "left" else 1
+    if splitter.indexOf(panel) != target:
+        splitter.insertWidget(target, panel)
+    img_i = splitter.indexOf(image_widget)
+    pan_i = splitter.indexOf(panel)
+    splitter.setStretchFactor(img_i, 1)
+    splitter.setStretchFactor(pan_i, 0)
+    if panel.isVisible() and splitter.width() > 1:
+        panel_w = max(
+            int(panel.minimumWidth() or 0),
+            int(getattr(panel, "_PANEL_W", 440) or 440),
+            int(old_panel_w or 0),
+        )
+        image_w = max(120, max(splitter.width(), 1) - panel_w)
+        if side == "left":
+            splitter.setSizes([panel_w, image_w])
+        else:
+            splitter.setSizes([image_w, panel_w])
+    return side
+
+
 class ImageAdjustPanelWidget(QWidget):
     """Floating adjustment card; drag anywhere except sliders / Reset.
 
@@ -1268,6 +1446,8 @@ class ImageAdjustPanelWidget(QWidget):
     recovery_baseline_requested = pyqtSignal()
     wb_picker_toggled = pyqtSignal(bool)  # True: arm the WB dropper; False: cancel
     compare_toggled = pyqtSignal(bool)  # True: show compare-with-original split view
+    # Host should dock the panel: "left" or "right" (QSplitter, not a window).
+    dock_side_requested = pyqtSignal(str)
     # True/False: re-decode the edit base with/without lens-profile correction
     # baked in (see main.py._on_adjust_lens_correction_toggled) -- unlike other
     # toggles, this needs a full re-decode, not just a preview-pipeline rerun.
@@ -1356,6 +1536,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._emit_live_preview)
+        self._dock_side = ADJUST_DOCK_DEFAULT
 
         self.setMinimumWidth(self._PANEL_W)
         self.setMaximumWidth(560)
@@ -1475,24 +1656,24 @@ class ImageAdjustPanelWidget(QWidget):
                 border-color: {theme.rgba(theme.INK_RGB, 20)};
                 background: transparent;
             }}
-            QPushButton#adjust_wb_picker_btn, QPushButton#adjust_auto_wb_btn {{
+            QPushButton#adjust_wb_picker_btn, QPushButton#adjust_auto_btn {{
                 border: 1px solid {theme.rgba(theme.INK_RGB, 35)};
                 border-radius: 4px;
                 background: {theme.rgba(theme.INK_RGB, 12)};
                 padding: 0px;
             }}
-            QPushButton#adjust_auto_wb_btn {{
+            QPushButton#adjust_auto_btn {{
                 padding: 0px 4px;
                 color: {theme.INK};
                 font-size: 11px;
                 font-weight: 600;
             }}
-            QPushButton#adjust_wb_picker_btn:checked, QPushButton#adjust_auto_wb_btn:checked {{
+            QPushButton#adjust_wb_picker_btn:checked, QPushButton#adjust_auto_btn:checked {{
                 border-color: {theme.rgba(theme.EMBER_RGB, 90)};
                 background: {theme.rgba(theme.EMBER_RGB, 30)};
                 color: {theme.EMBER};
             }}
-            QPushButton#adjust_wb_picker_btn:hover, QPushButton#adjust_auto_wb_btn:hover {{
+            QPushButton#adjust_wb_picker_btn:hover, QPushButton#adjust_auto_btn:hover {{
                 background: {theme.rgba(theme.INK_RGB, 24)};
             }}
             QPushButton#adjust_compare_btn {{
@@ -1619,6 +1800,7 @@ class ImageAdjustPanelWidget(QWidget):
         header.addStretch(1)
         self._build_compare_button(header)
         self._build_header_export_button(header)
+        self._build_header_dock_button(header)
         copy_btn = QPushButton("Copy")
         copy_btn.setObjectName("adjust_reset_btn")  # share Reset's compact style
         copy_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1973,10 +2155,8 @@ class ImageAdjustPanelWidget(QWidget):
 
         # WB situation presets (Daylight/Cloudy/…) sit above Temp/Tint.
         self._build_wb_preset_row(self.sect_color)
-        # Auto tone sits above the six sliders it sets, for the same reason the
-        # WB presets sit above Temp/Tint: it is the one-press version of the
-        # rows beneath it. Both are built before the slider loop below, which
-        # is what appends those rows.
+        # One Auto above Light: WB + tone + straighten in a single press.
+        # Color (Saturation / Vibrance / HSL) is left for hand grading.
         self._build_auto_tone_row(self.sect_light)
 
         # Loop through sliders and assign to sections
@@ -2066,18 +2246,6 @@ class ImageAdjustPanelWidget(QWidget):
                     lambda: self.transform_interaction.emit(False)
                 )
             row.addWidget(slider, 1)
-
-            if spec.key == "CropAngle":
-                auto_st = QPushButton("AUTO")
-                auto_st.setObjectName("adjust_auto_wb_btn")
-                auto_st.setFixedHeight(20)
-                auto_st.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                auto_st.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                auto_st.setToolTip(
-                    "Auto straighten — detect dominant near-horizontal/vertical lines"
-                )
-                auto_st.clicked.connect(lambda: self.auto_straighten_requested.emit())
-                row.addWidget(auto_st)
 
             val_lbl = AdjustValueLabel()
             val_lbl.setProperty("class", "adjust_slider_value")
@@ -2551,6 +2719,45 @@ class ImageAdjustPanelWidget(QWidget):
         row.addWidget(btn)
         self._header_export_btn = btn
 
+    def _build_header_dock_button(self, row: QHBoxLayout) -> None:
+        """Move the panel to the other splitter edge (left ↔ right)."""
+        btn = QPushButton()
+        btn.setObjectName("adjust_compare_btn")
+        btn.setFixedSize(22, 22)
+        btn.setIconSize(QSize(13, 13))
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn.clicked.connect(self._on_dock_button_clicked)
+        row.addWidget(btn)
+        self._header_dock_btn = btn
+        self.set_dock_side(self._dock_side)
+
+    def dock_side(self) -> str:
+        return normalize_adjust_dock(self._dock_side)
+
+    def set_dock_side(self, side: str) -> None:
+        """Update the header affordance; does not persist or relayout."""
+        self._dock_side = normalize_adjust_dock(side)
+        btn = getattr(self, "_header_dock_btn", None)
+        if btn is None:
+            return
+        if self._dock_side == "left":
+            btn.setToolTip("Move Adjust panel to the right")
+            icon_name = "fa5s.arrow-right"
+            fallback = "→"
+        else:
+            btn.setToolTip("Move Adjust panel to the left")
+            icon_name = "fa5s.arrow-left"
+            fallback = "←"
+        btn.setText("")
+        _apply_tool_icon(btn, icon_name, color=theme.INK_MUTED, size=13)
+        if btn.icon().isNull():
+            btn.setText(fallback)
+
+    def _on_dock_button_clicked(self) -> None:
+        target = "left" if self.dock_side() == "right" else "right"
+        self.dock_side_requested.emit(target)
+
     def flash_saved(self, *, cleared: bool = False, note: str = "") -> None:
         """Quiet header acknowledgement after a sidecar write."""
         lbl = getattr(self, "_saved_lbl", None)
@@ -2630,6 +2837,12 @@ class ImageAdjustPanelWidget(QWidget):
         sect.add_layout(row)
         self._wb_preset_combo = combo
         self._wb_preset_block = False
+        hint = QLabel(
+            "After Auto: refine colour here (Temp / Tint, Vibrance) or in HSL."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.INK_MUTED}; font-size: 11px;")
+        sect.add_widget(hint)
 
     # --- Global section order ------------------------------------------
     #
@@ -2800,29 +3013,24 @@ class ImageAdjustPanelWidget(QWidget):
         menu.exec(QCursor.pos())
 
     def _build_auto_tone_row(self, sect: CollapsibleSection) -> None:
-        """One-press Auto Tone above the six Light sliders it writes."""
+        """One-press Auto: white balance, Light sliders, and straighten."""
         row = QHBoxLayout()
         row.setSpacing(6)
         lbl = QLabel("Auto")
         lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
         lbl.setFixedWidth(82)
         row.addWidget(lbl)
-        btn = QPushButton("AUTO TONE")
-        # Shares the Auto WB / Auto straighten object name so all three
-        # one-press estimators look like one another rather than like three
-        # separately-styled buttons.
-        btn.setObjectName("adjust_auto_wb_btn")
+        btn = QPushButton("AUTO")
+        btn.setObjectName("adjust_auto_btn")
         btn.setFixedHeight(20)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn.setToolTip(
-            "Auto tone — set Exposure, Contrast, Highlights, Shadows, Whites "
-            "and Blacks from the image.\n\n"
-            "Those sliders are scene-linear / PV2012 edits, not the P-key "
-            "recovery preview (Reconstruct + polish).\n\n"
-            "Reads the unedited photo, so pressing it twice changes nothing "
-            "the second time. Every slider it moves stays yours to refine, "
-            "and Ctrl+Z undoes the lot."
+            "Auto — white balance, Exposure / Contrast / Highlights / Shadows "
+            "/ Whites / Blacks, and straighten from the unedited photo.\n\n"
+            "Does not move Saturation, Vibrance, or HSL — grade colour there "
+            "after Auto, or with the WB dropper.\n\n"
+            "Not the P-key recovery preview. Ctrl+Z undoes the lot."
         )
         btn.clicked.connect(lambda: self.auto_tone_requested.emit())
         row.addWidget(btn, 1)
@@ -2830,13 +3038,11 @@ class ImageAdjustPanelWidget(QWidget):
         self._auto_tone_btn = btn
 
     def apply_auto_tone(self, values: dict) -> None:
-        """Overwrite the six Light sliders from an estimate, and save.
+        """Overwrite Auto keys (WB, Light sliders, CropAngle) and save.
 
-        An overwrite, not a merge, and for the same reason
-        ``apply_picked_white_balance`` overwrites Temperature/Tint: the
-        estimator measured the UNEDITED base, so its numbers are absolute. A
-        merge would leave a Blacks from a previous press fighting an estimate
-        that already accounts for it.
+        An overwrite, not a merge: the estimators measured the UNEDITED base,
+        so the numbers are absolute. Does not write Saturation, Vibrance, or
+        HSL — those stay for hand colour grading.
         """
         current = self.get_adjustments()
         for key, value in values.items():
@@ -3084,14 +3290,6 @@ class ImageAdjustPanelWidget(QWidget):
         btn.toggled.connect(self._on_wb_picker_toggled)
         row.addWidget(btn)
         self._wb_picker_btn = btn
-        auto = QPushButton("AUTO")
-        auto.setObjectName("adjust_auto_wb_btn")
-        auto.setFixedHeight(20)
-        auto.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        auto.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        auto.setToolTip("Auto white balance — estimate from the image (robust gray-world)")
-        auto.clicked.connect(lambda: self.auto_wb_requested.emit())
-        row.addWidget(auto)
 
     def _on_wb_picker_toggled(self, checked: bool) -> None:
         self._sync_wb_picker_icon(checked)
@@ -3215,7 +3413,7 @@ class ImageAdjustPanelWidget(QWidget):
         drop = _FileDropFrame((".cube", ".xmp"))
         drop.setObjectName("looks_drop_frame")
         drop.setAcceptDrops(True)
-        drop.setMinimumHeight(96)
+        drop.setMinimumHeight(168)
         drop.setStyleSheet(
             f"""
             QFrame#looks_drop_frame {{
@@ -3232,7 +3430,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._looks_list = QListWidget()
         self._lut_list = self._looks_list  # legacy alias used by LUT helpers
         self._looks_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._looks_list.setMaximumHeight(130)
+        self._looks_list.setMaximumHeight(220)
         self._looks_list.setSpacing(1)
         self._looks_list.setStyleSheet(
             f"""
@@ -3248,12 +3446,25 @@ class ImageAdjustPanelWidget(QWidget):
                 margin: 0;
                 border-radius: 4px;
             }}
-            QTreeWidget::item:selected {{
+            QListWidget::item:selected {{
                 background: {theme.EMBER_DIM};
                 color: {theme.INK};
             }}
-            QTreeWidget::item:hover {{
+            QListWidget::item:hover {{
                 background: {theme.RAISED};
+            }}
+            QScrollBar:vertical {{
+                background: transparent;
+                width: 8px;
+                margin: 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {theme.LINE};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
             }}
             """
         )
@@ -3265,10 +3476,10 @@ class ImageAdjustPanelWidget(QWidget):
 
         amt_row = QHBoxLayout()
         amt_row.setSpacing(6)
-        amt_lbl = QLabel("LUT Amount")
-        amt_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
-        amt_lbl.setMinimumWidth(78)
-        amt_row.addWidget(amt_lbl)
+        self._lut_amount_name_lbl = QLabel("LUT Amount")
+        self._lut_amount_name_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px;")
+        self._lut_amount_name_lbl.setMinimumWidth(78)
+        amt_row.addWidget(self._lut_amount_name_lbl)
         self._lut_amount_slider = AdjustSlider(Qt.Orientation.Horizontal)
         self._lut_amount_slider.setRange(0, 100)
         self._lut_amount_slider.setValue(100)
@@ -3306,7 +3517,19 @@ class ImageAdjustPanelWidget(QWidget):
         self._lut_active_name = ""
         self._xmp_highlight_name = ""
         self._looks_ignore_item_click = False
+        self._lut_thumb_rows: dict[str, _LooksRowWidget] = {}
+        self._lut_thumb_cache: OrderedDict = OrderedDict()
+        self._lut_thumb_token = 0
+        self._lut_thumb_path = ""
+        self._lut_thumb_source_gen = 0
+        self._lut_thumb_display_u8 = None
+        self._lut_thumb_signals = _LutThumbSignals(self)
+        self._lut_thumb_signals.finished.connect(self._on_lut_thumbs_ready)
+        self._lut_thumb_timer = QTimer(self)
+        self._lut_thumb_timer.setSingleShot(True)
+        self._lut_thumb_timer.timeout.connect(self._start_lut_thumb_worker)
         self._refresh_looks_list(select_lut=None)
+        self._sync_lut_amount_enabled()
 
     def _looks_item_kind(self, item) -> str:
         if item is None:
@@ -3338,6 +3561,7 @@ class ImageAdjustPanelWidget(QWidget):
         lw.blockSignals(True)
         try:
             lw.clear()
+            self._lut_thumb_rows = {}
             entries: list[tuple[str, str]] = []
             for name in list_managed_luts():
                 entries.append((name, "cube"))
@@ -3345,6 +3569,20 @@ class ImageAdjustPanelWidget(QWidget):
                 entries.append((name, "xmp"))
             entries.sort(key=lambda t: t[0].lower())
             select_item = None
+
+            none_item = QListWidgetItem()
+            none_item.setData(Qt.ItemDataRole.UserRole, _LOOKS_NONE_KIND)
+            none_item.setData(_LOOKS_NAME_ROLE, "")
+            none_item.setText("None")
+            none_item.setToolTip("No Creative LUT — click to clear")
+            none_row = _LooksRowWidget("None", _LOOKS_NONE_KIND)
+            none_item.setSizeHint(QSize(0, max(28, none_row.sizeHint().height())))
+            lw.addItem(none_item)
+            lw.setItemWidget(none_item, none_row)
+            self._lut_thumb_rows[""] = none_row
+            if not wanted_lut and not wanted_xmp:
+                select_item = none_item
+
             for name, kind in entries:
                 item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, kind)
@@ -3365,6 +3603,8 @@ class ImageAdjustPanelWidget(QWidget):
                 item.setSizeHint(QSize(0, max(28, row.sizeHint().height())))
                 lw.addItem(item)
                 lw.setItemWidget(item, row)
+                if kind == "cube":
+                    self._lut_thumb_rows[name] = row
                 # Prefer the just-applied .xmp highlight over an embedded .cube
                 # so click-to-apply feedback stays on the preset row.
                 if kind == "xmp" and wanted_xmp and name == wanted_xmp:
@@ -3373,7 +3613,7 @@ class ImageAdjustPanelWidget(QWidget):
                     kind == "cube"
                     and wanted_lut
                     and name == wanted_lut
-                    and select_item is None
+                    and (select_item is None or self._looks_item_kind(select_item) == _LOOKS_NONE_KIND)
                 ):
                     select_item = item
             if select_item is not None:
@@ -3383,6 +3623,8 @@ class ImageAdjustPanelWidget(QWidget):
                 lw.clearSelection()
         finally:
             lw.blockSignals(False)
+        if not self._apply_cached_lut_thumbs() and getattr(self, "_lut_thumb_display_u8", None) is not None:
+            self._schedule_lut_thumbs()
 
     def _refresh_lut_list(self, select_name: str | None = None) -> None:
         """Back-compat for set_adjustments — refresh shared Looks list."""
@@ -3468,6 +3710,7 @@ class ImageAdjustPanelWidget(QWidget):
                 remove_managed_lut(name)
                 if getattr(self, "_lut_active_name", "") == name:
                     self._lut_active_name = ""
+                    self._sync_lut_amount_enabled()
                     self._emit_preview_and_save()
             elif kind == "xmp":
                 remove_managed_preset(name)
@@ -3497,10 +3740,14 @@ class ImageAdjustPanelWidget(QWidget):
             self._xmp_highlight_name = ""
             lw = getattr(self, "_looks_list", None)
             if lw is not None:
-                lw.setCurrentRow(-1)
-                lw.clearSelection()
+                if lw.count() and self._looks_item_kind(lw.item(0)) == _LOOKS_NONE_KIND:
+                    lw.setCurrentItem(lw.item(0))
+                else:
+                    lw.setCurrentRow(-1)
+                    lw.clearSelection()
         finally:
             self._block_emit = False
+        self._sync_lut_amount_enabled()
         self._emit_preview_and_save()
 
     def _on_looks_item_clicked(self, item) -> None:
@@ -3528,6 +3775,9 @@ class ImageAdjustPanelWidget(QWidget):
             return
         kind = self._looks_item_kind(item)
         name = self._looks_item_name(item)
+        if kind == _LOOKS_NONE_KIND:
+            self._clear_active_lut()
+            return
         if not name:
             return
         if kind == "cube":
@@ -3536,8 +3786,11 @@ class ImageAdjustPanelWidget(QWidget):
                 return
             self._xmp_highlight_name = ""
             self._lut_active_name = name
+            # Thumbs always preview at 100%; the live Amount slider is
+            # independent. Only bump from 0 so applying a LUT is visible.
             if self._lut_amount_slider.value() < 1:
                 self._lut_amount_slider.setValue(100)
+            self._sync_lut_amount_enabled()
             self._emit_preview_and_save()
         elif kind == "xmp":
             if getattr(self, "_xmp_highlight_name", "") == name:
@@ -3557,12 +3810,150 @@ class ImageAdjustPanelWidget(QWidget):
             lbl.setText(str(int(value)))
         if self._block_emit:
             return
+        # Amount only grades the live photo. Chooser thumbs stay at 100%.
         self._schedule_live_preview()
+
+    def _sync_lut_amount_enabled(self) -> None:
+        """Amount applies to the selected LUT on the main photo; unused for None."""
+        has_lut = bool(str(getattr(self, "_lut_active_name", "") or "").strip())
+        slider = getattr(self, "_lut_amount_slider", None)
+        if slider is not None:
+            slider.setEnabled(has_lut)
+            slider.setToolTip(
+                "Strength of the active .cube LUT on this photo (list thumbs stay at 100%)"
+                if has_lut
+                else "Select a Creative LUT to adjust amount"
+            )
+        value_lbl = getattr(self, "_lut_amount_value", None)
+        if value_lbl is not None:
+            value_lbl.setEnabled(has_lut)
+        name_lbl = getattr(self, "_lut_amount_name_lbl", None)
+        if name_lbl is not None:
+            name_lbl.setEnabled(has_lut)
 
     def _on_lut_space_changed(self, _index: int = 0) -> None:
         if self._block_emit:
             return
+        self._schedule_lut_thumbs()
         self._emit_preview_and_save()
+
+    def _lut_thumb_image_token(self) -> str:
+        """Cache token for as-shot LUT thumbs. File-only — not Adjust preview gen."""
+        path = str(getattr(self, "_lut_thumb_path", "") or "")
+        return f"{path}#as_shot"
+
+    def _lut_thumb_space(self) -> str:
+        from raw_lut import LUT_SPACE_DEFAULT
+
+        combo = getattr(self, "_lut_space_combo", None)
+        if combo is None:
+            return LUT_SPACE_DEFAULT
+        data = combo.currentData()
+        return str(data or LUT_SPACE_DEFAULT)
+
+    def clear_lut_preview_source(self) -> None:
+        """Names-only until an as-shot LUT base for this photo arrives."""
+        self._lut_thumb_token = int(getattr(self, "_lut_thumb_token", 0)) + 1
+        self._lut_thumb_display_u8 = None
+        self._lut_thumb_path = ""
+        self._lut_thumb_source_gen = 0
+        timer = getattr(self, "_lut_thumb_timer", None)
+        if timer is not None:
+            timer.stop()
+        for row in (getattr(self, "_lut_thumb_rows", {}) or {}).values():
+            row.set_preview(None)
+
+    def set_lut_preview_source(
+        self,
+        display_u8,
+        path: str,
+        generation: int = 0,
+        **_unused,
+    ) -> None:
+        """Debounced LUT thumbs from a tiny as-shot display of this photo."""
+        self._lut_thumb_display_u8 = display_u8
+        self._lut_thumb_path = str(path or "")
+        self._lut_thumb_source_gen = int(generation)
+        self._apply_cached_lut_thumbs()
+        self._schedule_lut_thumbs()
+
+    def _schedule_lut_thumbs(self) -> None:
+        timer = getattr(self, "_lut_thumb_timer", None)
+        if timer is None:
+            return
+        if getattr(self, "_lut_thumb_display_u8", None) is None:
+            return
+        timer.start(_LUT_THUMB_DEBOUNCE_MS)
+
+    def _apply_cached_lut_thumbs(self) -> bool:
+        from raw_lut import LUT_PREVIEW_AMOUNT, lut_preview_cache_key
+
+        cache = getattr(self, "_lut_thumb_cache", None)
+        rows = getattr(self, "_lut_thumb_rows", None) or {}
+        if not cache or not rows:
+            return False
+        if getattr(self, "_lut_thumb_display_u8", None) is None:
+            for row in rows.values():
+                row.set_preview(None)
+            return False
+        token = self._lut_thumb_image_token()
+        amount = LUT_PREVIEW_AMOUNT
+        space = self._lut_thumb_space()
+        all_hit = True
+        for lut_id, row in rows.items():
+            key = lut_preview_cache_key(token, lut_id, amount, space)
+            pm = cache.get(key)
+            if pm is None:
+                all_hit = False
+                continue
+            cache.move_to_end(key)
+            row.set_preview(pm)
+        return all_hit
+
+    def _start_lut_thumb_worker(self) -> None:
+        from raw_lut import LUT_PREVIEW_AMOUNT, list_managed_luts
+
+        display = getattr(self, "_lut_thumb_display_u8", None)
+        if display is None:
+            return
+        if self._apply_cached_lut_thumbs():
+            return
+        self._lut_thumb_token = int(getattr(self, "_lut_thumb_token", 0)) + 1
+        token = self._lut_thumb_token
+        worker = _LutThumbWorker(
+            token,
+            display,
+            list_managed_luts(),
+            LUT_PREVIEW_AMOUNT,
+            self._lut_thumb_space(),
+            self._lut_thumb_signals,
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_lut_thumbs_ready(self, token: int, previews) -> None:
+        from raw_lut import LUT_PREVIEW_AMOUNT, lut_preview_cache_key
+
+        if int(token) != int(getattr(self, "_lut_thumb_token", 0)):
+            return
+        if not previews:
+            return
+        token_s = self._lut_thumb_image_token()
+        amount = LUT_PREVIEW_AMOUNT
+        space = self._lut_thumb_space()
+        cache = self._lut_thumb_cache
+        rows = getattr(self, "_lut_thumb_rows", {}) or {}
+        for lut_id, arr in previews.items():
+            pm = _u8_rgb_to_pixmap(arr)
+            if pm is None:
+                continue
+            key = lut_preview_cache_key(token_s, lut_id, amount, space)
+            cache[key] = pm
+            cache.move_to_end(key)
+            row = rows.get(lut_id)
+            if row is not None:
+                row.set_preview(pm)
+        while len(cache) > _LUT_THUMB_CACHE_MAX:
+            cache.popitem(last=False)
 
     def _apply_xmp_preset_named(self, name: str) -> None:
         """One-shot: load managed XMP look onto this image and persist."""
@@ -3828,6 +4219,7 @@ class ImageAdjustPanelWidget(QWidget):
                 amt = 100
             if hasattr(self, "_lut_amount_slider"):
                 self._lut_amount_slider.setValue(max(0, min(100, amt)))
+            self._sync_lut_amount_enabled()
             space = lut_working_space(merged)
             combo = getattr(self, "_lut_space_combo", None)
             if combo is not None:
@@ -3909,18 +4301,25 @@ class ImageAdjustPanelWidget(QWidget):
         make, model, iso = getattr(self, "_camera_profile_key", ("", "", None))
         if not (make or model):
             return
-        from PyQt6.QtWidgets import QMessageBox
+        from PyQt6.QtWidgets import QDialog
 
-        if QMessageBox.question(
+        try:
+            from rawviewer_app.widgets import CustomConfirmDialog
+        except ModuleNotFoundError:
+            from widgets import CustomConfirmDialog
+
+        iso_bit = f" (ISO {iso})" if iso else ""
+        dlg = CustomConfirmDialog(
             self,
-            "Remove Camera Profile",
-            f"Remove the saved calibration profile for {make} {model}"
-            f"{f' (ISO {iso})' if iso else ''}?\n\n"
-            "Images from this camera will go back to the LibRaw baseline "
-            "colour. Edits already saved to an XMP sidecar are not affected.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+            title="Remove Camera Profile",
+            message=f"Remove the saved calibration profile for {make} {model}{iso_bit}?",
+            informative_text=(
+                "Images from this camera will go back to the LibRaw baseline "
+                "colour. Edits already saved to an XMP sidecar are not affected."
+            ),
+            confirm_label="Remove",
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         try:
@@ -4611,7 +5010,7 @@ class ImageAdjustPanelWidget(QWidget):
             "Blur",
             (
                 # Continuous depth of field on Depth masks; soft region blur
-                # on every other mask (Smart Object + Invert → background).
+                # on every other mask (Blur background, or Invert + Amount).
                 ("Blur", "Amount", 0, 100, 1.0),
                 # 100 = sharp near / soft far (Depth alpha convention).
                 ("BlurFocus", "Focus", 0, 100, 1.0),
@@ -4961,6 +5360,7 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_ai_subject_btn = QPushButton("Smart Object")
         self._mask_ai_sky_btn = QPushButton("Sky")
         self._mask_ai_depth_btn = QPushButton("Depth")
+        self._mask_ai_bokeh_btn = QPushButton("Blur background")
         self._mask_ai_click_btn = QPushButton("AI Selection")
         for btn, tip in (
             (
@@ -4996,6 +5396,16 @@ class ImageAdjustPanelWidget(QWidget):
                 "background instead.",
             ),
             (
+                self._mask_ai_bokeh_btn,
+                "Blur background — one press.\n\n"
+                "Keeps the focused subject sharp and blurs the rest. When "
+                "the camera recorded an AF / focus point, that is the "
+                "subject; otherwise whatever stands out.\n\n"
+                "Writes Invert + Blur Amount on a new mask. Turn Amount down "
+                "or Ctrl+Z to undo. Not a Depth map — the background is one "
+                "blur, not a continuous falloff.",
+            ),
+            (
                 self._mask_ai_click_btn,
                 "AI Selection — you choose what gets masked, not the app.\n\n"
                 "Click a thing in the photo and it masks that thing: a jacket, "
@@ -5018,6 +5428,9 @@ class ImageAdjustPanelWidget(QWidget):
         self._mask_ai_sky_btn.clicked.connect(lambda: self.mask_ai_requested.emit("sky"))
         self._mask_ai_depth_btn.clicked.connect(
             lambda: self.mask_ai_requested.emit("depth")
+        )
+        self._mask_ai_bokeh_btn.clicked.connect(
+            lambda: self.mask_ai_requested.emit("bokeh")
         )
         self._mask_ai_click_btn.toggled.connect(
             lambda on: self._on_mask_tool_toggled(self._mask_ai_click_btn, on)
@@ -5061,6 +5474,7 @@ class ImageAdjustPanelWidget(QWidget):
                 self._mask_ai_subject_btn,
                 self._mask_ai_sky_btn,
                 self._mask_ai_depth_btn,
+                self._mask_ai_bokeh_btn,
                 self._mask_ai_click_btn,
             ):
                 _btn.setEnabled(False)
@@ -5519,13 +5933,19 @@ class ImageAdjustPanelWidget(QWidget):
         # one-shot AI tool at all. Keying off the buttons instead would admit
         # any kind present in _mask_create_buttons -- brush and ai_click --
         # and then raise KeyError on the label.
-        label = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}.get(kind)
+        label = {
+            "subject": "Smart Object",
+            "sky": "Sky",
+            "depth": "Depth",
+            "bokeh": "Blur background",
+        }.get(kind)
         if label is None:
             return
         arming = {
             "subject": getattr(self, "_mask_ai_subject_btn", None),
             "sky": getattr(self, "_mask_ai_sky_btn", None),
             "depth": getattr(self, "_mask_ai_depth_btn", None),
+            "bokeh": getattr(self, "_mask_ai_bokeh_btn", None),
         }.get(kind)
         create = getattr(self, "_mask_create_buttons", {}).get(kind)
         if arming is None and create is None:
@@ -5562,12 +5982,13 @@ class ImageAdjustPanelWidget(QWidget):
             "_mask_ai_subject_btn",
             "_mask_ai_sky_btn",
             "_mask_ai_depth_btn",
+            "_mask_ai_bokeh_btn",
             "_mask_ai_click_btn",
         ):
             btn = getattr(self, name, None)
             if btn is not None:
                 btn.setEnabled(enabled)
-        for kind in ("subject", "sky", "depth", "ai_click"):
+        for kind in ("subject", "sky", "depth", "bokeh", "ai_click"):
             btn = getattr(self, "_mask_create_buttons", {}).get(kind)
             if btn is not None:
                 btn.setEnabled(enabled)
@@ -5793,6 +6214,7 @@ class ImageAdjustPanelWidget(QWidget):
         ("subject", "Smart Object", "", True),
         ("sky", "Sky", "", True),
         ("depth", "Depth", "", True),
+        ("bokeh", "Blur background", "", True),
     )
 
     # Longer form for the buttons, which have room for a tooltip.
@@ -5832,6 +6254,13 @@ class ImageAdjustPanelWidget(QWidget):
                  "subject sharp).\n"
                  "Invert it to grade the background with other sliders "
                  "instead.",
+        "bokeh": "Blur background — one press.\n\n"
+                 "Keeps the focused subject sharp and blurs the rest. When "
+                 "the camera recorded an AF / focus point, that is the "
+                 "subject; otherwise whatever stands out.\n\n"
+                 "Writes Invert + Blur Amount on a new mask. Turn Amount down "
+                 "or Ctrl+Z to undo. Not a Depth map — one blur on the "
+                 "background, not a continuous falloff.",
         "ai_click": "AI Selection — click what you want masked.\n\n"
                     "Not a brush: each click is a point, and more clicks add to "
                     "the SAME mask.\nUse it when Smart Object picks the wrong "
@@ -6420,6 +6849,9 @@ class ImageAdjustPanelWidget(QWidget):
             self._lut_amount_slider.blockSignals(True)
             self._lut_amount_slider.setValue(100)
             self._lut_amount_slider.blockSignals(False)
+            if hasattr(self, "_lut_amount_value"):
+                self._lut_amount_value.setText("100")
+        self._sync_lut_amount_enabled()
         self._refresh_looks_list(select_lut=None)
         if hasattr(self, "_denoise_method_combo"):
             self._denoise_method_combo.blockSignals(True)

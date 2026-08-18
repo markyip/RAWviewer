@@ -1755,7 +1755,17 @@ class SingleImageViewOverlay(QWidget):
         if pw < 1 or ph < 1:
             return
         if not self._adj_user_placed:
-            x = max(self._HIST_MARGIN, pw - aw - self._HIST_MARGIN)
+            dock = "right"
+            viewer = getattr(self, "_viewer", None)
+            if viewer is not None and hasattr(viewer, "_adjust_panel_dock_side"):
+                try:
+                    dock = str(viewer._adjust_panel_dock_side() or "right").lower()
+                except Exception:
+                    dock = "right"
+            if dock == "left":
+                x = self._HIST_MARGIN
+            else:
+                x = max(self._HIST_MARGIN, pw - aw - self._HIST_MARGIN)
             y = max(self._HIST_MARGIN, (ph - ah) // 2)
             x = min(max(0, x), max(0, pw - aw))
             y = min(max(0, y), max(0, ph - ah))

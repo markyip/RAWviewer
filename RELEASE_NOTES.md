@@ -4,136 +4,60 @@
 
 
 ## 🚀 Version 3.1.0
-**Status: not yet released — currently on `development`**
+**Status: not yet released — stability + performance patch vs tagged 3.0.2**
 
-The headline is local masks: a whole tab, a new engine behind it, and the
-adjustments to go with it. Alongside that, photo merging (HDR, panorama,
-focus stacking), non-destructive editing of ordinary image files, camera
-colour calibration, and a long list of speed work.
+GitHub Releases still ship **3.0.x**. **3.1.0 is not a feature dump.** It is the next patch for memory, gallery load/scroll, cache, export reliability, and crash/cancel paths relative to **3.0.2**. Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md).
 
-### 🎭 Local masks
+There is **no** user-facing memory-tier picker; RAM caps stay automatic. **Generative editing stays shelved.**
 
-- **Masks have their own tab** in the Adjust panel, arranged by what each control acts on: the mask stack, the ways to make a mask, what you can do to the selected one, the brush, and that mask's own adjustments.
-- **Seven ways to start a mask**, all visible in one section, one press each: **Brush**, **Luminance**, **Color**, **AI Selection**, **Smart Object**, **Sky**, **Depth**. Luminance / Color sample a tone or colour with a click; everything except Brush makes its own mask, so arming a tool and changing your mind leaves nothing behind.
-- **Masks can be grouped.** Drag one mask onto another and they combine into a single mask with one adjustment set; drag a part back out to separate it again. Both are undoable.
-- **Each mask carries its own adjustments**, grouped the way the Global tab groups them — **Light** (Exposure, Contrast), **Color** (Temp, Tint, Saturation, Vibrance) and **Detail** (Sharpness, Clarity, Dehaze, Defringe). The groups fold, and click a value readout to reset that slider, exactly as on Global.
-- **Add to this mask / Erase / Invert / Effect / Duplicate / Delete** act on the selected mask. **Effect** turns the adjustment off without deleting coverage (distinct from the eye, which only hides the tint). Invert has an <kbd>I</kbd> shortcut on the Masks tab. Duplicate copies coverage and adjustments as a separate mask to re-aim; Delete removes the mask, not the photograph.
-- A quiet **Saved / Cleared** flash and an **Export** control in the Adjust header confirm sidecar writes and keep export reachable while masking.
-- **Mask rows show the mask**, not just a name: each row renders that mask's own shape, and an inverted mask draws — and says — what it actually covers.
-- **One overlay at a time.** Two coloured regions at once cannot be told apart, so showing one mask hides the others. Editing coverage (Add/Erase) shows the mask you are changing; moving an adjustment slider hides the tint so you can judge the effect on the photo. <kbd>M</kbd> overrides either.
-- **Invert covers the whole frame**, not just the part you painted — an inverted mask acts everywhere its original did not.
+**Honest provenance.** `development` also holds a large **later train** (masks, merges, ColorChecker, pairing, MCP, Share to AI, …). That code is **kept in the tree** for **3.2+**; it is **not** what 3.1.0 claims to ship. Items marked *(uncommitted)* are dirty-tree hardening aimed at this patch and are **not** in git yet.
 
-### 🤖 AI masks *(Plus)*
+### Memory and RAM tier *(in `development`)*
 
-- **Smart Object** and **AI Selection** are named for who is choosing — the app, or you. **Sky** masks the sky in one press.
-- **Smart Object uses the camera AF / focus point when present** as a prior: if several objects stand out, it keeps the blob nearest where the camera focused.
-- **AI Selection is a click tool, not a brush**: each click is a point, and more clicks add to the same mask. Selections come back solid inside and crisp at the edge. It leads the AI tools, being roughly ten times faster than Smart Object and needing no model download of its own.
-- **Smart Object takes the longest and gives the cleanest edge.** One press, no aiming, and it returns a single mask even when what stands out is several separate things. Reach for it when the cutout has to survive a strong adjustment; reach for AI Selection when you want a specific object, or want it now.
-- **Depth** masks by distance rather than by subject: full strength on the nearest things, fading to nothing on the farthest. Use it to lift a background, add haze to a distance, or cool the far half of a landscape. It is a fade, not a cutout — the whole frame is masked, by varying amounts — so invert it to grade the background instead. About a second on a typical frame.
-- **Blur / continuous depth of field:** each mask has **Amount** and **Focus** under Blur. On a **Depth** mask this is true continuous CoC — blur grows with distance from the Focus plane (default keeps the near subject sharp). On other masks it softens coverage, so Smart Object → Invert → Blur is the quick background-blur path.
-  - **Behavior note:** Depth + Blur previously could flatten other adjustments (e.g. Exposure) across the frame; that is fixed. Reopening an older Depth+Blur edit may look slightly different — the corrected, graded render. Already-saved **Luminance / Color** masks are unchanged (their coverage was baked when created); only newly sampled bands use the tighter defaults.
-- **A progress dialog** for the wait, with Cancel and a timeout. First use downloads the model and is not timed out.
-- **Asking for a mask the photo already has selects the existing one** instead of stacking a duplicate, and a tool whose mask exists is disabled with an explanation.
-- **If the model finds nothing, no mask is added** and the app says so, rather than leaving an empty "Sky" mask behind. An **AI Selection** click that selects nothing forgets that click and tells you, instead of leaving a mask covering nothing — and it refuses only genuinely empty selections, never small ones, so picking out one flower still works. **Depth** is never refused this way: it is a fade across the whole frame, so a distant scene with one near subject is a good depth mask, not an empty one.
-- **Standard edition omits these entirely** — no greyed-out buttons, and nothing on the Masks tab can trigger a model download.
+- **Low-RAM machines keep a usable gallery** without inheriting 24 GB prefetch defaults (idle-preload 120, 12 preload threads, hover full-res). The RAM tier overlays those numbers.
+- **Adjust settle stays light on slower machines.** Live-drag was already 640 px; settle still used a half-sensor frame (often ~12 MP). On ≤16 GB the RAM tier now caps that working base (and the live-drag edge). **Export still decodes at full resolution.**
+- **Gallery, Compare, and heavy jobs stay usable on slower machines**, in shoot order — not a 24 GB studio profile on an 8 GB laptop.
+- **Banded export / OpenCV and native math threads no longer take every core.** Caps follow the RAM tier; OpenBLAS / Accelerate follow the same OpenMP limit so decode + preview do not freeze the UI.
+- **Full-image cache is a byte budget**, not a hard count of 8, so smaller files keep more of them.
 
-### 🖌️ Brushes
+### Gallery scroll and load *(in `development`; bubble throttle uncommitted)*
 
-- **On Global, hold <kbd>D</kbd> / <kbd>B</kbd> / <kbd>X</kbd> / <kbd>H</kbd> and sweep to paint** — no mouse button. Releasing the key stops the stroke and puts the tool away. The panel's buttons still arm persistently if you prefer that.
-- **On Masks, <kbd>P</kbd> and <kbd>X</kbd> toggle Add and Erase** — press once to arm, press again to put away. Sweep or drag to paint while armed. **Brush** creates an empty mask and does not arm Add; arm with <kbd>P</kbd> (or the Add button) when you are ready.
-- **Brush Feather** joins Size, Flow and Edge Assist, all reachable from the Masks tab without leaving the page. The brush was previously fixed at maximum softness, which is why solid coverage needed repeated scrubbing.
-- **The eraser actually erases.** It was held back by Edge Assist, so paint that had spilled across an edge could not be removed; worse, releasing the brush put back about a third of what you had just erased.
-- **Two-finger scroll resizes the brush mid-stroke**, and horizontal scroll sets Flow, without ending the stroke.
-- **No square edge printed into the mask** on stroke release.
-- **Empty brush masks survive undo.** Creating a brush mask is saved straight away, so the first paint's Ctrl+Z steps back the stroke instead of wiping the whole mask stack.
+- **The load queue aims at the viewport**, not enqueue order. Jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block visible ones (a stall that needed a folder reload).
+- **A cancelled-at-start load finishes once**, not twice.
+- **Missing tiles come back.** A transient failure used to cache a grey placeholder for the rest of the session.
+- **Trackpad scrolling keeps sub-pixel movement** instead of discarding it (choppy scroll).
+- **Changing folder no longer wipes the thumbnail cache** (was ~27 s on a 3000-file folder).
+- **Opening Adjust and leaving without an edit no longer drops every cache tier** for that photo.
+- **An edited photo's gallery tile refreshes** after you visit it, instead of staying on the embedded JPEG.
+- **Scrollbar date bubble does not flash or decode on every tick** *(uncommitted)*: content is throttled; preview is an in-memory cache hit only, never disk.
 
-### 🌄 Merging photos
+### EXIF / sidecar cache
 
-- **HDR Merge, Panorama and Panorama HDR.** Multi-select in the gallery and right-click. Handheld MTB exposure alignment, Highlight/Shadow/Midtone weighting, and automatic rectangular border cropping.
-- **Focus Stack (All-in-Focus)** merges a focus bracket, with parallax correction and seam-aware fusion.
-- **Tune the merge before you commit to it.** The merge dialog previews the result live on a downscaled copy, so Highlight/Shadow/Midtone, the per-photo weights and the crop all show their effect immediately. Alignment is done once and reused, so only the blend re-runs as you adjust.
-- **Every source photo gets its own row** — tick it in or out, set how much it counts, and see the EV it was shot at.
-- **Focus stacking shows you where each pixel came from.** Switch the preview to the source map to see which photo owns each region, colour-matched to the photo list.
-- **Pick the focus yourself where the automatic choice is wrong.** Choose a photo, click that spot in the preview, and the area is handed to it. Points are held relative to the frame, so what you set on the preview is what you get at full resolution.
-- **Merges run at full resolution**, and are written display-referred — the gallery thumbnail and other applications agree on how the result looks. If a set is too large for the memory available it falls back to half size and tells you, rather than failing.
-- **Panorama HDR asks how the set was bracketed.** Exposures per panel is seeded from the EXIF exposure pattern, so 4 panels of 3 stops are grouped as they were shot.
-- **The merge dialog reorders the selection from EXIF**, so click order in the gallery no longer decides which frames are fused together. HDR sorts darkest → brightest; panorama and focus stack sort by capture time; Panorama HDR sorts by capture time into panels, then darkest → brightest inside each bracket. File copy time is never used.
-- **Merges are reproducible**: the same photos and the same settings give the same file.
-- **Frames that cannot be registered are left as shot** and reported, rather than being warped by a failed alignment solve.
+- **Sidecar XML is parsed once and shared** while a photo is in use *(in `development`)* — opening an edited file is cheaper and less likely to storm the parser.
+- **EXIF disk cache can persist fields that previously lived only in RAM** *(uncommitted)* so gallery metadata (stars today; later-train labels if present) survives restart instead of vanishing until a rescan. This is a cache-correctness fix, not a new catalog product.
 
-### 🖼️ Editing beyond RAW
+### Export and Plus AI denoise *(fixes on the 3.0.2 path)*
 
-- **JPEG, WebP, PNG, TIFF and BMP open in the Adjust panel** (<kbd>E</kbd>) with full non-destructive XMP sidecar persistence — exposure, contrast, relative white balance, curves, HSL, vignette, denoise, dodge & burn, spot heal and geometry, without touching the original.
-- **Files deeper than 8 bits are edited at their real depth** — a 16-bit TIFF keeps all 65,536 levels through the editor, not 256 of them. This matters most for this app's own output: HDR merge and focus stack write 16-bit TIFF, so a shadow lift holds together instead of banding. (Panorama is 8-bit, which is the depth the stitcher works at.)
-- **Nikon HE/HE\* NEF files can be edited** via their embedded JPEG. LibRaw still cannot demosaic them, so it is an 8-bit base: white balance and highlight recovery have less headroom, everything else behaves as editing a JPEG. RAW that cannot be demosaiced keeps showing its embedded preview instead of a grey tile.
+- **Export band seams** and a path where **AI denoise was silently skipped** on banded export.
+- **Dither in encoded space, not linear** — shadow noise on JPEG/WebP.
+- **Plus AI denoise export still cancels and reports progress** (3.0.2 behaviour) and must not hang or leave a partial file. First-use model download is not timed out as a failed denoise.
+- Faster CPU denoise (NAFNet / half-res + detail restore) and **AI Detail** stay on the existing Plus denoise export — performance of a 3.0.2 feature, not a new export menu.
 
-### 🎨 Colour and lens
+### Crashes, threads, cancel *(in `development`)*
 
-- **Auto Tone** sets Exposure, Contrast, Highlights, Shadows, Whites and Blacks in one press, at the top of the Light section. It anchors the midtones and then stops short of clipping the highlights, so a night shot with a street lamp is not brightened into mud. It moves the real sliders — you can see exactly what it did, nudge any of them, or undo the lot with Ctrl+Z. It reads the *unedited* photo, so pressing it twice does not compound; on a photo that is already balanced it says so and changes nothing.
-- **Camera colour calibration from a ColorChecker**, with an interactive dialog, corner handles and auto-detect. Sample 24 patches to derive RGB curves, white-balance offsets and HSL deltas, bound to the camera's EXIF `Make`/`Model` so it applies to every future photo from that body.
-- **Profiles record the decode they were calibrated against** and say so if it changes — a profile is a correction measured on top of a particular decode, and a LibRaw update can move that ground underneath it.
-- **Anamorphic desqueeze** (1.33×, 1.5×, 1.6×, 2.0×), applied live in the preview and on export. Local masks, dodge & burn and heal stay aligned with the desqueezed frame — including preview, settle and Compare.
-- **Manual lens distortion correction** for lenses with no profile — positive corrects pincushion, negative barrel.
+Review rounds on this line fixed: **`QPixmap` built on worker threads**, a **decode-slot double-free** on cancel paths, a registry keyed on **`id()`** that could match a recycled object, **shared caches with per-instance locks** (so they can be purged), and a **CUDA-GL resource released on the wrong thread**. Idle prefetch no longer error-storms on undecodable files.
 
-### 📤 Export and AI
+### Necessary exception (crash / refuse, not a feature tour)
 
-- **Context-aware export formats.** RAW offers 16-bit TIFF, JPEG and WebP; raster files offer JPEG and WebP.
-- **AI Upscale 2× (Real-ESRGAN)** and **AI Denoise (SCUNet)** are Plus-only export variants, and only when those models are actually on disk. Standard never offers them — even if the model files happen to be present.
-- **Faster AI denoise** — NAFNet on CPU platforms, plus a half-res mode with detail restore — and a new **AI Detail** slider controlling the denoise/detail balance.
-- **The sky mask model is a compact 84 MB** half-precision export, for output identical to the full-size one.
-- **Fixed export band seams** and a case where AI denoise was silently skipped on the banded path.
-- **Dithering happens in encoded space, not linear**, fixing shadow noise.
+- **Nikon HE/HE\* NEF:** 3.0 already browsed these; 3.1.0 **stops refusing Adjust** by developing the **embedded JPEG** (8-bit base). LibRaw still cannot demosaic HE. **Undecodable RAW keeps the embedded preview** instead of a permanent grey tile. This is here so those files do not error out — not a new JPEG-develop product (that waits with 3.2+).
 
-### ⚡ Speed
+### What 3.1.0 does **not** claim
 
-- **Painting a mask stays responsive on big files** — about 32 ms per stroke tick on a 2200×3300 base. The photo is not re-rendered on every brush stamp; the overlay updates instead, and the edit renders once when you let go.
-- **Loading a photo with saved edits is much faster** — the sidecar is parsed once and shared, and mask coverage is stored at half resolution.
-- **The gallery loads what you are looking at.** Queued work is re-aimed at the viewport instead of the order it was requested in, so jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block the visible ones (a stall on slower machines that needed a folder reload).
-- **Low-RAM machines keep the snappy gallery without the 24 GB prefetch.** Shared scroll defaults (idle-preload 120, 12 preload threads, hover full-res) are overlaid by the RAM tier, so an 8 GB machine no longer inherits those numbers.
-- **Editing on slower machines stays on a smaller working copy.** Live-drag was already 640 px; settle, masks and Auto Tone still used a half-sensor frame (often 12 MP). The RAM tier now caps that working base (and the live-drag edge) on ≤16 GB. Export still decodes at full resolution.
-- **Adjust preview/settle stay on the CPU; GPU is used where it already pays off.** Plus CUDA already GPU-demosaics full-resolution RAW (browse and the export edit base) and the OpenGL viewport composites the finished bitmap. Live ticks (PV2012, bilateral/guided NR, masks, depth blur, geometry) stay host OpenCV so Standard remains torch-free and baked pixels do not drift. Half-size working bases are unpack-bound — a GPU 2×2 bin would lose the transfer. Export can now reuse the browse unpack and that same GPU demosaic instead of unpacking again.
-- **Export banding and native math threads no longer take every core.** Banded OpenCV work is capped (and follows the RAM tier); OpenBLAS / Accelerate follow the same OpenMP limit so decode plus preview do not freeze the UI. Depth+Blur gather is vectorized. Compare keeps the 640 px live-drag path, including instant Exposure / WB.
-- **Compare zoom loads the real pixels.** Space / 100% requests full-resolution for the two on-screen photos, and a preview upgrading to sensor-res no longer copies its zoom onto the other pane.
-- **A folder change no longer wipes the thumbnail cache.** A cache-pruning bug was clearing every thumbnail on each change — 27 seconds on a 3000-file folder.
-- **Missing gallery tiles come back.** A transient failure used to cache a grey placeholder permanently for the session.
-- **Trackpad scrolling is smooth**, no longer discarding sub-pixel movement.
-- **Visiting the editor no longer forces a re-decode.** Opening and closing without changing anything was dropping every cache tier for that photo.
-- **The full-image cache is bounded by memory rather than a fixed count of 8**, so smaller files keep more of them.
-- **Share lists WhatsApp, Signal and AirDrop.** RAW is offered as a JPEG to messaging apps (they reject camera files); AirDrop still sends the original, and on Mac the person picker is hosted outside Qt so it can actually appear.
-
-### 🖥️ Panel, gallery and shortcuts
-
-- **A keyboard cheat sheet** on the panel's "i" button, grouped by task and aware of whether you are browsing, editing or comparing.
-- **Hover a control and it tells you its key.** Copy and Paste now name their shortcut, and on macOS shortcuts are written the way Macs write them — <kbd>⌘C</kbd>, not "Ctrl+C", which named a key that exists and does something else.
-- **One typeface, everywhere, and slightly larger.** The app declared several different font stacks, and the most common one asked for a font that ships with neither macOS nor Windows — so it matched only as long as you did not happen to have that font installed, and split the interface across two typefaces if you did. There is now a single stack that resolves to each platform's own UI font, and the base size is a step up from the platform default.
-- **Drag the gallery scrollbar and it tells you the date.** A floating bubble follows the thumb showing when the photos you are passing were taken, so you can land on last October without waiting for a single thumbnail to decode — the capture date is known from EXIF long before any pixels are. It appears only while you are dragging the thumb, not on ordinary wheel or trackpad scrolling.
-- **Files this app writes appear in the gallery immediately** — no reopening the folder after an HDR merge, panorama or export.
-- **Photos lift under the cursor.** Rest on a thumbnail in the gallery and it grows slightly and comes forward, while the full-resolution decode starts in the background — so by the time you click, the photo is often already there. Passing the cursor over tiles, or scrolling with it held still, does nothing.
-- **Right-click in the gallery.** Open, share, rate, merge, discard and delete, all acting on the whole selection. Right-clicking a photo outside the current selection selects it first, so the menu and the action always mean the same photos. Rating from here works on many photos at once — previously the 1–5 keys only worked one photo at a time in single view.
-- **Multi-select then right-click to merge**: Standard Panorama, HDR Merge, Panorama HDR and Focus Stack are all one menu away from a gallery selection.
-- **Moving or renaming a folder outside RAWviewer no longer throws away what it knows about those photos.** Their search index — embeddings, places, faces, camera and lens — used to be lost for good, and every thumbnail in the folder was rebuilt from scratch. Both are now recognised at their new location and updated in place.
-- **An edited photo's gallery tile refreshes** after you visit it in the editor, instead of showing the embedded JPEG forever.
-- **Apply to Burst Group** applies tone, colour and noise settings across a burst while preserving each photo's crop and local masks.
-- **<kbd>↓</kbd> discards only in single-image view**, not while editing, and Looks (LUT/XMP) can be renamed in place.
-- **The histogram stays put.** It, the panel header and the page tabs are pinned above the scrolling area, so the histogram is still there when you are working at the bottom of the panel — which is where you were looking every time you moved a slider. Fold it away if you want the height back.
-- **Drag the sections into the order you want.** Each section header on the Global page has a grip on the right — grab it and drag; the others move aside as you go. Right-click a header for Reset Order. **Your arrangement is saved between launches** and lives in app settings, so clearing the image cache does not touch it. (The Histogram is pinned rather than in that list, so it does not move.) **Your order is saved between launches** and lives in app settings, so clearing the image cache does not touch it.
-- **Sections start collapsed** apart from Histogram and Light, and remember which ones you opened for the rest of the session. Collapse state is deliberately per-session while the *order* persists: opening six sections to hunt for a slider is not an arrangement you chose, but the order is.
-- **Straightening no longer leaves a grid stuck over the photo.** The crop frame still shows what the rotation will cut, but the rule-of-thirds guides now belong to Crop mode alone — previously they stayed on screen from the moment you straightened until you set the rotation back to zero, with nothing offering to turn them off.
-- **Copy / Paste are hidden on the Masks tab** — they carry the global edit and never contained a mask, so on that page they looked like they would copy the mask and would not.
-- **The installer states edition capabilities plainly** (`Browse + Basic Adjustment`, `AI search + denoise`, `GPU RAW processing`).
-- **Release notes are shown in the update popup.**
-
-### 🔧 Under the hood
-
-Eleven rounds of review findings were fixed across this cycle, including
-building a `QPixmap` on worker threads, a decode-slot double-free reachable
-from several cancel paths, a registry keyed on `id()` that could match a
-different object after an address was reused, shared state guarded by
-per-instance locks, and a CUDA-GL resource released on the wrong thread.
+Masks tab / AI masks / Blur background, Auto Tone, HDR / panorama / focus stack, ColorChecker, anamorphic / manual distortion, raster develop, WhatsApp / Signal / AirDrop share, AI Upscale, color labels / keywords, RAW+JPEG pairing, export filename template / GPS strip / watermark / export queue, MCP, Share to AI, splash, LUT thumbs, DPReview ColorChecker samples, Adjust dock left/right. See README [Looking ahead](README.md#looking-ahead) (**3.2+**). Watermark **corner-patch** (when that train ships) composites a corner instead of a full-page overlay — a memory choice, not a 3.1.0 feature.
 
 ### Upgrade
 
-Install over 3.0.2. No cache clear needed.
+Install over 3.0.2. No cache clear required for this patch.
 
 ---
 

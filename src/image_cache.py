@@ -522,7 +522,15 @@ class PersistentEXIFCache:
             return None
 
         storage_path = _exif_cache_path_key(file_path)
-        exif_blob = _encode_exif_blob(exif_info.get("exif_data", {}))
+        inner = exif_info.get("exif_data", {})
+        inner = dict(inner) if isinstance(inner, dict) else {}
+        # Catalog fields live on the top-level put() dict (same shape as
+        # get()/rate/label/keywords writers) but the SQLite row only stores
+        # nested exif_data. Copy them into the blob so restart can promote.
+        for key in ("rating", "color_label", "keywords"):
+            if key in exif_info:
+                inner[key] = exif_info[key]
+        exif_blob = _encode_exif_blob(inner)
 
         capture_time = exif_info.get('capture_time')
         if not capture_time:
@@ -716,6 +724,8 @@ class PersistentEXIFCache:
                     # every app restart, since only the in-memory cache (which
                     # stores the dict as-passed) ever had the top-level key.
                     'rating': exif_data.get('rating', 0),
+                    'color_label': exif_data.get('color_label', '') or '',
+                    'keywords': exif_data.get('keywords', []) or [],
                 }
         except Exception:
             pass
@@ -952,6 +962,8 @@ class PersistentEXIFCache:
                         # blob was actually decoded (not the fast_mode/has_fast_data
                         # shortcut above, which skips it for bulk-scan speed).
                         "rating": exif_data.get("rating", 0) if exif_data else 0,
+                        "color_label": (exif_data.get("color_label") or "") if exif_data else "",
+                        "keywords": (exif_data.get("keywords") or []) if exif_data else [],
                     }
         except Exception:
             pass

@@ -213,6 +213,7 @@ CRS_NS = "http://adobe.com/camera-raw-settings/1.0/"
 RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 X_NS = "adobe:ns:meta/"
 XMP_NS = "http://ns.adobe.com/xap/1.0/"
+DC_NS = "http://purl.org/dc/elements/1.1/"
 
 
 @dataclass(frozen=True)
@@ -614,33 +615,64 @@ def _cached_xmp_root(xmp_path: str):
     return root
 
 
-def parse_xmp_rating(xmp_path: str) -> int:
-    """Parse xmp:Rating from a sidecar without loading adjustment sliders."""
+def parse_xmp_catalog(xmp_path: str) -> tuple[int, str, list[str]]:
+    """One sidecar parse: rating, color label, keywords.
+
+    Skips missing files. Walks rdf:Description attributes and *direct*
+    children only so mask-heavy sidecars are not fully iterated.
+    """
     if not xmp_path or not os.path.isfile(xmp_path):
-        return 0
+        return 0, "", []
     try:
+        from xmp_catalog import normalize_color_label, normalize_keywords
+
         root = _cached_xmp_root(xmp_path)
         if root is None:
-            return 0
-        ns = {
-            "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
-            "xmp": "http://ns.adobe.com/xap/1.0/",
-        }
-        for desc in root.findall(".//rdf:Description", ns):
+            return 0, "", []
+        rating = 0
+        label = ""
+        words: list[str] = []
+        for desc in root.findall(f".//{{{RDF_NS}}}Description"):
             for key, val in desc.attrib.items():
                 local_key = key.split("}", 1)[-1] if "}" in key else key.split(":")[-1]
-                if local_key == "Rating":
+                if local_key == "Rating" and not rating:
                     rating = _parse_rating_value(val)
-                    if rating:
-                        return rating
-            rating_el = desc.find("{http://ns.adobe.com/xap/1.0/}Rating")
-            if rating_el is not None and rating_el.text:
-                rating = _parse_rating_value(rating_el.text)
-                if rating:
-                    return rating
+                elif local_key == "Label" and not label:
+                    label = normalize_color_label(val)
+            if not rating:
+                rating_el = desc.find(f"{{{XMP_NS}}}Rating")
+                if rating_el is not None and rating_el.text:
+                    rating = _parse_rating_value(rating_el.text)
+            if not label:
+                label_el = desc.find(f"{{{XMP_NS}}}Label")
+                if label_el is not None and label_el.text:
+                    label = normalize_color_label(label_el.text)
+            for child in list(desc):
+                local = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
+                if local != "subject":
+                    continue
+                for li in child:
+                    li_local = li.tag.split("}", 1)[-1] if "}" in li.tag else li.tag
+                    if li_local == "Bag":
+                        for bag_li in li:
+                            bag_local = (
+                                bag_li.tag.split("}", 1)[-1]
+                                if "}" in bag_li.tag
+                                else bag_li.tag
+                            )
+                            if bag_local == "li" and (bag_li.text or "").strip():
+                                words.append(bag_li.text.strip())
+                    elif li_local == "li" and (li.text or "").strip():
+                        words.append(li.text.strip())
+        return rating, label, normalize_keywords(words)
     except Exception:
-        pass
-    return 0
+        return 0, "", []
+
+
+def parse_xmp_rating(xmp_path: str) -> int:
+    """Parse xmp:Rating from a sidecar without loading adjustment sliders."""
+    rating, _, _ = parse_xmp_catalog(xmp_path)
+    return rating
 
 
 def load_rating_for_file(image_path: str) -> int:
@@ -676,6 +708,7 @@ def _write_xmp_rating_locked(xmp_path: str, rating: int) -> None:
     ET.register_namespace("rdf", RDF_NS)
     ET.register_namespace("crs", CRS_NS)
     ET.register_namespace("xmp", XMP_NS)
+    ET.register_namespace("dc", DC_NS)
 
     root = None
     if os.path.isfile(xmp_path):
@@ -692,34 +725,10 @@ def _write_xmp_rating_locked(xmp_path: str, rating: int) -> None:
         desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
         desc.set(f"{{{RDF_NS}}}about", "")
     else:
-        rdf = root.find(f"{{{RDF_NS}}}RDF")
-        if rdf is None:
-            rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
-        desc = rdf.find(f"{{{RDF_NS}}}Description")
-        if desc is None:
-            desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
-            desc.set(f"{{{RDF_NS}}}about", "")
+        desc = _find_or_create_rdf_description(root)
 
-    rating_attr = f"{{{XMP_NS}}}Rating"
-    if rating > 0:
-        desc.set(rating_attr, str(rating))
-    else:
-        desc.attrib.pop(rating_attr, None)
-        for child in list(desc):
-            tag = child.tag
-            local = tag.split("}", 1)[-1] if "}" in tag else tag
-            if local == "Rating":
-                desc.remove(child)
-
-    # Nothing left worth keeping (no rating, no crs sliders, no child
-    # elements like tone curve / dodge-burn mask) -- remove the sidecar
-    # instead of littering the folder with an empty .xmp per photo.
-    has_rating = rating_attr in desc.attrib
-    has_crs = any(
-        key.startswith(f"{{{CRS_NS}}}") for key in desc.attrib
-    )
-    has_children = len(list(desc)) > 0
-    if not has_rating and not has_crs and not has_children:
+    _set_xmp_rating_on_desc(desc, rating)
+    if _sidecar_description_is_empty(desc):
         if os.path.isfile(xmp_path):
             os.remove(xmp_path)
         return
@@ -751,6 +760,189 @@ def write_rating_for_file(image_path: str, rating: int) -> None:
     if not xmp_path:
         raise ValueError("Invalid image path")
     write_xmp_rating(xmp_path, rating)
+
+
+def _set_xmp_rating_on_desc(desc: ET.Element, rating: int) -> None:
+    rating_attr = f"{{{XMP_NS}}}Rating"
+    rating = max(0, min(5, int(rating)))
+    if rating > 0:
+        desc.set(rating_attr, str(rating))
+    else:
+        desc.attrib.pop(rating_attr, None)
+        for child in list(desc):
+            local = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
+            if local == "Rating":
+                desc.remove(child)
+
+
+def _set_xmp_label_on_desc(desc: ET.Element, label: str) -> None:
+    from xmp_catalog import normalize_color_label
+
+    label_attr = f"{{{XMP_NS}}}Label"
+    label = normalize_color_label(label)
+    if label:
+        desc.set(label_attr, label)
+    else:
+        desc.attrib.pop(label_attr, None)
+        for child in list(desc):
+            local = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
+            if local == "Label":
+                desc.remove(child)
+
+
+def _set_dc_subject_on_desc(desc: ET.Element, keywords: list[str]) -> None:
+    from xmp_catalog import normalize_keywords
+
+    keywords = normalize_keywords(keywords)
+    for child in list(desc):
+        local = child.tag.split("}", 1)[-1] if "}" in child.tag else child.tag
+        if local == "subject":
+            desc.remove(child)
+    if not keywords:
+        return
+    subj = ET.SubElement(desc, f"{{{DC_NS}}}subject")
+    bag = ET.SubElement(subj, f"{{{RDF_NS}}}Bag")
+    for word in keywords:
+        li = ET.SubElement(bag, f"{{{RDF_NS}}}li")
+        li.text = word
+
+
+def _sidecar_description_is_empty(desc: ET.Element) -> bool:
+    """True when the Description holds nothing worth keeping on disk."""
+    rating_attr = f"{{{XMP_NS}}}Rating"
+    label_attr = f"{{{XMP_NS}}}Label"
+    try:
+        if int(desc.attrib.get(rating_attr) or 0) > 0:
+            return False
+    except ValueError:
+        if desc.attrib.get(rating_attr):
+            return False
+    if str(desc.attrib.get(label_attr) or "").strip():
+        return False
+    for attr in desc.attrib:
+        if attr in (f"{{{RDF_NS}}}about", rating_attr, label_attr):
+            continue
+        return False
+    if len(list(desc)) > 0:
+        return False
+    return True
+
+
+def parse_xmp_label(xmp_path: str) -> str:
+    _, label, _ = parse_xmp_catalog(xmp_path)
+    return label
+
+
+def load_label_for_file(image_path: str) -> str:
+    return parse_xmp_label(resolve_xmp_path(image_path))
+
+
+def parse_xmp_keywords(xmp_path: str) -> list[str]:
+    _, _, keywords = parse_xmp_catalog(xmp_path)
+    return keywords
+
+
+def load_keywords_for_file(image_path: str) -> list[str]:
+    return parse_xmp_keywords(resolve_xmp_path(image_path))
+
+
+def load_catalog_for_file(image_path: str) -> tuple[int, str, list[str]]:
+    """Rating, color label, and keywords from one sidecar parse (or skip)."""
+    return parse_xmp_catalog(resolve_xmp_path(image_path))
+
+
+def write_xmp_label(xmp_path: str, label: str) -> None:
+    if not xmp_path:
+        raise ValueError("Invalid xmp path")
+    with _xmp_write_lock(xmp_path):
+        _write_xmp_label_locked(xmp_path, label)
+
+
+def _write_xmp_label_locked(xmp_path: str, label: str) -> None:
+    from xmp_catalog import normalize_color_label
+
+    label = normalize_color_label(label)
+    ET.register_namespace("x", X_NS)
+    ET.register_namespace("rdf", RDF_NS)
+    ET.register_namespace("crs", CRS_NS)
+    ET.register_namespace("xmp", XMP_NS)
+    ET.register_namespace("dc", DC_NS)
+
+    root = None
+    if os.path.isfile(xmp_path):
+        try:
+            root = ET.parse(xmp_path).getroot()
+        except Exception:
+            root = None
+    if root is None:
+        if not label:
+            return
+        root = ET.Element(f"{{{X_NS}}}xmpmeta")
+        rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+        desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+        desc.set(f"{{{RDF_NS}}}about", "")
+    else:
+        desc = _find_or_create_rdf_description(root)
+    _set_xmp_label_on_desc(desc, label)
+    if _sidecar_description_is_empty(desc):
+        if os.path.isfile(xmp_path):
+            os.remove(xmp_path)
+        return
+    _write_xmp_tree_atomic(root, xmp_path)
+
+
+def write_label_for_file(image_path: str, label: str) -> None:
+    xmp_path = resolve_xmp_path(image_path)
+    if not xmp_path:
+        raise ValueError("Invalid image path")
+    write_xmp_label(xmp_path, label)
+
+
+def write_xmp_keywords(xmp_path: str, keywords: list[str]) -> None:
+    if not xmp_path:
+        raise ValueError("Invalid xmp path")
+    with _xmp_write_lock(xmp_path):
+        _write_xmp_keywords_locked(xmp_path, keywords)
+
+
+def _write_xmp_keywords_locked(xmp_path: str, keywords: list[str]) -> None:
+    from xmp_catalog import normalize_keywords
+
+    keywords = normalize_keywords(keywords)
+    ET.register_namespace("x", X_NS)
+    ET.register_namespace("rdf", RDF_NS)
+    ET.register_namespace("crs", CRS_NS)
+    ET.register_namespace("xmp", XMP_NS)
+    ET.register_namespace("dc", DC_NS)
+
+    root = None
+    if os.path.isfile(xmp_path):
+        try:
+            root = ET.parse(xmp_path).getroot()
+        except Exception:
+            root = None
+    if root is None:
+        if not keywords:
+            return
+        root = ET.Element(f"{{{X_NS}}}xmpmeta")
+        rdf = ET.SubElement(root, f"{{{RDF_NS}}}RDF")
+        desc = ET.SubElement(rdf, f"{{{RDF_NS}}}Description")
+        desc.set(f"{{{RDF_NS}}}about", "")
+    else:
+        desc = _find_or_create_rdf_description(root)
+    _set_dc_subject_on_desc(desc, keywords)
+    if _sidecar_description_is_empty(desc):
+        if os.path.isfile(xmp_path):
+            os.remove(xmp_path)
+        return
+    _write_xmp_tree_atomic(root, xmp_path)
+
+
+def write_keywords_for_file(image_path: str, keywords: list[str]) -> None:
+    xmp_path = resolve_xmp_path(image_path)
+    if not xmp_path:
+        raise ValueError("Invalid image path")
+    write_xmp_keywords(xmp_path, keywords)
 
 
 # Per-path memo for read_as_shot_temperature: the value is a per-file constant
@@ -1493,6 +1685,7 @@ def _write_xmp_adjustments_locked(xmp_path: str, adj: Dict[str, float]) -> None:
     ET.register_namespace("rdf", RDF_NS)
     ET.register_namespace("crs", CRS_NS)
     ET.register_namespace("xmp", XMP_NS)
+    ET.register_namespace("dc", DC_NS)
 
     root = None
     if os.path.isfile(xmp_path):

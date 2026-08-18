@@ -40,7 +40,9 @@ class ThumbnailLabel(QLabel):
         self._gallery_selected = False
         self._gallery_edited = False
         self._gallery_rating = 0
+        self._gallery_color_label = ""
         self._burst_stack_count = 0
+        self._raw_jpeg_paired = False
         self.file_path = None
         self._drag_start_pos = None
         self._drag_started = False
@@ -159,12 +161,53 @@ class ThumbnailLabel(QLabel):
     def setPixmap(self, pixmap) -> None:
         super().setPixmap(pixmap)
         self._update_rating_badge()
+        self._update_color_label_badge()
         self._update_burst_stack_badge()
+        self._update_raw_jpeg_badge()
         self._update_edited_badge()
 
     def set_gallery_rating(self, rating: int) -> None:
         self._gallery_rating = max(0, min(5, int(rating or 0)))
         self._update_rating_badge()
+
+    def set_gallery_color_label(self, label: str) -> None:
+        self._gallery_color_label = str(label or "")
+        self._update_color_label_badge()
+
+    def _update_color_label_badge(self) -> None:
+        badge = getattr(self, "_color_label_badge", None)
+        label = str(getattr(self, "_gallery_color_label", "") or "")
+        from xmp_catalog import COLOR_LABEL_RGB
+
+        rgb = COLOR_LABEL_RGB.get(label)
+        if rgb and self._thumb_pixels_ready():
+            if badge is None:
+                badge = QLabel(self)
+                self._color_label_badge = badge
+            r, g, b = rgb
+            badge.setStyleSheet(
+                f"background: rgb({r},{g},{b});"
+                f" border: 1px solid {theme.rgba(theme.VOID_RGB, 180)};"
+                " border-radius: 5px;"
+            )
+            badge.setFixedSize(10, 10)
+            badge.setToolTip(label)
+            badge.show()
+            self._position_color_label_badge()
+        elif badge is not None:
+            badge.hide()
+
+    def _position_color_label_badge(self) -> None:
+        badge = getattr(self, "_color_label_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        rating = getattr(self, "_rating_badge", None)
+        margin = 4
+        x = margin
+        if rating is not None and rating.isVisible():
+            x = rating.x() + rating.width() + 4
+        badge.move(max(0, x), max(0, self.height() - badge.height() - margin))
+        badge.raise_()
 
     def _update_rating_badge(self) -> None:
         badge = getattr(self, "_rating_badge", None)
@@ -185,6 +228,7 @@ class ThumbnailLabel(QLabel):
             badge.adjustSize()
             badge.show()
             self._position_rating_badge()
+            self._position_color_label_badge()
         elif badge is not None:
             badge.hide()
 
@@ -196,9 +240,49 @@ class ThumbnailLabel(QLabel):
         badge.move(max(0, margin), max(0, self.height() - badge.height() - margin))
         badge.raise_()
 
+    def set_raw_jpeg_paired(self, paired: bool) -> None:
+        self._raw_jpeg_paired = bool(paired)
+        self._update_raw_jpeg_badge()
+
+    def _update_raw_jpeg_badge(self) -> None:
+        badge = getattr(self, "_raw_jpeg_badge", None)
+        paired = bool(getattr(self, "_raw_jpeg_paired", False))
+        burst = int(getattr(self, "_burst_stack_count", 0) or 0)
+        if paired and burst < 2 and self._thumb_pixels_ready():
+            if badge is None:
+                badge = QLabel(self)
+                badge.setStyleSheet(
+                    f"color: {theme.INK}; font-size: 10px; font-weight: 700;"
+                    f" background: rgba({theme.VOID_RGB[0]}, {theme.VOID_RGB[1]}, {theme.VOID_RGB[2]}, 0.72);"
+                    f" border: 1px solid rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.25);"
+                    " border-radius: 3px; padding: 0px 4px;"
+                )
+                badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._raw_jpeg_badge = badge
+            badge.setText("R+J")
+            badge.setToolTip("RAW + JPEG pair")
+            badge.adjustSize()
+            badge.show()
+            self._position_raw_jpeg_badge()
+        elif badge is not None:
+            badge.hide()
+
+    def _position_raw_jpeg_badge(self) -> None:
+        badge = getattr(self, "_raw_jpeg_badge", None)
+        if badge is None or not badge.isVisible():
+            return
+        margin = 4
+        burst = getattr(self, "_burst_stack_badge", None)
+        y = margin
+        if burst is not None and burst.isVisible():
+            y = burst.y() + burst.height() + 2
+        badge.move(max(0, margin), max(0, y))
+        badge.raise_()
+
     def set_burst_stack_count(self, count: int) -> None:
         self._burst_stack_count = max(0, int(count))
         self._update_burst_stack_badge()
+        self._update_raw_jpeg_badge()
 
     def _update_burst_stack_badge(self) -> None:
         badge = getattr(self, "_burst_stack_badge", None)
@@ -266,8 +350,10 @@ class ThumbnailLabel(QLabel):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_burst_stack_badge()
+        self._position_raw_jpeg_badge()
         self._position_edited_badge()
         self._position_rating_badge()
+        self._position_color_label_badge()
 
 
 class ImageLoaded(QObject):

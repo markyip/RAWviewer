@@ -1,17 +1,14 @@
-"""One-shot automatic adjustments: Auto white balance, tone and straighten.
+"""One-shot automatic adjustments: Auto (WB + tone + straighten).
 
-All three are ESTIMATORS feeding the existing manual controls -- Auto WB
-produces a neutral-gray sample for raw_adjustments.solve_white_balance_from_sample
-(the same solver the WB dropper uses), Auto tone produces the six PV2012 Light
-slider values, Auto straighten produces a CropAngle for the Transform slider.
-The user sees exactly which sliders moved and can refine or undo with the normal
-controls; nothing here writes pixels or sidecars itself.
+The Adjust panel has a single Auto button. The host runs the three ESTIMATORS
+in this module and writes Temperature/Tint, the six PV2012 Light sliders, and
+CropAngle in one save — so Ctrl+Z undoes the lot. Saturation, Vibrance and HSL
+are never written; colour after Auto is hand-graded in Color / WB and HSL.
 
-That is the whole reason this module exists rather than reusing
-raw_tone_recovery: recovery renders display pixels for the P-key preview, so
-there are no slider values behind it to record, refine, or write to a sidecar.
-An "auto" that produced pixels would be the one destructive step in a
-non-destructive pipeline.
+Each estimator still exists on its own for tests and for the WB dropper
+(which is not Auto). Nothing here writes pixels or sidecars itself; that is
+the whole reason this module exists rather than reusing raw_tone_recovery.
+
 """
 
 from __future__ import annotations

@@ -310,3 +310,149 @@ def apply_pipeline_lut_encoded(
     if lut_working_space(adj) == LUT_SPACE_LINEAR:
         return encoded
     return apply_creative_lut_encoded(encoded, adj, peak)
+
+
+# Chooser thumbs: tiny as-shot display, then LUT only (no Exposure/WB/tone/masks).
+LUT_PREVIEW_LONG_EDGE = 80
+LUT_PREVIEW_AMOUNT = 100.0
+
+
+def lut_chooser_identity_adj(adj: dict | None = None) -> dict:
+    """Adj used to render the LUT-chooser base (as-shot / defaults).
+
+    Callers may pass the live Adjust dict; Exposure, WB, tone, HSL, masks,
+    vignette, and LUT amount/name are ignored so thumbs never bake user
+    grading. Only ``AsShotTemperature`` is kept so Temperature stays at
+    as-shot (identity WB).
+    """
+    from raw_adjustments import AS_SHOT_TEMP_KEY
+
+    out: dict = {}
+    shot = (adj or {}).get(AS_SHOT_TEMP_KEY)
+    if shot is None:
+        return out
+    try:
+        val = float(shot)
+    except (TypeError, ValueError):
+        return out
+    out[AS_SHOT_TEMP_KEY] = val
+    out["Temperature"] = val
+    return out
+
+
+def lut_chooser_as_shot_display_u8(
+    base: np.ndarray,
+    adj: dict | None = None,
+) -> np.ndarray:
+    """Tiny as-shot display RGB for LUT thumbs.
+
+    Downscales once, then encodes with identity adj. ``adj`` is accepted so
+    a helper call can pass the live Adjust dict; Exposure and other user
+    sliders are ignored (see ``lut_chooser_identity_adj``). uint8 buffers
+    are treated as already display-referred (embedded JPEG / browse).
+    """
+    identity = lut_chooser_identity_adj(adj)
+    tiny = downscale_rgb_for_lut_preview(base)
+    if tiny is None or getattr(tiny, "ndim", 0) < 2:
+        return tiny
+    if getattr(tiny, "dtype", None) == np.uint8:
+        return np.ascontiguousarray(tiny)
+    from raw_edit_pipeline import linear_to_display_uint8, process_linear_edit_buffer
+
+    lin = process_linear_edit_buffer(tiny, identity, preview=True)
+    return np.ascontiguousarray(linear_to_display_uint8(lin, identity))
+
+
+def lut_preview_cache_key(
+    image_token: str,
+    lut_id: str,
+    amount: float = LUT_PREVIEW_AMOUNT,
+    space: str = LUT_SPACE_DEFAULT,
+) -> tuple:
+    """Cache key: ``(image_path_or_generation, lut_id, amount, space)`` → pixmap."""
+    return (
+        str(image_token or ""),
+        str(lut_id or ""),
+        int(round(float(amount))),
+        str(space or LUT_SPACE_DEFAULT),
+    )
+
+
+def downscale_rgb_for_lut_preview(
+    rgb: np.ndarray, long_edge: int = LUT_PREVIEW_LONG_EDGE
+) -> np.ndarray:
+    """Resize RGB to ``long_edge`` (64–96px). Preserves dtype (uint8 display or linear)."""
+    if rgb is None or getattr(rgb, "ndim", 0) < 2:
+        return rgb
+    h = int(rgb.shape[0])
+    w = int(rgb.shape[1])
+    m = max(h, w)
+    edge = max(16, int(long_edge))
+    if m <= edge:
+        return np.ascontiguousarray(rgb)
+    import cv2
+
+    scale = edge / float(m)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    return cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
+
+
+def _u8_to_linear_approx(encoded: np.ndarray) -> np.ndarray:
+    """Approximate BT.709 EOTF inverse for Linear-space LUT thumbs."""
+    x = encoded.astype(np.float32) / 255.0
+    return np.where(x < 0.081, x / 4.5, ((x + 0.099) / 1.099) ** (1.0 / 0.45)).astype(
+        np.float32
+    )
+
+
+def _linear_to_u8_bt709(linear: np.ndarray) -> np.ndarray:
+    from fast_raw_decode import _gamma_lut8
+
+    idx = np.clip(linear.astype(np.float32) * 65535.0 + 0.5, 0, 65535).astype(np.uint16)
+    return np.ascontiguousarray(_gamma_lut8()[idx])
+
+
+def apply_lut_to_preview_uint8(
+    rgb_u8: np.ndarray,
+    lut_name: str,
+    amount: float = LUT_PREVIEW_AMOUNT,
+    space: str = LUT_SPACE_DEFAULT,
+) -> np.ndarray:
+    """Apply one managed LUT to a tiny uint8 RGB preview (display-stage, not full pipeline)."""
+    if rgb_u8 is None or not lut_name:
+        return rgb_u8
+    adj = {
+        LUT_NAME_KEY: str(lut_name),
+        LUT_AMOUNT_KEY: float(amount),
+        LUT_SPACE_KEY: space or LUT_SPACE_DEFAULT,
+    }
+    if lut_working_space(adj) == LUT_SPACE_LINEAR:
+        lin = _u8_to_linear_approx(rgb_u8)
+        mapped = apply_creative_lut(lin, adj)
+        return _linear_to_u8_bt709(mapped)
+    return apply_creative_lut_encoded(rgb_u8, adj, 255.0)
+
+
+def render_lut_chooser_previews(
+    base_u8: np.ndarray,
+    lut_names: list[str],
+    *,
+    amount: float = LUT_PREVIEW_AMOUNT,
+    space: str = LUT_SPACE_DEFAULT,
+) -> dict[str, np.ndarray]:
+    """Map ``lut_id`` → uint8 RGB. Empty ``lut_id`` is identity (no LUT)."""
+    if base_u8 is None:
+        return {}
+    tiny = downscale_rgb_for_lut_preview(base_u8)
+    if tiny.dtype != np.uint8:
+        tiny = np.clip(np.asarray(tiny, dtype=np.float32) * 255.0 + 0.5, 0, 255).astype(
+            np.uint8
+        )
+    tiny = np.ascontiguousarray(tiny)
+    out: dict[str, np.ndarray] = {"": tiny}
+    for name in lut_names:
+        if not name:
+            continue
+        out[str(name)] = apply_lut_to_preview_uint8(tiny, name, amount, space)
+    return out

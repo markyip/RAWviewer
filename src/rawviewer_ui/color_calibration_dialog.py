@@ -8,15 +8,15 @@ from typing import List, Tuple, Optional, Dict, Any
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QPointF, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QBrush, QPixmap, QPolygonF
+from PyQt6.QtCore import Qt, QPointF, QRectF, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QDesktopServices, QFont, QImage, QPainter, QPen, QBrush, QPixmap, QPolygonF
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -27,10 +27,12 @@ try:
 except ModuleNotFoundError:
     import theme as theme
 from color_calibration import (
+    camera_identity_for_file,
     validate_and_detect_color_checker,
     calibrate_camera_curves_and_hsl,
     save_camera_profile,
 )
+from dpreview_samples import dpreview_open_url
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +94,29 @@ class ColorCheckerPreviewCanvas(QWidget):
         self.setMouseTracking(True)
         self.setMinimumSize(480, 360)
 
+    def set_image(self, image: Optional[np.ndarray]) -> None:
+        """Replace the calibration reference without touching the viewer's current photo."""
+        self._drag_idx = -1
+        self._hover_idx = -1
+        self.corners = [
+            QPointF(0.2, 0.3),
+            QPointF(0.8, 0.3),
+            QPointF(0.8, 0.7),
+            QPointF(0.2, 0.7),
+        ]
+        if image is None or getattr(image, "size", 0) == 0:
+            self.image = None
+            self.display_image = None
+            self._pixmap = QPixmap()
+        else:
+            self._pixmap = self._numpy_to_pixmap(image)
+        self.update()
+        self.corners_changed.emit()
+
     def _numpy_to_pixmap(self, img: np.ndarray) -> QPixmap:
-        if img is None or img.size == 0:
+        if img is None or getattr(img, "size", 0) == 0:
+            self.image = img
+            self.display_image = img
             return QPixmap()
 
         # self.image stays scene-linear (calibrate_camera_curves_and_hsl does
@@ -118,12 +141,14 @@ class ColorCheckerPreviewCanvas(QWidget):
 
     def auto_detect(self) -> bool:
         """Run OpenCV MCC auto-detection to find 24-patch ColorChecker grid corners."""
+        src = getattr(self, "display_image", self.image)
+        if src is None or getattr(src, "size", 0) == 0:
+            return False
         try:
             import cv2.mcc as mcc
             detector = mcc.CCheckerDetector.create()
             # Detect on the display-encoded copy: MCC's patch models assume a
             # normally-rendered image, not a scene-linear one.
-            src = getattr(self, "display_image", self.image)
             img_bgr = cv2.cvtColor(src, cv2.COLOR_RGB2BGR) if src.ndim == 3 else src
             # process(image[, nc]) -- nc is the NUMBER OF CHARTS to look for,
             # not a chart type. Passing mcc.MCC24 here asked for nc=0 (the
@@ -144,6 +169,8 @@ class ColorCheckerPreviewCanvas(QWidget):
         return False
 
     def get_pixel_corners(self) -> List[Tuple[float, float]]:
+        if self.image is None or getattr(self.image, "size", 0) == 0:
+            return []
         h, w = self.image.shape[:2]
         return [(p.x() * w, p.y() * h) for p in self.corners]
 
@@ -215,8 +242,17 @@ class ColorCheckerPreviewCanvas(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         rect = self._get_image_rect()
-        if not self._pixmap.isNull():
-            painter.drawPixmap(rect.toRect(), self._pixmap)
+        if self._pixmap.isNull():
+            painter.setPen(QColor(theme.INK_FAINT))
+            painter.drawText(
+                self.rect(),
+                Qt.AlignmentFlag.AlignCenter,
+                "Choose a ColorChecker / studio-scene file,\nor find a DPReview sample.",
+            )
+            painter.end()
+            return
+
+        painter.drawPixmap(rect.toRect(), self._pixmap)
 
         poly_pts = [
             QPointF(rect.left() + p.x() * rect.width(), rect.top() + p.y() * rect.height())
@@ -245,7 +281,7 @@ class ColorCalibrationDialog(QDialog):
 
     def __init__(
         self,
-        image: np.ndarray,
+        image: Optional[np.ndarray],
         make: str,
         model: str,
         iso: Optional[int] = None,
@@ -261,9 +297,11 @@ class ColorCalibrationDialog(QDialog):
         self.has_factory_profile = has_factory_profile
         # Sample from the same 8-bit buffer the canvas displays, so the corner
         # pins the user places map 1:1 onto the pixels that get averaged.
-        self.image = _to_uint8_rgb(image)
-        self.make = make or "Camera"
-        self.model = model or "Model"
+        self.image = _to_uint8_rgb(image) if image is not None else None
+        self._exif_make = (make or "").strip()
+        self._exif_model = (model or "").strip()
+        self.make = self._exif_make or "Camera"
+        self.model = self._exif_model or "Model"
         self.iso = iso
         # The frame the chart was shot on, so the saved profile can record
         # whether the WB guardrail was active for it -- see
@@ -293,12 +331,29 @@ class ColorCalibrationDialog(QDialog):
                 margin-top: 8px;
                 padding-top: 12px;
             }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }}
             QComboBox {{
-                background-color: {theme.SURFACE};
+                background-color: {theme.RAISED};
                 color: {theme.INK};
                 border: 1px solid {theme.LINE};
-                border-radius: 4px;
+                border-radius: 6px;
                 padding: 4px 8px;
+                min-height: 22px;
+            }}
+            QComboBox:hover {{
+                border-color: {theme.rgba(theme.INK_RGB, 70)};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {theme.SURFACE};
+                border: 1px solid {theme.LINE};
+                color: {theme.INK};
+                selection-background-color: {theme.rgba(theme.EMBER_RGB, 140)};
+                selection-color: {theme.INK};
+                outline: none;
             }}
             """
         )
@@ -353,6 +408,8 @@ class ColorCalibrationDialog(QDialog):
             note_lbl.setStyleSheet(f"color: {colour}; font-size: 12px;")
             layout.addWidget(note_lbl)
 
+        layout.addWidget(self._build_source_bar())
+
         # Canvas Widget
         self.canvas = ColorCheckerPreviewCanvas(self.image, self)
         layout.addWidget(self.canvas, 1)
@@ -363,18 +420,7 @@ class ColorCalibrationDialog(QDialog):
         auto_btn = QPushButton("🎯 Auto-Detect Chart", self)
         auto_btn.setMinimumHeight(34)
         auto_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        auto_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {theme.SURFACE};
-                border: 1px solid {theme.LINE};
-                border-radius: 6px;
-                color: {theme.INK};
-                padding: 4px 12px;
-                font-weight: 500;
-            }}
-            """
-        )
+        auto_btn.setStyleSheet(self._secondary_button_style())
         auto_btn.clicked.connect(self._on_auto_detect)
         ctrl_box.addWidget(auto_btn)
 
@@ -392,16 +438,7 @@ class ColorCalibrationDialog(QDialog):
         cancel_btn.setMinimumHeight(34)
         cancel_btn.setMinimumWidth(80)
         cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        cancel_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {theme.SURFACE};
-                border: 1px solid {theme.LINE};
-                border-radius: 6px;
-                color: {theme.INK};
-            }}
-            """
-        )
+        cancel_btn.setStyleSheet(theme.form_secondary_button_stylesheet())
         cancel_btn.clicked.connect(self.reject)
         ctrl_box.addWidget(cancel_btn)
 
@@ -410,65 +447,195 @@ class ColorCalibrationDialog(QDialog):
         apply_btn.setMinimumHeight(34)
         apply_btn.setMinimumWidth(230)
         apply_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        apply_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {theme.EMBER};
-                border: none;
-                border-radius: 6px;
-                color: #FFFFFF;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background-color: {theme.EMBER_DIM};
-            }}
-            """
-        )
+        apply_btn.setStyleSheet(theme.form_primary_button_stylesheet())
         apply_btn.clicked.connect(self._on_apply_calibration)
         ctrl_box.addWidget(apply_btn)
 
         layout.addLayout(ctrl_box)
 
-        source_lbl = QLabel(
-            "No chart? DPReview's studio comparison scene is shot under controlled, "
-            "even studio lighting with a ColorChecker Classic in frame, and its RAW "
-            "files are downloadable per camera body — a reliable calibration source "
-            "when you don't own a chart."
-        )
-        source_lbl.setWordWrap(True)
-        source_lbl.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
-        layout.addWidget(source_lbl)
-
         # Attempt initial auto-detection
+        if self.image is not None:
+            self.canvas.auto_detect()
+
+    def _camera_caption(self) -> str:
+        name = f"{self._exif_make} {self._exif_model}".strip()
+        iso_str = f"  ·  ISO {self.iso}" if self.iso else ""
+        if name:
+            return f"Camera (EXIF): {name}{iso_str}"
+        return "Camera (EXIF): unknown — DPReview will open a generic studio/cameras page."
+
+    def _secondary_button_style(self) -> str:
+        return theme.form_secondary_button_stylesheet()
+
+    def _alert(self, title: str, body: str) -> None:
+        try:
+            from rawviewer_app.widgets import CustomWarningDialog
+        except ModuleNotFoundError:
+            from widgets import CustomWarningDialog
+        CustomWarningDialog(
+            self,
+            title=title,
+            message=title,
+            informative_text=body,
+        ).exec()
+
+    def _build_source_bar(self) -> QWidget:
+        box = QGroupBox("Calibration image")
+        col = QVBoxLayout(box)
+        col.setContentsMargins(10, 14, 10, 10)
+        col.setSpacing(8)
+
+        self._camera_lbl = QLabel(self._camera_caption())
+        self._camera_lbl.setWordWrap(True)
+        self._camera_lbl.setStyleSheet(f"color: {theme.INK}; font-size: 12px; font-weight: 500;")
+        col.addWidget(self._camera_lbl)
+
+        advise = QLabel(
+            "Prefer a DPReview studio or sample image when you can: those scenes are "
+            "standardized, and RAWviewer's calibration was developed against them as "
+            "reference. Search on DPReview, download the file yourself, then choose it "
+            "here. This does not replace the photo you were editing."
+        )
+        advise.setWordWrap(True)
+        advise.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+        col.addWidget(advise)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+
+        own_btn = QPushButton("Use my own file…", self)
+        own_btn.setObjectName("calibrate_own_file_btn")
+        own_btn.setMinimumHeight(32)
+        own_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        own_btn.setStyleSheet(self._secondary_button_style())
+        own_btn.clicked.connect(self._on_choose_own_file)
+        row.addWidget(own_btn)
+
+        dpr_btn = QPushButton("Find a DPReview sample", self)
+        dpr_btn.setObjectName("calibrate_dpreview_btn")
+        dpr_btn.setMinimumHeight(32)
+        dpr_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        dpr_btn.setStyleSheet(self._secondary_button_style())
+        dpr_btn.clicked.connect(self._on_open_dpreview)
+        row.addWidget(dpr_btn)
+        row.addStretch()
+        col.addLayout(row)
+
+        self._source_status = QLabel("")
+        self._source_status.setWordWrap(True)
+        self._source_status.setStyleSheet(f"color: {theme.INK_FAINT}; font-size: 11px;")
+        col.addWidget(self._source_status)
+        return box
+
+    def _on_open_dpreview(self) -> None:
+        url = dpreview_open_url(self._exif_make, self._exif_model)
+        QDesktopServices.openUrl(QUrl(url))
+        terms = f"{self._exif_make} {self._exif_model}".strip()
+        if terms:
+            self._source_status.setText(
+                f"Opened DPReview search for {terms}. Download a studio/sample file, "
+                "then choose it with Use my own file."
+            )
+        else:
+            self._source_status.setText(
+                "Opened DPReview's studio comparison. Pick a camera, download a "
+                "sample, then choose it with Use my own file."
+            )
+
+    def _on_choose_own_file(self) -> None:
+        try:
+            from raw_file_extensions import get_supported_extensions
+
+            exts = " ".join(f"*{e}" for e in get_supported_extensions())
+        except Exception:
+            exts = "*.nef *.cr2 *.cr3 *.arw *.dng *.raf *.rw2 *.orf *.jpg *.jpeg *.tif *.tiff"
+        start = ""
+        if self.source_file:
+            start = os.path.dirname(self.source_file)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a ColorChecker / studio-scene file",
+            start,
+            f"Images ({exts});;All Files (*)",
+        )
+        if not path:
+            return
+        self._load_calibration_file(path)
+
+    def _load_calibration_file(self, path: str) -> None:
+        try:
+            from unified_image_processor import UnifiedImageProcessor
+
+            img = UnifiedImageProcessor().decode_raw_edit_base(
+                path, use_full_resolution=False
+            )
+        except Exception as exc:
+            self._alert(
+                "Could not open file",
+                f"Failed to decode {os.path.basename(path)}:\n{exc}",
+            )
+            return
+        if img is None or not hasattr(img, "shape"):
+            self._alert(
+                "Could not open file",
+                f"Could not decode {os.path.basename(path)} as a calibration image.",
+            )
+            return
+
+        make, model, iso_val = camera_identity_for_file(path)
+        self.image = _to_uint8_rgb(img)
+        self.source_file = path
+        if make or model:
+            self._exif_make = (make or "").strip()
+            self._exif_model = (model or "").strip()
+            self.make = self._exif_make or "Camera"
+            self.model = self._exif_model or "Model"
+            self.iso = iso_val
+            iso_str = f" (ISO {self.iso})" if self.iso else ""
+            self.setWindowTitle(
+                f"Camera Color Calibration — {self.make} {self.model}{iso_str}"
+            )
+        self._camera_lbl.setText(self._camera_caption())
+        self.canvas.set_image(self.image)
         self.canvas.auto_detect()
+        self._source_status.setText(
+            f"Using {os.path.basename(path)} as the calibration reference "
+            "(the photo you were editing is unchanged)."
+        )
 
     def _on_auto_detect(self) -> None:
         if not self.canvas.auto_detect():
-            QMessageBox.information(
-                self,
+            self._alert(
                 "Auto-Detect Chart",
                 "OpenCV could not auto-locate the ColorChecker chart. Please manually drag the "
                 "4 corner handles over the chart.\n\n"
-                "Auto-detection is most reliable on an evenly lit, square-on chart. If you don't "
-                "have one, DPReview's studio comparison scene includes a ColorChecker Classic "
-                "under controlled studio lighting, with downloadable RAW files per camera body.",
+                "Auto-detection is most reliable on an evenly lit, square-on chart. "
+                "Use “Find a DPReview sample” to search DPReview, download a studio/sample "
+                "file yourself, then choose it with “Use my own file”.",
             )
 
     def _on_apply_calibration(self) -> None:
+        img = self.canvas.image if getattr(self.canvas, "image", None) is not None else self.image
+        if img is None or getattr(img, "size", 0) == 0:
+            self._alert(
+                "No calibration image",
+                "Choose a ColorChecker / studio-scene file, or find a DPReview sample "
+                "and upload it here.",
+            )
+            return
         corners = self.canvas.get_pixel_corners()
-        valid, err_msg, sampled = validate_and_detect_color_checker(self.image, corners)
+        valid, err_msg, sampled = validate_and_detect_color_checker(img, corners)
         
         if not valid or not sampled:
-            QMessageBox.warning(
-                self,
+            self._alert(
                 "Color Checker Target Not Detected",
                 (err_msg or "No valid 24-patch ColorChecker chart was detected within the 4 corners.")
                 + "\n\nA usable calibration frame needs the chart evenly lit, square-on to the "
                 "camera, and free of glare — uneven lighting is indistinguishable from camera "
                 "colour error and would be baked into the profile.\n\n"
-                "If you don't have a chart, DPReview's studio comparison scene is shot under "
-                "controlled studio lighting with a ColorChecker Classic in frame, and its RAW "
-                "files can be downloaded for most camera bodies.",
+                "Prefer a DPReview studio/sample image (standardized; this calibrator was "
+                "developed against them). Search with “Find a DPReview sample”, download "
+                "the file yourself, then choose it with “Use my own file”.",
             )
             return
 
@@ -480,10 +647,10 @@ class ColorCalibrationDialog(QDialog):
         )
         self.calibrated_profile = profile
 
-        QMessageBox.information(
-            self,
+        self._alert(
             "Camera Calibration Complete",
-            f"Successfully calibrated and saved color profile for {self.make} {self.model}!\n\n"
-            f"All future photos from this camera model will automatically receive this calibrated baseline color science without needing manual XMP or 3D LUT exports.",
+            f"Successfully calibrated and saved color profile for {self.make} {self.model}.\n\n"
+            "All future photos from this camera model will automatically receive this calibrated "
+            "baseline color science without needing manual XMP or 3D LUT exports.",
         )
         self.accept()

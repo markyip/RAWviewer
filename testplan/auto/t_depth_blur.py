@@ -92,12 +92,33 @@ def test_masked_background_blur():
     print("  OK   masked blur softens coverage only")
 
 
+def test_bokeh_layer_blurs_outside_subject():
+    h, w = 32, 32
+    alpha = np.zeros((h, w), dtype=np.float32)
+    alpha[:, 16:] = 1.0  # right = subject kept sharp
+    layer = MaskLayer(
+        alpha,
+        name="Background blur",
+        source="bokeh",
+        invert=True,
+        adjustments={"Blur": 80.0},
+    )
+    rng = np.random.default_rng(1)
+    base = rng.random((h, w, 3), dtype=np.float32)
+    base[:, ::2] = 1.0
+    out = apply_mask_layers(base, MaskLayerStack([layer]))
+    assert float(np.std(out[:, :16])) < float(np.std(base[:, :16]))
+    assert float(np.mean(np.abs(out[:, 16:] - base[:, 16:]))) < 1e-5
+    print("  OK   bokeh layer blurs the inverted (background) side")
+
+
 def main() -> int:
     test_depth_sigma_zero_at_focus()
     test_weight_sigma_scales_with_coverage()
     test_variable_blur_softens_high_sigma()
     test_depth_layer_blur_composites()
     test_masked_background_blur()
+    test_bokeh_layer_blurs_outside_subject()
     print("All depth-blur checks passed.")
     return 0
 

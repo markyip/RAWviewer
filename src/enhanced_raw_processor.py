@@ -1375,13 +1375,18 @@ class EXIFExtractor(QObject):
                             break
                     except Exception:
                         pass
-            if not rating:
-                try:
-                    from raw_adjustments import load_rating_for_file
+            color_label = ""
+            keywords: list = []
+            try:
+                from raw_adjustments import load_catalog_for_file
 
-                    rating = load_rating_for_file(file_path)
-                except Exception:
-                    pass
+                cat_rating, color_label, keywords = load_catalog_for_file(file_path)
+                if not rating:
+                    rating = cat_rating
+                color_label = color_label or ""
+                keywords = keywords or []
+            except Exception:
+                pass
 
             # Build return dict
             result = {
@@ -1402,6 +1407,8 @@ class EXIFExtractor(QObject):
                 'aperture': aperture,
                 'iso': iso,
                 'rating': rating,
+                'color_label': color_label,
+                'keywords': keywords,
                 'verified_orientation': True,
                 'raw_exif_sensor_meta_ver': RAW_EXIF_SENSOR_META_VER,
             }

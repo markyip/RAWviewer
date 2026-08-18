@@ -36,7 +36,7 @@
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
 - **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
 - **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Plus edition also understands plain descriptions like `sunset on beach` — all offline.
-- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed by hand or found for you. Every edit is saved to an XMP sidecar; your RAW is never modified.
+- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed by hand or found for you (Plus). Every edit is saved to an XMP sidecar; your RAW is never modified.
 
 <p align="center">
   <img src="docs/images/single-view.jpg" alt="Full-screen single-image view with film strip and star rating" width="900">
@@ -57,6 +57,23 @@
 - **Lean Standard edition** for machines where install size matters
 
 Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
+
+## Unreleased 3.1.0 (stability + performance vs 3.0.2)
+
+GitHub Releases still ship **3.0.x**. **3.1.0 is a stability and performance patch**, not a feature train, and is **not tagged**. Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md). Notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md#version-310).
+
+What 3.1.0 **claims** vs 3.0.2:
+
+- **RAM-tier Adjust cap** — slower / ≤16 GB machines settle on a smaller working base; export stays full-res. No memory-tier picker.
+- **Gallery scroll and load** — viewport-aimed queue, missing tiles return, trackpad sub-pixel, folder change does not wipe thumbs, cancel-once loads.
+- **Caches** — byte-budget full-image cache; no wipe of every tier when Adjust is opened and left unchanged; sidecar parse shared.
+- **Export reliability** — band seams, silent AI-denoise skip on the banded path, OpenMP/BLAS not taking every core.
+- **Crash / thread / cancel** — no `QPixmap` on workers, slot double-free, `id()` registry, CUDA-GL thread, prefetch error storm.
+- **HE/HE\* NEF** — Adjust via embedded JPEG instead of refusing the file; undecodable RAW keeps the embedded preview (not a grey tile).
+
+*(Uncommitted, targeted for this patch — not in git yet:)* EXIF blob persist for fields that only lived in RAM; scrollbar date bubble without per-tick flash/decode.
+
+Masks, pairing, MCP, Share to AI, and the rest of the working-tree feature train are **not** 3.1.0 shipping — see [Looking ahead](#looking-ahead) (**3.2+**). Generative editing stays shelved.
 
 ---
 
@@ -98,6 +115,8 @@ Open any folder of photos (drag it onto the window, or double-click a photo). Th
 | **← / →** | Previous / next photo |
 | **Space** or double-click | Fit ↔ 100% zoom |
 | **0–5** | Star rating (0 clears; bottom stars work too) |
+| **6–9** | Color label (Red / Yellow / Green / Blue; **Shift+6** Purple; same key clears) |
+| **K** | Edit keywords (XMP `dc:subject`) |
 | **↓** | Move to Discard folder |
 | **C** | Compare selected photos side by side |
 | **E** | Open the Adjust (develop) panel |
@@ -117,6 +136,8 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **←** / **→** | Previous / next image |
 | **Scroll wheel** | Previous / next (single view, fit mode) |
 | **0–5** | Star rating (**0** clears; bottom stars in single view too) |
+| **6–9** | Color label (Red / Yellow / Green / Blue; **Shift+6** Purple; same key clears) |
+| **K** | Edit keywords |
 | **↓** | Move to Discard folder |
 | **Delete** | Delete image(s) |
 | **Esc** | Gallery: clear selection → exit filters · Single view: back to gallery |
@@ -132,11 +153,13 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos) |
 
-**Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above.
+**Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above. Color-label dots sit on tiles when a label is set.
+
+**RAW+JPEG pairing** (on by default) stacks a same-name RAW and JPEG into one `R+J` tile. **Burst grouping** is optional and **off** by default (needs **3+** frames; you pick the cover). Pairing and bursts are separate toggles — a two-file RAW+JPEG pair is never a burst.
 
 **Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** uses Reconstruct + local polish to judge extreme contrast. It is not the Highlights/Shadows sliders (those compress/lift scene-linear luminance and cannot restore hue in fully blown whites).
 
-**Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out. On Mac the menu includes AirDrop (original file) and messaging apps such as WhatsApp / Signal (JPEG proxy for RAW). See [`docs/macos-sharing.md`](docs/macos-sharing.md).
+**Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out. On Mac the menu includes AirDrop (original file) and messaging apps such as WhatsApp / Signal (JPEG proxy for RAW). **File → Share to AI agent** hands a preview JPEG + MCP ticket to an agent (style brief is not a generative prompt). See [`docs/macos-sharing.md`](docs/macos-sharing.md) and [`docs/MCP.md`](docs/MCP.md).
 
 </details>
 
@@ -164,8 +187,8 @@ While the Adjust panel is open (**E**):
 |-----|--------|
 | **E** / **Esc** | Close Adjust (returns to browse mode) |
 | **D** / **B** / **X** / **H** | Hold to paint **Dodge** / **Burn** / **Eraser** / **Heal** — sweep the pointer, no mouse button. Releasing puts the tool away |
-| **P** | Hold to paint into the selected **mask**. On the Masks tab, **X** erases from it instead of from Dodge/Burn |
-| **O** | Toggle **Mask** overlay (when a brush tool is armed) |
+| **P** | On the **Masks** tab: hold/arm to paint into the selected mask (**X** erases). In browse (Adjust closed), **P** is still the Reconstruct *preview* — Auto does not bake that |
+| **O** / **M** | Mask overlay (Masks tab: one overlay at a time; **I** invert) |
 | **Two-finger scroll** | Change **Brush Size** when a brush is armed (**Ctrl+scroll** still zooms) |
 | **←** / **→** | Nudge the focused slider (or previous/next image if none focused) |
 | **Ctrl/Cmd+Z** | Undo last edit step |
@@ -334,53 +357,50 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 
 ## Looking ahead
 
-Project directions and remaining work that are **not** tied to a particular release. Release notes cover shipped features only.
+**3.1.0** is the [stability / performance patch vs 3.0.2](#unreleased-310-stability--performance-vs-302). The items below are **later trains (3.2+)**. Much of this **already exists in the `development` tree** (some only in the dirty working tree). It is **kept**; it is **not** what 3.1.0 claims to ship.
 
 Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
 
-### 🛠️ In Active Development (Development Branch / Worktree)
+### Later trains (3.2+) — in the tree, not 3.1.0
 
-These are on `development` for **3.1.0** (not yet tagged). GitHub Releases still ship **3.0.x**.
-
-| Item | Status | Notes |
+| Area | Where | Notes |
 |------|--------|-------|
-| **Local masks** (brush, luminance, colour, AI, depth) | **Landed, stabilising** | Stacked mask layers with per-layer Light / Color / Detail. Brush, Luminance, Color, **AI Selection**, **Smart Object**, **Sky**, and **Depth**; Depth + Blur is continuous defocus from the focus plane. Linear and radial gradients still place coverage by dragging on the photo (`src/raw_mask_layers.py`, `src/raw_ai_masks.py`, `src/raw_depth_blur.py`) |
-| **Mask grouping** (Lightroom-style) | **Landed, stabilising** | Drag one mask onto another to combine them: components hold coverage (add/subtract), the group holds one adjustment set. Cheaper to render than separate layers (`src/raw_mask_layers.py`, `src/mask_layers_xmp.py`) |
-| **Auto Tone** | **Landed, stabilising** | One press sets Exposure, Contrast, Highlights, Shadows, Whites and Blacks from the unedited photo. Highlights/Shadows follow the linear stop budget; it will not pin Highlights on a little specular clip (`src/raw_auto_adjust.py`) |
-| **Highlight recovery on Adjust** | **Landed, stabilising** | Edit-base Reconstructs clipped CFA (with WB gain so default Adjust stays as bright as browse). Highlights see single-channel clips, not only Rec.709 luma. **P** remains a session-only recovery *preview* — not the sliders |
-| **Photo merging** | **Landed, stabilising** | HDR, panorama, panorama HDR, and focus stacking from a gallery selection, with a live preview before commit |
-| **Non-destructive JPEG / TIFF / WebP / PNG** | **Landed, stabilising** | Ordinary image files open in Adjust with XMP sidecars. 16-bit files keep their bit depth through the editor |
-| **AI Denoise on Export** (SCUNet / NAFNet ONNX) | **Landed, stabilising** | Tiled ONNX denoise for Plus export with an **AI Detail** slider. NAFNet is the CPU-platform default; half-res mode with detail restore keeps large frames tractable |
-| **AI Upscale 2× on Export** (Real-ESRGAN) | **Landed, stabilising** | Tiled Real-ESRGAN as the final export stage, ~65s for a 32MP frame. Being a GAN it invents plausible detail rather than reconstructing it, so its strength is dialable toward a plain resize |
-| **Camera Colour Calibration** (ColorChecker) | **Landed, stabilising** | Auto-detect or hand-place a 24-patch chart; solves WB + HSL per camera/ISO and inherits by EXIF model. Profiles record the decode they were calibrated against and warn if it changes |
-| **Lens distortion + anamorphic desqueeze** | **Landed, stabilising** | Profile correction plus a Distortion slider; desqueeze presets 1.33× / 1.5× / 1.6× / 2.0×. Local masks stay aligned with the unsqueezed frame |
-| **Share to WhatsApp / Signal / AirDrop** | **Landed, stabilising** | Messaging apps get a JPEG (they reject camera RAW); AirDrop still sends the original, with a Mac person picker outside Qt |
-| **Slower-machine editing** | **Landed, stabilising** | RAM tier caps the Adjust working copy on ≤16 GB (live-drag and settle). Export still decodes full resolution |
-| **Edit Nikon HE/HE\* NEF** | **Landed, stabilising** | LibRaw still cannot demosaic these, so the editor falls back to the embedded JPEG. An 8-bit display-referred base: white balance and highlight recovery have far less headroom, everything else behaves as it does editing a JPEG |
-| **Generative Editing** (instruction-based) | **Shelved** (parked on `generative-editing`) | Backend complete and tested, UI removed. Models that are *good* are too large to embed (~6–7 GB resident). Revival path is a local OpenAI-compatible image-edits server, not an in-process provider |
+| **Masks tab** (brush, luminance, colour, invert, grouping) + Plus AI masks / Depth / Blur background | `development` | Not a 3.1.0 product claim |
+| **Auto Tone** (WB + Light + straighten; no P-bake / VLM look) | `development` | |
+| **Merges** — HDR, panorama, panorama HDR, focus stack | `development` | |
+| **Raster develop** (JPEG / TIFF / WebP / PNG / BMP + XMP) | `development` | HE-NEF *refuse* fix is the 3.1.0 exception |
+| **ColorChecker**, manual distortion, anamorphic desqueeze | `development` | DPReview sample button is dirty-tree |
+| **Share** WhatsApp / Signal (JPEG for RAW) and AirDrop | `development` | |
+| **AI Upscale 2×** | `development` | Plus denoise *reliability* is 3.1.0 |
+| **Color labels / keywords** | dirty tree | Label **cache persist** is 3.1.0-targeted hardening, not the catalog UI |
+| **RAW+JPEG pairing**, Adjust dock L/R, LUT thumbs, splash | dirty tree | |
+| **Export template / GPS strip / watermark / queue** | dirty tree | Queue must not drop jobs *when that train ships*; watermark uses a **corner patch** (not a full-page overlay) as a memory choice |
+| **Headless MCP**, Share to AI agent | dirty tree | GUI does **not** live-reload MCP sidecars |
+| **In-app UI language** | dirty tree (`i18n/`) | Catalog on disk; UI still English until `QTranslator` |
 
-"Landed, stabilising" means the feature is on `development` and working, but has not been through a tagged release.
-
-### 🔮 Planned Future Roadmap (Not Yet in Worktree)
+### Still not done
 
 | Rank | Item | Feasibility | Effort | Notes |
 |------|------|-------------|--------|-------|
-| 1 | **Cold-folder edited tile regen** (`SIDECAR_ADJUST` / edited-preview opt-in) | **High** | M | Save-from-Adjust already bakes editor-aligned thumb/grid/preview; cold folders still show embedded JPEG until the next Adjust visit |
-| 2 | **User-facing upscale strength** | **High** | S | Real-ESRGAN ships over-sharpened at full strength; the blend already exists as an env var and wants a slider with a gentler default |
-| 3 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts "not this" points; only positive ones are sent, so an over-reaching selection can be trimmed by brush but not re-solved |
-| 4 | **Generative editing via a local server** | **High** | S | A model on the user's machine behind an OpenAI-compatible `/v1/images/edits` endpoint (mlx-serve, ComfyUI). `LocalServerProvider` is written on `generative-editing`; only the UI to select it was removed |
-| 5 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 6 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW perf; Windows still SDR tone-map |
-| 7 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously conflicted with the fast load pipeline; needs a non-regressing design |
-| 8 | **VLM-assisted auto adjust** | **Low–Medium** | L | Product + model/API scope (e.g. local Ollama); not blocked by editor plumbing alone |
-| 9 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync (download → existing pipeline → upload XMP/export); OAuth + virtual folder session |
-| 10 | **Edit Nikon HE/HE\* NEF as sensor data** | **Low** | L+ | Editing works today from the embedded JPEG; true RAW development still waits on a LibRaw decoder for HE mosaics |
+| 1 | **MCP live-reload in the GUI** | **High** | M | Headless MCP already writes XMP + previews. Adjust / gallery do not watch those sidecars — re-open the photo (or Adjust) to see agent edits |
+| 2 | **In-app UI language** | **High** | M | `i18n/catalog.json` holds EN / zh-TW / ja wording. The app is not wired to `QTranslator` yet; the UI stays English |
+| 3 | **Cold-folder edited tile regen** | **High** | M | Save-from-Adjust already bakes editor-aligned thumbs; a folder you have never opened in Adjust can still show the embedded JPEG |
+| 4 | **User-facing upscale strength** | **High** | S | Real-ESRGAN can look over-sharp at full strength; the blend exists as an env var, not a slider |
+| 5 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts “not this” points; only positive clicks are sent. Trim over-reach with the brush |
+| 6 | **Named People / familiar-face clustering** | **Medium** | L | Plus can filter `has:face`. There is no named People library or “this is the same person” clustering |
+| 7 | **Generative editing via a local server** | **High** | S | **Shelved** in-app. Backend parked on `generative-editing`. Revival is a local OpenAI-compatible `/v1/images/edits` server, not an embedded 6–7 GB model |
+| 8 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
+| 9 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW speed; Windows stays SDR tone-map |
+| 10 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously fought the fast load pipeline |
+| 11 | **VLM-assisted Auto** | **Low–Medium** | L | Product Auto is WB + Light + straighten only — no pixel/VLM look. A vision-model Auto is out of scope |
+| 12 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync + OAuth; not started |
+| 13 | **Edit Nikon HE/HE\* NEF as sensor data** | **Low** | L+ | Today: embedded JPEG. True RAW waits on a LibRaw HE mosaic decoder |
 
-**Current limits (not aspirational):**
-- **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG (edited **badge** + save-bake cover the common path). Same root as row 1.
-- **Nikon HE-NEF** edits from the embedded JPEG, not sensor data — an 8-bit base, so heavy white-balance and highlight-recovery moves have little to work with (row 10).
-- **AI model weights download on first use**, not bundled: the mask, denoise and upscale features each need one online session before they work offline.
-- **Smart Object returns one mask.** It finds everything salient — on a studio scene, eleven separate regions — but hands them back as a single mask. Use AI Selection to isolate one thing.
+**Current limits (not a wishlist):**
+- **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG.
+- **Nikon HE-NEF** develops from the embedded JPEG (8-bit) once Adjust is allowed (3.1.0 refuse fix).
+- **No memory-tier picker** — RAM caps are automatic.
+- **3.2+ only:** AI mask / upscale weights on first use; Smart Object returns one mask; watermarks JPEG/WebP only; Apply to Burst Group copies tone / colour / noise, not crop, dodge/heal, or local masks.
 
 ---
 

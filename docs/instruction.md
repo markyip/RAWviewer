@@ -49,20 +49,27 @@ than RAW-recovery preview.
 
 ## 2. Create a mask
 
-The **Create new mask** section holds every way to start one, as five buttons
-— one press each.
+The **Create new mask** section holds every way to start one — one press each.
 
 | Button | What happens | Needs a model |
 |---|---|---|
 | **Brush** | Makes an empty mask. Does **not** arm Add — press **P** (or Add) to paint | no |
+| **Luminance** | Click a tone; masks a brightness band | no |
+| **Color** | Click a colour; masks similar pixels | no |
+| **AI Selection** | Arms click-to-select; click a thing to mask that thing | yes |
 | **Smart Object** | One press; finds whatever stands out and masks it | yes (~214 MB) |
 | **Sky** | One press; masks the sky | yes |
 | **Depth** | One press; full-strength near, fading to nothing far | yes |
-| **AI Selection** | Arms click-to-select; click a thing to mask that thing | yes |
+| **Blur background** | One press; keeps the focused subject sharp and blurs the rest | yes |
 
 Only **Brush** creates a layer up front. The AI tools each create their own
 on completion, so arming one and changing your mind leaves nothing behind
 (`adjust_panel.py:_on_mask_create`).
+
+**Blur background** uses the camera AF / SubjectArea point when present
+(SAM click at that point) and otherwise Smart Object. It writes Invert +
+Blur Amount on a new layer (`source="bokeh"`). An existing Smart Object or
+AI Selection matte is reused so the net is not run twice.
 
 **Brush creates and persists immediately** (`main.py:_on_mask_layer_add` →
 `_on_adjust_panel_editing_finished`). Empty layers are kept in the sidecar
@@ -88,7 +95,7 @@ obvious next move. The floor is an absolute pixel count
 (`_SAM_MIN_SELECTED_PX`), not a fraction of the frame: AI Selection is for
 small specific things, and a coverage-% gate would refuse them.
 
-**Smart Object / Sky / Depth / AI Selection** put up a progress dialog with
+**Smart Object / Sky / Depth / Blur background / AI Selection** put up a progress dialog with
 Cancel and a 90-second inference timeout (`_AI_MASK_TIMEOUT_MS`). The timeout
 applies to inference only — on first use the model downloads and the wait is
 left open, because no sane timeout covers that.
@@ -99,12 +106,12 @@ Two refusals worth knowing:
   across the whole frame, and a mostly-distant scene with one near subject
   can legitimately have tiny high-alpha coverage; "flat" is reported by the
   depth estimator returning `None`, not by this gate.
-- Pressing **Smart Object** / **Sky** / **Depth** twice selects the existing
+- Pressing **Smart Object** / **Sky** / **Depth** / **Blur background** twice selects the existing
   mask of that kind instead of stacking a duplicate. Smart Object and Sky
   also nudge toward AI Selection for picking a specific object; Depth does
   not, because distance grading is not object selection.
 - A used one-shot tool disables with an explanation
-  (`set_ai_tool_used`). Only subject / sky / depth are one-shot; brush and
+  (`set_ai_tool_used`). Only subject / sky / depth / bokeh are one-shot; brush and
   AI Selection are ignored harmlessly.
 
 ---

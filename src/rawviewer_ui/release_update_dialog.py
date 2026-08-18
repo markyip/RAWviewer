@@ -12,15 +12,17 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
+import theme
 from release_update import APP_VERSION, RELEASE_PAGE_URL
 
 
 class ReleaseUpdateDialog(QDialog):
-    """Material Design 3 prompt matching MobileCLIPDownloadDialog styling."""
+    """Material Design 3 prompt matching CustomConfirmDialog / theme.py chrome."""
 
     _DIALOG_WIDTH = 480
 
@@ -47,12 +49,12 @@ class ReleaseUpdateDialog(QDialog):
 
         self.container = QWidget(self)
         self.container.setObjectName("releaseUpdateDialogContainer")
-        self.container.setStyleSheet("""
-            #releaseUpdateDialogContainer {
-                background-color: #14120F;
-                border: 1px solid #3A332A;
+        self.container.setStyleSheet(f"""
+            #releaseUpdateDialogContainer {{
+                background-color: {theme.VOID};
+                border: 1px solid {theme.LINE};
                 border-radius: 12px;
-            }
+            }}
         """)
 
         main_layout = QVBoxLayout(self.container)
@@ -60,43 +62,43 @@ class ReleaseUpdateDialog(QDialog):
         main_layout.setSpacing(12)
 
         title_label = QLabel("Update Available")
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #EDE7DD;
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK};
                 font-size: 18px;
                 font-weight: 600;
-            }
+            }}
         """)
         main_layout.addWidget(title_label)
 
         message_label = QLabel(f"A new version of RAWviewer is available ({latest_v}).")
         message_label.setWordWrap(True)
-        message_label.setStyleSheet("""
-            QLabel {
-                color: #96897A;
+        message_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK_MUTED};
                 font-size: 14px;
                 line-height: 1.45;
-            }
+            }}
         """)
         main_layout.addWidget(message_label)
 
         notes = (release_notes or "").strip()
         if notes:
             whats_new_label = QLabel("What's new")
-            whats_new_label.setStyleSheet("""
-                QLabel {
-                    color: #D9691E;
+            whats_new_label.setObjectName("releaseUpdateWhatsNewHeading")
+            whats_new_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {theme.EMBER};
                     font-size: 13px;
                     font-weight: 600;
-                }
+                }}
             """)
             main_layout.addWidget(whats_new_label)
 
             # Read-only, scroll-capped so a long release body can't grow the
             # dialog unbounded; the notes are already trimmed upstream.
-            from PyQt6.QtWidgets import QScrollArea
-
             notes_label = QLabel(notes)
+            notes_label.setObjectName("releaseUpdateWhatsNew")
             notes_label.setWordWrap(True)
             notes_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextSelectableByMouse
@@ -104,12 +106,12 @@ class ReleaseUpdateDialog(QDialog):
             notes_label.setAlignment(
                 Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
             )
-            notes_label.setStyleSheet("""
-                QLabel {
-                    color: #B7ADA0;
+            notes_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {theme.INK_MUTED};
                     font-size: 13px;
                     line-height: 1.5;
-                }
+                }}
             """)
             notes_scroll = QScrollArea()
             notes_scroll.setWidget(notes_label)
@@ -125,17 +127,32 @@ class ReleaseUpdateDialog(QDialog):
             """)
             main_layout.addWidget(notes_scroll)
 
+        notes_link = QLabel(
+            f'<a href="{self.release_url}" '
+            f'style="color: {theme.EMBER}; text-decoration: none;">Release notes</a>'
+        )
+        notes_link.setObjectName("releaseUpdateNotesLink")
+        notes_link.setTextFormat(Qt.TextFormat.RichText)
+        notes_link.setOpenExternalLinks(True)
+        notes_link.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.EMBER};
+                font-size: 13px;
+            }}
+        """)
+        main_layout.addWidget(notes_link)
+
         note_label = QLabel(
             f"You are running {current_v}.\n"
             f"The latest release is {latest_v}.\n\n"
             "Open the GitHub releases page to download the update?"
         )
         note_label.setWordWrap(True)
-        note_label.setStyleSheet("""
-            QLabel {
-                color: #665D50;
+        note_label.setStyleSheet(f"""
+            QLabel {{
+                color: {theme.INK_FAINT};
                 font-size: 13px;
-            }
+            }}
         """)
         main_layout.addWidget(note_label)
 
@@ -148,24 +165,24 @@ class ReleaseUpdateDialog(QDialog):
         not_now_btn.setFixedHeight(36)
         not_now_btn.setMinimumWidth(110)
         not_now_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        not_now_btn.setStyleSheet("""
-            QPushButton {
+        not_now_btn.setStyleSheet(f"""
+            QPushButton {{
                 background-color: transparent;
-                color: #96897A;
-                border: 1px solid #4A4A4A;
+                color: {theme.INK_MUTED};
+                border: 1px solid {theme.LINE};
                 border-radius: 18px;
                 font-size: 14px;
                 font-weight: 500;
                 padding: 0px 20px;
-            }
-            QPushButton:hover {
-                color: #EDE7DD;
-                background-color: rgba(255, 255, 255, 0.05);
-                border-color: #D9691E;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 255, 255, 0.1);
-            }
+            }}
+            QPushButton:hover {{
+                color: {theme.INK};
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.05);
+                border-color: {theme.EMBER};
+            }}
+            QPushButton:pressed {{
+                background-color: rgba({theme.INK_RGB[0]}, {theme.INK_RGB[1]}, {theme.INK_RGB[2]}, 0.1);
+            }}
         """)
         not_now_btn.clicked.connect(self.reject)
         button_layout.addWidget(not_now_btn)
@@ -174,23 +191,23 @@ class ReleaseUpdateDialog(QDialog):
         open_btn.setFixedHeight(36)
         open_btn.setMinimumWidth(160)
         open_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        open_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #3A332A;
-                color: #EDE7DD;
-                border: 1px solid #4A4A4A;
+        open_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {theme.RAISED};
+                color: {theme.INK};
+                border: 1px solid {theme.LINE};
                 border-radius: 18px;
                 font-size: 14px;
                 font-weight: 600;
                 padding: 0px 20px;
-            }
-            QPushButton:hover {
-                background-color: #4A4A4A;
-                border-color: #D9691E;
-            }
-            QPushButton:pressed {
-                background-color: #2F2F2F;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {theme.RAISED_HI};
+                border-color: {theme.EMBER};
+            }}
+            QPushButton:pressed {{
+                background-color: {theme.SURFACE};
+            }}
         """)
         open_btn.clicked.connect(self.accept)
         open_btn.setDefault(True)
@@ -242,6 +259,7 @@ def show_release_update_dialog(
     current: str | None = None,
     latest: str | None = None,
     release_url: str | None = None,
+    release_notes: str | None = None,
 ) -> bool:
     """Return True when the user chose Not Now; False after Open Download Page."""
     dialog = ReleaseUpdateDialog(
@@ -249,5 +267,6 @@ def show_release_update_dialog(
         current=current,
         latest=latest,
         release_url=release_url,
+        release_notes=release_notes,
     )
     return dialog.exec() != QDialog.DialogCode.Accepted

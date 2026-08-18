@@ -1092,12 +1092,54 @@ def _apply_ai_upscale(img: np.ndarray, *, cancel_check=None, progress_cb=None) -
         return img
 
 
-def _xmp_extratags(embed_xmp_path: Optional[str]) -> list:
+def _xmp_extratags(embed_xmp_path: Optional[str], *, strip_gps: bool = False) -> list:
     if not embed_xmp_path or not os.path.isfile(embed_xmp_path):
         return []
     with open(embed_xmp_path, "rb") as f:
         xmp_bytes = f.read()
+    if strip_gps:
+        try:
+            from export_options import strip_gps_from_xmp_text
+
+            xmp_bytes = strip_gps_from_xmp_text(xmp_bytes.decode("utf-8", errors="replace")).encode("utf-8")
+        except Exception:
+            pass
     return [(700, "B", len(xmp_bytes), xmp_bytes, False)]
+
+
+def _export_exif_bytes(source_path: str, *, strip_gps: bool, copy_metadata: bool) -> bytes | None:
+    if not copy_metadata:
+        return None
+    try:
+        from export_options import _read_source_exif, strip_gps_from_pil_exif
+
+        exif = _read_source_exif(source_path)
+        if exif is None:
+            return None
+        if strip_gps:
+            strip_gps_from_pil_exif(exif)
+        data = exif.tobytes() if hasattr(exif, "tobytes") else None
+        return data or None
+    except Exception:
+        return None
+
+
+def _watermark_uint8(
+    rgb_u8,
+    watermark_text: str = "",
+    watermark_signature: str = "",
+    watermark_font: str = "",
+    watermark_corner: str = "",
+):
+    from export_options import apply_export_watermark_rgb
+
+    return apply_export_watermark_rgb(
+        rgb_u8,
+        remark=watermark_text or "",
+        signature=watermark_signature or "",
+        font_id=watermark_font or "",
+        corner=watermark_corner or "",
+    )
 
 
 def _write_16bit_rgb_tiff(
@@ -1105,6 +1147,7 @@ def _write_16bit_rgb_tiff(
     rgb_uint16: np.ndarray,
     *,
     embed_xmp_path: Optional[str] = None,
+    strip_gps: bool = False,
 ) -> None:
     """
     Write a genuine 16-bit-per-channel, 3-sample RGB TIFF via ``tifffile``.
@@ -1123,7 +1166,7 @@ def _write_16bit_rgb_tiff(
     """
     import tifffile
 
-    extratags = _xmp_extratags(embed_xmp_path)
+    extratags = _xmp_extratags(embed_xmp_path, strip_gps=strip_gps)
     _ensure_parent_dir(output_path)
     tifffile.imwrite(
         output_path,
@@ -1144,6 +1187,13 @@ def export_adjusted_tiff16(
     use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
+    strip_gps: bool = True,
+    watermark_text: str = "",
+    watermark_signature: str = "",
+    watermark_font: str = "",
+    watermark_corner: str = "",
+    source_path: str = "",
+    copy_metadata: bool = True,
 ) -> None:
     """Bake adjustments to 16-bit sRGB TIFF; optionally embed XMP packet."""
     processed = _process_for_export(
@@ -1161,7 +1211,9 @@ def export_adjusted_tiff16(
             progress_cb(0.5, "encode")
         except TypeError:
             progress_cb(0.95)
-    _write_16bit_rgb_tiff(output_path, out, embed_xmp_path=embed_xmp_path)
+    _write_16bit_rgb_tiff(
+        output_path, out, embed_xmp_path=embed_xmp_path, strip_gps=strip_gps
+    )
 
 
 def export_adjusted_jpeg(
@@ -1174,6 +1226,13 @@ def export_adjusted_jpeg(
     use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
+    strip_gps: bool = True,
+    watermark_text: str = "",
+    watermark_signature: str = "",
+    watermark_font: str = "",
+    watermark_corner: str = "",
+    source_path: str = "",
+    copy_metadata: bool = True,
 ) -> None:
     """Bake adjustments to 8-bit JPEG."""
     processed = _process_for_export(
@@ -1186,6 +1245,9 @@ def export_adjusted_jpeg(
         except TypeError:
             progress_cb(0.85)
     out = linear_to_display_uint8(processed, adj)
+    out = _watermark_uint8(
+        out, watermark_text, watermark_signature, watermark_font, watermark_corner
+    )
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
@@ -1195,12 +1257,17 @@ def export_adjusted_jpeg(
             progress_cb(0.5, "encode")
         except TypeError:
             progress_cb(0.95)
-    im.save(
-        output_path,
-        format="JPEG",
-        quality=max(1, min(100, int(quality))),
-        subsampling=0,
+    save_kw: dict = {
+        "format": "JPEG",
+        "quality": max(1, min(100, int(quality))),
+        "subsampling": 0,
+    }
+    exif_bytes = _export_exif_bytes(
+        source_path, strip_gps=strip_gps, copy_metadata=copy_metadata
     )
+    if exif_bytes:
+        save_kw["exif"] = exif_bytes
+    im.save(output_path, **save_kw)
 
 
 def export_adjusted_webp(
@@ -1213,6 +1280,13 @@ def export_adjusted_webp(
     use_ai_upscale: bool = False,
     cancel_check=None,
     progress_cb=None,
+    strip_gps: bool = True,
+    watermark_text: str = "",
+    watermark_signature: str = "",
+    watermark_font: str = "",
+    watermark_corner: str = "",
+    source_path: str = "",
+    copy_metadata: bool = True,
 ) -> None:
     """Bake adjustments to 8-bit WebP.
 
@@ -1229,6 +1303,9 @@ def export_adjusted_webp(
         except TypeError:
             progress_cb(0.85)
     out = linear_to_display_uint8(processed, adj)
+    out = _watermark_uint8(
+        out, watermark_text, watermark_signature, watermark_font, watermark_corner
+    )
     from PIL import Image
 
     im = Image.fromarray(out, mode="RGB")
@@ -1238,12 +1315,17 @@ def export_adjusted_webp(
             progress_cb(0.5, "encode")
         except TypeError:
             progress_cb(0.95)
-    im.save(
-        output_path,
-        format="WEBP",
-        quality=max(1, min(100, int(quality))),
-        method=6,
+    save_kw: dict = {
+        "format": "WEBP",
+        "quality": max(1, min(100, int(quality))),
+        "method": 6,
+    }
+    exif_bytes = _export_exif_bytes(
+        source_path, strip_gps=strip_gps, copy_metadata=copy_metadata
     )
+    if exif_bytes:
+        save_kw["exif"] = exif_bytes
+    im.save(output_path, **save_kw)
 
 
 EXPORT_FORMAT_TIFF16 = "tiff16"
@@ -1266,6 +1348,13 @@ def export_adjusted_image(
     progress_cb=None,
     use_ai_denoise: bool = False,
     use_ai_upscale: bool = False,
+    strip_gps: bool = True,
+    watermark_text: str = "",
+    watermark_signature: str = "",
+    watermark_font: str = "",
+    watermark_corner: str = "",
+    source_path: str = "",
+    copy_metadata: bool = True,
 ) -> None:
     """Dispatch baked export (TIFF16 / JPEG / WebP)."""
     fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
@@ -1273,21 +1362,24 @@ def export_adjusted_image(
         raise RuntimeError("Full-resolution RAW decode failed")
     if cancel_check is not None and cancel_check():
         raise ExportCancelled()
+    extra = dict(
+        use_ai_denoise=use_ai_denoise,
+        use_ai_upscale=use_ai_upscale,
+        cancel_check=cancel_check,
+        progress_cb=progress_cb,
+        strip_gps=strip_gps,
+        watermark_text=watermark_text,
+        watermark_signature=watermark_signature,
+        watermark_font=watermark_font,
+        watermark_corner=watermark_corner,
+        source_path=source_path,
+        copy_metadata=copy_metadata,
+    )
     if fmt == EXPORT_FORMAT_JPEG:
-        export_adjusted_jpeg(
-            rgb_linear, adj, output_path,
-            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
-            cancel_check=cancel_check, progress_cb=progress_cb,
-        )
+        export_adjusted_jpeg(rgb_linear, adj, output_path, **extra)
     elif fmt == EXPORT_FORMAT_WEBP:
-        export_adjusted_webp(
-            rgb_linear, adj, output_path,
-            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
-            cancel_check=cancel_check, progress_cb=progress_cb,
-        )
+        export_adjusted_webp(rgb_linear, adj, output_path, **extra)
     else:
         export_adjusted_tiff16(
-            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path,
-            use_ai_denoise=use_ai_denoise, use_ai_upscale=use_ai_upscale,
-            cancel_check=cancel_check, progress_cb=progress_cb,
+            rgb_linear, adj, output_path, embed_xmp_path=embed_xmp_path, **extra
         )

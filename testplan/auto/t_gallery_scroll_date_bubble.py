@@ -41,14 +41,23 @@ def main() -> int:
         _scroll_date_bubble = None
         _scroll_area = None
         _gallery_layout_items: list = []
+        _thumbnail_cache = None
+        _scroll_bubble_last_content_t = 0.0
+        _scroll_bubble_cached_text = ""
+        _scroll_bubble_cached_pixmap = None
+        _scroll_bubble_committed_path = None
 
         # The real implementations, verbatim.
         set_capture_date_provider = JustifiedGallery.set_capture_date_provider
         _layout_index_at_scroll_y = JustifiedGallery._layout_index_at_scroll_y
+        _scroll_preview_path = JustifiedGallery._scroll_preview_path
         _scroll_date_text = JustifiedGallery._scroll_date_text
+        _scroll_preview_pixmap = JustifiedGallery._scroll_preview_pixmap
         _update_scroll_date_bubble = JustifiedGallery._update_scroll_date_bubble
         _hide_scroll_date_bubble = JustifiedGallery._hide_scroll_date_bubble
         _on_slider_pressed = JustifiedGallery._on_slider_pressed
+        _SCROLL_BUBBLE_THROTTLE_S = JustifiedGallery._SCROLL_BUBBLE_THROTTLE_S
+        _thumb_base_key = "__base__"
 
         def _on_scroll_settled(self):
             pass
@@ -142,6 +151,74 @@ def main() -> int:
         "the bubble stays fully on screen at both ends",
         all(0 <= y <= limit for y in ys),
         f"ys={ys} limit={limit}",
+    )
+
+    # --- cache-hit-only keyframe; miss keeps date-only --------------------
+    bar.setValue(0)
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "layout index 0 maps to the first file",
+        gallery._scroll_preview_path() == paths[0],
+        gallery._scroll_preview_path(),
+    )
+    bar.setValue(20000)
+    check(
+        "scroll y 20000 maps to the photo at that layout row",
+        gallery._scroll_preview_path() == paths[100],
+        gallery._scroll_preview_path(),
+    )
+    bar.setValue(0)
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "cache miss leaves the preview empty (date only)",
+        bubble.isVisible() and bubble.text() and not bubble.preview_is_visible(),
+        f"visible={bubble.isVisible()} text={bubble.text()!r} preview={bubble.preview_is_visible()}",
+    )
+    check(
+        "cache miss pixmap helper returns None",
+        gallery._scroll_preview_pixmap(paths[0]) is None,
+    )
+
+    from PyQt6.QtGui import QPixmap, QColor
+
+    hit = QPixmap(120, 80)
+    hit.fill(QColor(40, 80, 120))
+    gallery._thumbnail_cache = {(paths[0], "__base__"): hit}
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "a late cache fill during the same drag does not flash in a preview",
+        bubble.isVisible() and bool(bubble.text()) and not bubble.preview_is_visible(),
+        f"preview={bubble.preview_is_visible()} text={bubble.text()!r}",
+    )
+
+    gallery._on_slider_released()
+    gallery._on_slider_pressed()
+    check(
+        "in-memory thumb shows a keyframe next to the date",
+        bubble.preview_is_visible() and bool(bubble.text()),
+        f"preview={bubble.preview_is_visible()} text={bubble.text()!r}",
+    )
+    gallery._thumbnail_cache = {}
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "evicting the thumb during the drag does not drop the shown keyframe",
+        bubble.isVisible() and bubble.preview_is_visible(),
+    )
+
+    bar.setValue(20000)
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "a new path that misses stays date-only",
+        bubble.isVisible()
+        and gallery._scroll_preview_path() == paths[100]
+        and not bubble.preview_is_visible(),
+        f"path={gallery._scroll_preview_path()!r} preview={bubble.preview_is_visible()}",
+    )
+    gallery._thumbnail_cache = {(paths[100], "__base__"): hit}
+    gallery._update_scroll_date_bubble(force=True)
+    check(
+        "populating the cache after that miss still stays date-only",
+        bubble.isVisible() and not bubble.preview_is_visible(),
     )
 
     # --- release ----------------------------------------------------------

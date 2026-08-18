@@ -1,6 +1,6 @@
 # Feature Feasibility Research
 
-**Status:** Research notes (dev branch, targeting 3.1.x+)
+**Status:** Research notes (dev branch, later trains **3.2+**; 3.1.0 is stability/performance vs 3.0.2)
 **Last updated:** 2026-07-25
 
 Forward-looking feasibility and effort evaluations for candidate editing

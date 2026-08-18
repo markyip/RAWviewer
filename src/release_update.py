@@ -92,15 +92,46 @@ def fetch_latest_release(*, timeout: float = 8.0) -> Dict[str, str]:
     }
 
 
+# Short copy used only when GitHub's release body is empty. Prefer live notes
+# so 3.2+ is never hardcoded here. 3.1.0 is a stability/performance patch vs 3.0.2.
+_FALLBACK_WHATS_NEW: Dict[Tuple[int, ...], str] = {
+    (3, 1, 0): (
+        "• Stability and performance patch versus 3.0.2 — not a feature dump\n"
+        "• Memory, gallery load/scroll, cache, export reliability, and crash/cancel paths\n"
+        "• Generative editing and later-train features stay shelved"
+    ),
+}
+
+
+def fallback_whats_new(version_label: str) -> str:
+    """Local what's-new only for known tags with no GitHub body. Empty for 3.2+."""
+    parts = parse_version(version_label)
+    key = (parts + (0, 0, 0))[:3]
+    return _FALLBACK_WHATS_NEW.get(key, "")
+
+
+def notes_from_release(release: Dict[str, Any]) -> str:
+    """Short bullets from GitHub ``body`` / ``whats_new``, else a known-tag fallback."""
+    body = str(release.get("body") or release.get("whats_new") or "").strip()
+    notes = summarize_release_notes(body)
+    if notes:
+        return notes
+    tag = str(release.get("tag_name") or release.get("name") or "").strip()
+    return fallback_whats_new(tag)
+
+
 def mock_update_result(
     mock_latest: str,
     current_version: Optional[str] = None,
     *,
     release_url: Optional[str] = None,
+    release_body: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build a successful update-check result for UI/dev testing (no network)."""
     current = (current_version or APP_VERSION).strip() or APP_VERSION
     latest = (mock_latest or "").strip()
+    if release_body is None:
+        release_body = os.environ.get("RAWVIEWER_MOCK_UPDATE_NOTES", "")
     result: Dict[str, Any] = {
         "current": current,
         "latest": latest,
@@ -109,8 +140,8 @@ def mock_update_result(
         "release_url": (release_url or RELEASE_PAGE_URL).strip() or RELEASE_PAGE_URL,
         "release_name": f"RAWviewer {latest} (preview)",
         "published_at": "",
-        "release_notes": summarize_release_notes(
-            os.environ.get("RAWVIEWER_MOCK_UPDATE_NOTES", "")
+        "release_notes": notes_from_release(
+            {"tag_name": latest, "body": release_body}
         ),
         "offline": False,
         "error": "",
@@ -124,17 +155,18 @@ def mock_update_result(
     return result
 
 
-def summarize_release_notes(body: str, *, max_lines: int = 8, max_chars: int = 600) -> str:
+def summarize_release_notes(body: str, *, max_lines: int = 5, max_chars: int = 420) -> str:
     """Distill a GitHub release body (markdown) to a few plain-text bullet lines.
 
     Keeps meaningful content lines (headings and list items), strips markdown
     markers, and truncates so the update prompt shows a short "what's new"
     rather than a wall of text or raw markdown. Returns "" when there is nothing
-    useful to show.
+    useful to show. Truncation adds a trailing "…".
     """
     if not body:
         return ""
     lines: list[str] = []
+    hit_line_cap = False
     for raw in body.splitlines():
         line = raw.strip()
         if not line:
@@ -148,11 +180,41 @@ def summarize_release_notes(body: str, *, max_lines: int = 8, max_chars: int = 6
             continue
         lines.append(f"• {line}")
         if len(lines) >= max_lines:
+            hit_line_cap = True
             break
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "…"
+    elif hit_line_cap:
+        text = text.rstrip() + "…"
     return text
+
+
+def result_from_github_release(
+    current: str, release: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Build a check_for_update-shaped dict from already-fetched GitHub JSON (no network)."""
+    latest = str(release.get("tag_name") or "").strip()
+    result: Dict[str, Any] = {
+        "current": current,
+        "latest": latest,
+        "is_latest": True,
+        "update_available": False,
+        "release_url": str(release.get("html_url") or RELEASE_PAGE_URL).strip()
+        or RELEASE_PAGE_URL,
+        "release_name": str(release.get("name") or latest).strip(),
+        "published_at": str(release.get("published_at") or "").strip(),
+        "release_notes": notes_from_release(release),
+        "offline": False,
+        "error": "",
+    }
+    if not latest:
+        result["error"] = "GitHub release has no tag_name"
+        return result
+    cmp = compare_version_labels(current, latest)
+    result["is_latest"] = cmp >= 0
+    result["update_available"] = cmp < 0
+    return result
 
 
 def check_for_update(
@@ -164,8 +226,10 @@ def check_for_update(
     Check whether *current_version* is the latest GitHub release.
 
     Returns a dict with keys: current, latest, is_latest, update_available,
-    release_url, release_name, published_at, offline, error (empty when check succeeded).
-    On network failure, ``offline`` is True and the caller should exit silently.
+    release_url, release_name, published_at, release_notes, offline, error
+    (empty when check succeeded). ``release_notes`` is a short bullet summary
+    of the GitHub release body (or a known-tag fallback). On network failure,
+    ``offline`` is True and the caller should exit silently.
     """
     current = (current_version or APP_VERSION).strip() or APP_VERSION
     mock_latest = os.environ.get("RAWVIEWER_MOCK_UPDATE_VERSION", "").strip()
@@ -196,19 +260,11 @@ def check_for_update(
             result["error"] = str(exc)
         return result
 
-    latest = release["tag_name"]
-    result["latest"] = latest
-    result["release_name"] = release.get("name") or latest
-    result["release_url"] = release.get("html_url") or RELEASE_PAGE_URL
-    result["published_at"] = release.get("published_at") or ""
-    result["release_notes"] = summarize_release_notes(release.get("body") or "")
-    cmp = compare_version_labels(current, latest)
-    result["is_latest"] = cmp >= 0
-    result["update_available"] = cmp < 0
+    result = result_from_github_release(current, release)
     logger.info(
         "[UPDATE] current=%s latest=%s update_available=%s",
         current,
-        latest,
+        result["latest"],
         result["update_available"],
     )
     return result

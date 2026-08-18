@@ -169,7 +169,7 @@ def test_select_button_is_named_for_what_it_does():
     # difference between "the app chooses" and "you choose".
     for btn in (
         p._mask_ai_subject_btn, p._mask_ai_sky_btn, p._mask_ai_depth_btn,
-        p._mask_ai_click_btn,
+        p._mask_ai_bokeh_btn, p._mask_ai_click_btn,
         p._mask_paint_btn, p._mask_erase_btn, p._mask_invert_btn,
     ):
         tip = btn.toolTip()
@@ -237,7 +237,8 @@ def test_create_section_shows_every_way_to_start_a_mask():
     # Luminance / Color sit with Brush (no model download). AI Selection
     # leads the AI group: it is ~10x cheaper than Smart Object.
     assert [b.text() for b in btns.values()] == [
-        "Brush", "Luminance", "Color", "AI Selection", "Smart Object", "Sky", "Depth",
+        "Brush", "Luminance", "Color", "AI Selection", "Smart Object", "Sky",
+        "Depth", "Blur background",
     ], [b.text() for b in btns.values()]
     assert getattr(p, "_mask_add_btn", None) is None, "New empty mask came back"
 
@@ -568,6 +569,10 @@ def test_one_shot_ai_tools_disable_once_used():
     assert create["subject"].isEnabled() is False  # still used
     assert "already masked" in create["depth"].toolTip()
 
+    p.set_ai_tool_used("bokeh", True)
+    assert not create["bokeh"].isEnabled(), "Create Blur background stayed live"
+    assert create["sky"].isEnabled(), "Sky was disabled by a bokeh mask"
+
     # Deleting the mask has to give the tool back, tooltip included.
     p.set_ai_tool_used("subject", False)
     assert p._mask_ai_subject_btn.isEnabled()
@@ -578,6 +583,8 @@ def test_one_shot_ai_tools_disable_once_used():
     )
     p.set_ai_tool_used("depth", False)
     assert create["depth"].isEnabled()
+    p.set_ai_tool_used("bokeh", False)
+    assert create["bokeh"].isEnabled()
     print("  OK   a used one-shot tool disables, explains, and comes back")
 
 
@@ -612,7 +619,7 @@ def test_ai_tool_used_ignores_kinds_that_are_not_one_shot():
 def test_ai_selection_is_never_disabled():
     """Every click adds something, so it is never 'already done'."""
     p = _panel()
-    for kind in ("subject", "sky", "depth"):
+    for kind in ("subject", "sky", "depth", "bokeh"):
         p.set_ai_tool_used(kind, True)
     assert p._mask_ai_click_btn.isEnabled(), "AI Selection was disabled"
     assert p._mask_create_buttons["ai_click"].isEnabled(), (
@@ -625,17 +632,18 @@ def test_busy_disables_visible_create_buttons_too():
     """A wait that only greys the hidden arming row leaves Create clickable."""
     p = _panel()
     p.set_ai_mask_tools_enabled(False)
-    for kind in ("subject", "sky", "depth", "ai_click"):
+    for kind in ("subject", "sky", "depth", "bokeh", "ai_click"):
         assert not p._mask_create_buttons[kind].isEnabled(), f"{kind} Create stayed live"
         arming = {
             "subject": p._mask_ai_subject_btn,
             "sky": p._mask_ai_sky_btn,
             "depth": p._mask_ai_depth_btn,
+            "bokeh": p._mask_ai_bokeh_btn,
             "ai_click": p._mask_ai_click_btn,
         }[kind]
         assert not arming.isEnabled(), f"{kind} arming stayed live"
     p.set_ai_mask_tools_enabled(True)
-    for kind in ("subject", "sky", "depth", "ai_click"):
+    for kind in ("subject", "sky", "depth", "bokeh", "ai_click"):
         assert p._mask_create_buttons[kind].isEnabled()
     print("  OK   busy wait greys Create buttons and arming buttons together")
 
@@ -833,10 +841,11 @@ def test_masks_tab_is_grouped_by_what_a_control_acts_on():
     # driven by these buttons rather than buttons of their own.
     labels = {b.text() for b in (
         p._mask_paint_btn, p._mask_ai_subject_btn, p._mask_ai_sky_btn,
-        p._mask_ai_depth_btn, p._mask_ai_click_btn,
+        p._mask_ai_depth_btn, p._mask_ai_bokeh_btn, p._mask_ai_click_btn,
     )}
     assert labels == {
-        "Add to this mask (P)", "Smart Object", "Sky", "Depth", "AI Selection"
+        "Add to this mask (P)", "Smart Object", "Sky", "Depth",
+        "Blur background", "AI Selection"
     }, labels
     print("  OK   the tab is grouped by what each control acts on")
 

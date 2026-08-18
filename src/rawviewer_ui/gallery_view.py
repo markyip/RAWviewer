@@ -5,7 +5,7 @@ import logging
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel
+from PyQt6.QtWidgets import QWidget, QScrollArea, QLabel, QHBoxLayout
 from PyQt6.QtCore import (
     Qt,
     QTimer,
@@ -29,13 +29,16 @@ from common_image_loader import is_raw_file
 logger = logging.getLogger(__name__)
 
 
-class _ScrollDateBubble(QLabel):
-    """Floating "when was this taken" readout, shown while dragging the scrollbar.
+class _ScrollDateBubble(QWidget):
+    """Floating date + optional keyframe, shown while dragging the scrollbar.
 
     Dragging the thumb through a few thousand photos otherwise gives no idea
     where you have landed until you let go and the thumbnails decode. The
     capture date is already known from EXIF long before any pixels are, so it
-    can answer immediately.
+    can answer immediately. A tiny in-memory thumbnail (cache-hit only) is
+    shown beside the date when one is already decoded. A miss stays date-only
+    for that path until the scrub target changes; a later cache fill must not
+    flash the preview in.
 
     Only while DRAGGING THE THUMB -- not on wheel or trackpad scrolling, which
     move a screen at a time and where a bubble over the photos would be noise.
@@ -46,33 +49,91 @@ class _ScrollDateBubble(QLabel):
     """
 
     _MARGIN_RIGHT = 14
+    _PREVIEW_PX = 80
 
     def __init__(self, parent: QWidget):
         super().__init__(parent)
         self.setObjectName("scroll_date_bubble")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet(
             f"""
-            QLabel#scroll_date_bubble {{
+            QWidget#scroll_date_bubble {{
                 background-color: {theme.rgba(theme.VOID_RGB, 235)};
-                color: {theme.INK};
                 border: 1px solid {theme.LINE};
                 border-radius: 6px;
-                padding: 6px 12px;
+            }}
+            QWidget#scroll_date_bubble QLabel {{
+                background: transparent;
+                border: none;
+                color: {theme.INK};
                 font-size: 13px;
                 font-weight: 600;
             }}
+            QWidget#scroll_date_bubble QLabel#scroll_date_bubble_preview {{
+                background-color: {theme.VOID};
+                border: 1px solid {theme.LINE};
+                border-radius: 3px;
+            }}
             """
         )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 6, 12, 6)
+        layout.setSpacing(8)
+        self._preview = QLabel(self)
+        self._preview.setObjectName("scroll_date_bubble_preview")
+        self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._preview.hide()
+        self._date = QLabel(self)
+        self._date.setObjectName("scroll_date_bubble_date")
+        self._date.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._date.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self._preview)
+        layout.addWidget(self._date)
+        self._shown_path = None
         self.hide()
 
-    def show_for(self, text: str, *, center_y: int) -> None:
+    def text(self) -> str:
+        return self._date.text()
+
+    def preview_is_visible(self) -> bool:
+        pm = self._preview.pixmap()
+        return self._preview.isVisible() and pm is not None and not pm.isNull()
+
+    def show_for(
+        self,
+        text: str,
+        *,
+        center_y: int,
+        pixmap: Optional[QPixmap] = None,
+        file_path: str = "",
+    ) -> None:
         if not text:
+            self._shown_path = None
+            self._preview.clear()
+            self._preview.hide()
             self.hide()
             return
-        self.setText(text)
-        self.adjustSize()
+        self._date.setText(text)
+        # Path identity: never rescale / swap the keyframe until the scrub
+        # target changes. Re-setting the pixmap on every thumb tick flashes.
+        if file_path != self._shown_path:
+            self._shown_path = file_path
+            if pixmap is not None and not pixmap.isNull():
+                side = self._PREVIEW_PX
+                scaled = pixmap.scaled(
+                    side,
+                    side,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+                self._preview.setPixmap(scaled)
+                self._preview.setFixedSize(side, side)
+                self._preview.show()
+            else:
+                self._preview.clear()
+                self._preview.hide()
+            self.adjustSize()
         parent = self.parentWidget()
         if parent is None:
             return
@@ -411,6 +472,10 @@ class JustifiedGallery(QWidget):
         self._zoom_anchor_state = None
         self._gallery_zoom_rebuild = False
         self._is_scrollbar_dragging = False
+        self._scroll_bubble_last_content_t = 0.0
+        self._scroll_bubble_cached_text = ""
+        self._scroll_bubble_cached_pixmap = None
+        self._scroll_bubble_committed_path = None
         self._last_scheduled_scroll_y = 0
         self._scroll_area = None
         self._last_layout_viewport_width = -1
@@ -2883,11 +2948,10 @@ class JustifiedGallery(QWidget):
         """
         self._capture_date_provider = provider
 
-    def _scroll_date_text(self) -> str:
-        """Capture date of the photo at the top of the viewport, if known."""
-        provider = getattr(self, "_capture_date_provider", None)
-        if provider is None:
-            return ""
+    _SCROLL_BUBBLE_THROTTLE_S = 0.075  # 75ms; keep overlay work off every scroll tick
+
+    def _scroll_preview_path(self) -> str:
+        """``file_path`` of the layout item at the current scrollbar value."""
         scroll = getattr(self, "_scroll_area", None)
         if scroll is None:
             return ""
@@ -2898,9 +2962,20 @@ class JustifiedGallery(QWidget):
             if idx is None:
                 return ""
             item = self._gallery_layout_items[idx]
-            path = item.get("file_path")
-            if not path:
-                return ""
+            return item.get("file_path") or ""
+        except Exception:
+            return ""
+
+    def _scroll_date_text(self, path: Optional[str] = None) -> str:
+        """Capture date of the photo at the top of the viewport, if known."""
+        provider = getattr(self, "_capture_date_provider", None)
+        if provider is None:
+            return ""
+        if not path:
+            path = self._scroll_preview_path()
+        if not path:
+            return ""
+        try:
             when = provider(path)
             if when is None:
                 return ""
@@ -2911,13 +2986,63 @@ class JustifiedGallery(QWidget):
         except Exception:
             return ""
 
-    def _update_scroll_date_bubble(self) -> None:
+    def _scroll_preview_pixmap(self, path: str) -> Optional[QPixmap]:
+        """In-memory thumbnail at ``path``, or None. Never decodes, never hits disk.
+
+        Gallery LRU first (already an oriented QPixmap). Global ImageCache only
+        via memory-tier peeks inside ``_global_cache_to_base_pixmap`` — not
+        ``get_thumbnail()`` / ``get_grid()`` / ``load_image()``.
+        """
+        if not path:
+            return None
+        cache = getattr(self, "_thumbnail_cache", None)
+        key = getattr(self, "_thumb_base_key", "__base__")
+        if cache is not None:
+            try:
+                pm = cache.get((path, key))
+                if pm is not None and not pm.isNull():
+                    return pm
+            except Exception:
+                pass
+        getter = getattr(self, "_global_cache_to_base_pixmap", None)
+        if getter is None:
+            return None
+        try:
+            pm = getter(path)
+            if pm is not None and not pm.isNull():
+                return pm
+        except Exception:
+            return None
+        return None
+
+    def _update_scroll_date_bubble(self, *, force: bool = True) -> None:
         if not getattr(self, "_is_scrollbar_dragging", False):
             return
         scroll = getattr(self, "_scroll_area", None)
         if scroll is None:
             return
-        text = self._scroll_date_text()
+        now = time.monotonic()
+        last = getattr(self, "_scroll_bubble_last_content_t", 0.0)
+        throttle = getattr(self, "_SCROLL_BUBBLE_THROTTLE_S", 0.075)
+        refresh = force or (now - last) >= throttle
+        if refresh:
+            self._scroll_bubble_last_content_t = now
+            path = self._scroll_preview_path()
+            text = self._scroll_date_text(path)
+            committed = getattr(self, "_scroll_bubble_committed_path", None)
+            if path != committed:
+                # One in-memory lookup per path. A miss stays date-only for
+                # the rest of this drag even if a thumbnail arrives later.
+                pixmap = self._scroll_preview_pixmap(path) if text else None
+                self._scroll_bubble_committed_path = path
+                self._scroll_bubble_cached_pixmap = pixmap
+            else:
+                pixmap = getattr(self, "_scroll_bubble_cached_pixmap", None)
+            self._scroll_bubble_cached_text = text
+        else:
+            text = getattr(self, "_scroll_bubble_cached_text", "")
+            pixmap = getattr(self, "_scroll_bubble_cached_pixmap", None)
+            path = getattr(self, "_scroll_bubble_committed_path", "") or ""
         bubble = getattr(self, "_scroll_date_bubble", None)
         if bubble is None:
             if not text:
@@ -2925,23 +3050,46 @@ class JustifiedGallery(QWidget):
             bubble = _ScrollDateBubble(scroll.viewport())
             self._scroll_date_bubble = bubble
         if not text:
+            if bubble._shown_path is not None:
+                bubble._shown_path = None
+                bubble._preview.clear()
+                bubble._preview.hide()
             bubble.hide()
             return
         # Track the thumb: the bubble belongs beside the thing being dragged,
-        # not pinned to a corner the eye is not on.
+        # not pinned to a corner the eye is not on. Position updates every
+        # tick; date + preview content is throttled on the scroll path.
         sb = scroll.verticalScrollBar()
         span = max(1, sb.maximum() - sb.minimum())
         frac = (sb.value() - sb.minimum()) / span
-        bubble.show_for(text, center_y=int(frac * scroll.viewport().height()))
+        bubble.show_for(
+            text,
+            center_y=int(frac * scroll.viewport().height()),
+            pixmap=pixmap,
+            file_path=path or "",
+        )
 
     def _hide_scroll_date_bubble(self) -> None:
         bubble = getattr(self, "_scroll_date_bubble", None)
         if bubble is not None:
+            bubble._shown_path = None
+            bubble._preview.clear()
+            bubble._preview.hide()
             bubble.hide()
+        self._scroll_bubble_cached_text = ""
+        self._scroll_bubble_cached_pixmap = None
+        self._scroll_bubble_committed_path = None
+        self._scroll_bubble_last_content_t = 0.0
 
     def _on_slider_pressed(self):
         self._is_scrollbar_dragging = True
-        self._update_scroll_date_bubble()
+        self._scroll_bubble_committed_path = None
+        self._scroll_bubble_cached_pixmap = None
+        self._scroll_bubble_last_content_t = 0.0
+        bubble = getattr(self, "_scroll_date_bubble", None)
+        if bubble is not None:
+            bubble._shown_path = None
+        self._update_scroll_date_bubble(force=True)
 
     def _on_slider_released(self):
         self._is_scrollbar_dragging = False
@@ -2954,11 +3102,10 @@ class JustifiedGallery(QWidget):
         if abs(getattr(self, "_overshoot_px", 0.0)) > 0.5:
             self._apply_overshoot_visual()
 
-        # Follows the thumb during a drag. Cheap enough to run per tick: it is
-        # a binary search over the layout rects plus a dict lookup, and no
-        # thumbnail work is involved.
+        # Follows the thumb during a drag. Position tracks every tick; date +
+        # cache-hit preview content is throttled (never decode / disk / load).
         if getattr(self, "_is_scrollbar_dragging", False):
-            self._update_scroll_date_bubble()
+            self._update_scroll_date_bubble(force=False)
 
         # Pause background indexing once per scroll burst (not every valueChanged tick).
         if self.parent_viewer is not None and not self._scroll_indexing_paused:
@@ -4016,12 +4163,17 @@ class JustifiedGallery(QWidget):
                 if pv is not None and hasattr(pv, "_burst_stack_count_for_path"):
                     if hasattr(w, "set_burst_stack_count"):
                         w.set_burst_stack_count(pv._burst_stack_count_for_path(path))
+                if pv is not None and hasattr(pv, "_raw_jpeg_members_for_path"):
+                    if hasattr(w, "set_raw_jpeg_paired"):
+                        w.set_raw_jpeg_paired(bool(pv._raw_jpeg_members_for_path(path)))
                 if pv is not None and hasattr(pv, "_is_gallery_path_edited"):
                     if hasattr(w, "set_gallery_edited"):
                         w.set_gallery_edited(pv._is_gallery_path_edited(path))
                 if pv is not None and hasattr(pv, "_gallery_path_rating"):
                     if hasattr(w, "set_gallery_rating"):
                         w.set_gallery_rating(pv._gallery_path_rating(path))
+                    if hasattr(w, "set_gallery_color_label") and hasattr(pv, "_gallery_path_color_label"):
+                        w.set_gallery_color_label(pv._gallery_path_color_label(path))
             thumb_missing = not cache_hit
             if thumb_missing and self._thumb_fail_counts.get(path, 0) >= 3:
                 thumb_missing = False
@@ -5348,6 +5500,8 @@ class JustifiedGallery(QWidget):
             path = getattr(w, "file_path", None)
             if path and hasattr(w, "set_gallery_rating"):
                 w.set_gallery_rating(pv._gallery_path_rating(path))
+            if path and hasattr(w, "set_gallery_color_label") and hasattr(pv, "_gallery_path_color_label"):
+                w.set_gallery_color_label(pv._gallery_path_color_label(path))
 
     def _update_empty_label_geometry(self):
         """Lay out empty-state text across the justified gallery canvas (fills the frame when empty)."""

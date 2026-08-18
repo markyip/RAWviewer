@@ -29,12 +29,21 @@ run "compile check" -m py_compile \
   src/raw_pv2012.py src/raw_adjustments.py src/raw_edit_pipeline.py \
   src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
   src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py src/torch_bootstrap.py \
-  src/raw_detail_enhance.py src/raw_tone_recovery.py src/edit_gpu_policy.py
+  src/raw_detail_enhance.py src/raw_tone_recovery.py src/edit_gpu_policy.py \
+  src/xmp_catalog.py src/raw_jpeg_pairing.py src/export_options.py \
+  src/rawviewer_ui/export_options_dialog.py \
+  src/rawviewer_mcp/server.py src/rawviewer_mcp/service.py \
+  src/rawviewer_mcp/paths.py src/rawviewer_mcp/adjustments.py src/rawviewer_mcp/preview.py \
+  src/rawviewer_share_agent.py src/rawviewer_ui/share_agent_dialog.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
 run "auto tone estimator" testplan/auto/t_auto_tone.py
 run "edit-base decode params" testplan/auto/t_edit_base_decode_params.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
+run "xmp catalog" testplan/auto/t_xmp_catalog.py
+run "mcp tools (headless)" testplan/auto/t_mcp_tools.py
+run "raw jpeg pairing" testplan/auto/t_raw_jpeg_pairing.py
+run "export options" testplan/auto/t_export_options.py
 run "slider specs" testplan/auto/t_slider_specs.py
 run "cache semantics" testplan/auto/t_cache_semantics.py
 run "dodge & burn" testplan/auto/t_dodge_burn.py
@@ -53,8 +62,11 @@ run "filmstrip hidden in editor" testplan/auto/t_filmstrip_editor_hidden.py
 run "search bar animation" testplan/auto/t_search_bar_animation.py
 run "gpu return_linear" testplan/auto/t_gpu_return_linear.py
 run "edit GPU policy" testplan/auto/t_edit_gpu_policy.py
+run "startup splash copy" testplan/auto/t_splash_copy.py
+run "release update what's new" testplan/auto/t_release_update_notes.py
 run "banded worker cap" testplan/auto/t_banded_workers.py
 run "share payload" testplan/auto/t_share_payload.py
+run "share to AI agent" testplan/auto/t_share_agent.py
 run "memory tier overlay" testplan/auto/t_memory_tier_overlay.py
 run "half decode return_linear" testplan/auto/t_half_decode_return_linear.py
 run "shadow edge-aware damp" testplan/auto/t_shadow_edge_aware_damp.py
@@ -74,6 +86,7 @@ run "resolution crossfade decision" testplan/auto/t_resolution_crossfade_decisio
 run "focus stacking" testplan/auto/t_focus_stacking.py
 run "Real-ESRGAN x2 upscale" testplan/auto/t_realesrgan_upscale.py
 run "adjust panel tabs" testplan/auto/t_adjust_panel_tabs.py
+run "adjust panel dock left/right" testplan/auto/t_adjust_panel_dock.py
 run "adjust section defaults" testplan/auto/t_adjust_section_defaults.py
 run "slider wheel axis" testplan/auto/t_slider_wheel_axis.py
 run "transform distortion + anamorphic" testplan/auto/t_transform_distortion.py testplan/auto/t_anamorphic_masks.py
@@ -89,7 +102,7 @@ run "masks panel (headless UI)" testplan/auto/t_masks_panel.py
 run "camera profile apply" testplan/auto/t_camera_profile_apply.py
 run "camera profile decode signature" testplan/auto/t_profile_decode_signature.py
 run "colorchecker auto-detect (cv2.mcc)" testplan/auto/t_colorchecker_autodetect.py
-run "AI masks (raw_ai_masks)" testplan/auto/t_ai_masks.py
+run "AI masks (raw_ai_masks)" testplan/auto/t_ai_masks.py testplan/auto/t_ai_af_prior.py testplan/auto/t_depth_blur.py
 
 if [ "$FAST" = "0" ]; then
   # Perf first: it must measure on a quiet machine, not one still hot from

@@ -549,6 +549,97 @@ def segment_subject(
     return alpha
 
 
+def _focus_xy_in_image(
+    focus_xy: tuple[float, float], rgb: np.ndarray, target_hw: tuple
+) -> tuple[float, float]:
+    """Map a mask-buffer AF point into ``rgb`` (set_image) coordinates."""
+    th, tw = int(target_hw[0]), int(target_hw[1])
+    sh, sw = int(np.asarray(rgb).shape[0]), int(np.asarray(rgb).shape[1])
+    if th < 1 or tw < 1:
+        return (float(focus_xy[0]), float(focus_xy[1]))
+    return (float(focus_xy[0]) * sw / float(tw), float(focus_xy[1]) * sh / float(th))
+
+
+def _matte_covers_focus(
+    alpha: np.ndarray, focus_xy: tuple[float, float], *, lo: float = 0.20
+) -> bool:
+    """True if the AF point (mask space) sits on this matte."""
+    if alpha is None or alpha.ndim != 2:
+        return False
+    h, w = alpha.shape[:2]
+    if h < 1 or w < 1:
+        return False
+    fx = int(np.clip(round(float(focus_xy[0])), 0, max(0, w - 1)))
+    fy = int(np.clip(round(float(focus_xy[1])), 0, max(0, h - 1)))
+    y0, y1 = max(0, fy - 1), min(h, fy + 2)
+    x0, x1 = max(0, fx - 1), min(w, fx + 2)
+    return float(alpha[y0:y1, x0:x1].mean()) >= lo
+
+
+def grow_subject_lock(
+    alpha: np.ndarray, *, dilate_px: float = 3.0, feather: float = 2.5
+) -> np.ndarray:
+    """Slightly expand a subject matte so background blur does not eat hair.
+
+    Dilate the hard interior, union with the original soft edge, then feather.
+    """
+    import cv2
+
+    a = np.clip(np.asarray(alpha, dtype=np.float32), 0.0, 1.0)
+    px = max(0, int(round(float(dilate_px))))
+    if px <= 0:
+        return feather_alpha(a, feather)
+    ksize = px * 2 + 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+    grown = cv2.dilate((a > 0.35).astype(np.uint8), kernel).astype(np.float32)
+    return feather_alpha(np.maximum(a, grown), feather)
+
+
+def prepare_background_blur_matte(
+    rgb: np.ndarray,
+    target_hw: tuple,
+    focus_xy: Optional[tuple[float, float]] = None,
+) -> Optional[np.ndarray]:
+    """Foreground matte for one-press background blur (invert + Blur).
+
+    When the camera recorded an AF / SubjectArea point, prefer a SAM click
+    there — that is the thing the photographer focused, not the most
+    salient blob. If SAM is missing, misses the point, or there is no AF
+    hint, fall back to BiRefNet with the same focus bias Smart Object uses.
+    """
+    alpha = None
+    if focus_xy is not None and op_is_ready("click"):
+        pred = SamPredictor()
+        if pred.set_image(rgb):
+            src_xy = _focus_xy_in_image(focus_xy, rgb, target_hw)
+            cand = pred.predict([src_xy], [1], target_hw)
+            if cand is not None and (
+                _matte_covers_focus(cand, focus_xy) or float(cand.mean()) > 0.002
+            ):
+                alpha = cand
+    if alpha is None and (focus_xy is None or op_is_ready("subject")):
+        alpha = segment_subject(rgb, target_hw, focus_xy=focus_xy)
+    if alpha is None:
+        return None
+    return grow_subject_lock(alpha)
+
+
+def bokeh_model_kind(has_focus: bool) -> str:
+    """Which ONNX op Blur background will actually run (for download / ready).
+
+    AF present: SAM click at the focus point when that model is on disk, else
+    Smart Object if already downloaded, else download the smaller click model.
+    No AF: Smart Object, same as the one-press subject tool.
+    """
+    if has_focus:
+        if op_is_ready("click"):
+            return "click"
+        if op_is_ready("subject"):
+            return "subject"
+        return "click"
+    return "subject"
+
+
 def _bias_matte_to_focus(
     alpha: np.ndarray, focus_xy: tuple[float, float]
 ) -> np.ndarray:

@@ -126,8 +126,9 @@ def _branded_icon_resource_path() -> str | None:
 # Stable ID for taskbar grouping / pinning. Must be set once before windows appear;
 # do not change it later (versioned IDs break the branded icon).
 _WINDOWS_APP_USER_MODEL_ID = "markyip.rawviewer.app.1"
-# Compact splash — full-res appicon.png is 2k+ and looks huge as QSplashScreen.
-_SPLASH_DISPLAY_MAX_PX = 280
+
+from startup_splash import make_splash_pixmap as _make_splash_pixmap
+from startup_splash import splash_show_status
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -215,51 +216,6 @@ def _apply_windows_native_window_icon(widget, ico_path: str | None = None) -> No
             user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
     except Exception:
         pass
-
-
-def _make_splash_pixmap():
-    """Build a compact splash pixmap from the branded icon (or a text fallback)."""
-    from PyQt6.QtGui import QPixmap, QColor, QPainter, QPen, QIcon
-    from PyQt6.QtCore import Qt
-
-    max_edge = _SPLASH_DISPLAY_MAX_PX
-    icon_path = _splash_icon_resource_path()
-    pixmap = QPixmap()
-    if icon_path:
-        if icon_path.lower().endswith(".png"):
-            pixmap = QPixmap(icon_path)
-        else:
-            pixmap = QIcon(icon_path).pixmap(max_edge, max_edge)
-            if pixmap.isNull():
-                pixmap = QPixmap(icon_path)
-    if pixmap.isNull():
-        pixmap = QPixmap(max_edge, max_edge)
-        pixmap.fill(QColor(*theme.VOID_RGB))
-        painter = QPainter(pixmap)
-        painter.setPen(QPen(QColor(*theme.INK_RGB), 3))
-        font = painter.font()
-        font.setPointSize(28)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "RAW")
-        painter.end()
-        return pixmap
-    if pixmap.width() > max_edge or pixmap.height() > max_edge:
-        pixmap = pixmap.scaled(
-            max_edge,
-            max_edge,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-    return pixmap
-
-
-def _splash_icon_resource_path() -> str | None:
-    """Prefer hi-res PNG for startup splash; fall back to platform icon."""
-    png = resource_path(os.path.join("icons", "appicon.png"))
-    if os.path.exists(png):
-        return png
-    return _branded_icon_resource_path()
 
 
 def _is_windows_installed_app() -> bool:
@@ -387,12 +343,8 @@ if _IS_GUI_MAIN_PROCESS:
                 _splash_flags |= Qt.WindowType.WindowStaysOnTopHint
             _startup_splash = QSplashScreen(_splash_pixmap, _splash_flags)
             _startup_splash.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-            _startup_splash.showMessage(
-                "Starting RAWviewer...",
-                Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
-                Qt.GlobalColor.white,
-            )
             _startup_splash.show()
+            splash_show_status(_startup_splash, "Starting…")
             _temp_app.processEvents()
         else:
             _startup_splash = None
@@ -1457,30 +1409,27 @@ def _lazy_import_heavy_modules(splash=None):
            ImageAdjustPanelWidget
     
     def _update_splash(msg):
-        if splash:
-            splash.showMessage(msg, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
-            QApplication.instance().processEvents()
+        splash_show_status(splash, msg)
 
-    _update_splash("Loading RAW processor...")
+    _update_splash("Loading RAW engine…")
     import rawpy as _rawpy
     rawpy = _rawpy
     
-    _update_splash("Loading math libraries...")
+    _update_splash("Loading libraries…")
     import numpy as _np
     np = _np
     
-    _update_splash("Loading metadata engine...")
+    _update_splash("Loading metadata…")
     import exifread as _exifread
     exifread = _exifread
     
-    _update_splash("Loading iconography...")
+    _update_splash("Loading interface…")
     try:
         import qtawesome as _qta
         qta = _qta
     except Exception:
         qta = None
         
-    _update_splash("Loading metadata backend...")
     from metadata_backend import exif_backend_mode as _ebm, \
                                     exif_orientation_after_cw90 as _eocw, \
                                     has_pyexiv2 as _hp2, \
@@ -1490,19 +1439,13 @@ def _lazy_import_heavy_modules(splash=None):
     has_pyexiv2 = _hp2
     process_file_from_path = _pfp
     
-    # Log metadata backend status on the splash if possible
-    try:
-        _update_splash(f"Metadata engine: {'pyexiv2' if has_pyexiv2() else 'exifread'}")
-    except Exception:
-        pass
-    
     # GPU RAW backend import is deferred until after the window is shown
     # (torch_bootstrap). Semantic search is also deferred: importing
     # semantic_search.py pulls a large ONNX/Core ML stack that is unused on
     # Standard and unused on Plus until the user opens Search — keep it off
     # the splash critical path (_get_semantic_index imports on first use).
 
-    _update_splash("Loading core architecture...")
+    _update_splash("Preparing cache…")
     from image_cache import get_image_cache as _get_image_cache, initialize_cache as _initialize_cache
     get_image_cache = _get_image_cache
     initialize_cache = _initialize_cache
@@ -1540,7 +1483,7 @@ def _lazy_import_heavy_modules(splash=None):
     from image_histogram import ImageHistogramWidget as _ImageHistogramWidget
     ImageHistogramWidget = _ImageHistogramWidget
 
-    _update_splash("Loading UI components...")
+    _update_splash("Preparing interface…")
     from rawviewer_ui.widgets import ThumbnailLabel as _ThumbnailLabel
     from rawviewer_ui.gallery_view import JustifiedGallery as _ExternalJustifiedGallery
     from rawviewer_ui.location_map_overlay import ImageLocationMapWidget as _ImageLocationMapWidget
@@ -1556,7 +1499,7 @@ def _lazy_import_heavy_modules(splash=None):
     else:
         ImageAdjustPanelWidget = None
     
-    _update_splash("Startup complete")
+    _update_splash("Opening…")
 
 
 class NoisyInfoFilter(logging.Filter):
@@ -2218,6 +2161,10 @@ class _AIMaskWorker(QRunnable):
                 alpha = raw_ai_masks.segment_subject(
                     self.rgb, self.target_hw, focus_xy=self.focus_xy
                 )
+            elif self.kind == "bokeh":
+                alpha = raw_ai_masks.prepare_background_blur_matte(
+                    self.rgb, self.target_hw, focus_xy=self.focus_xy
+                )
             elif self.kind == "depth":
                 alpha = raw_ai_masks.estimate_depth(self.rgb, self.target_hw)
             elif self.kind == "sam_encode":
@@ -2425,7 +2372,15 @@ _AI_MASK_MIN_COVERAGE = 0.002
 
 # Layer names match the buttons that make them -- a row called "AI Subject"
 # under a button called "Smart Object" is a puzzle the user has to solve.
-_AI_MASK_LAYER_NAMES = {"subject": "Smart Object", "sky": "Sky", "depth": "Depth"}
+_AI_MASK_LAYER_NAMES = {
+    "subject": "Smart Object",
+    "sky": "Sky",
+    "depth": "Depth",
+    "bokeh": "Blur background",
+}
+
+# Invert + Blur Amount written by the one-press background-blur tool.
+_BOKEH_BLUR_AMOUNT = 70.0
 
 # How long to wait for a model that is already on disk before giving up.
 #
@@ -2479,6 +2434,7 @@ _AI_MASK_BUSY_TEXT = {
     "subject": "Finding the subject…",
     "sky": "Finding the sky…",
     "depth": "Measuring depth…",
+    "bokeh": "Finding the focused subject…",
     "sam_encode": "Analysing the photo for click-to-select…",
 }
 
@@ -2499,6 +2455,7 @@ _AI_MASK_NOTHING_FOUND = {
     # No em dash in any entry: the no-layer variant appends one, and two in a
     # single status line reads as a typo.
     "depth": "Could not read depth from this photo; it looks flat",
+    "bokeh": "Could not find a subject to keep sharp in this photo",
 }
 
 
@@ -2635,6 +2592,12 @@ class _AdjustExportWorker(QRunnable):
         signals: _AdjustExportSignals,
         use_ai_denoise: bool = False,
         use_ai_upscale: bool = False,
+        strip_gps: bool = True,
+        watermark_text: str = "",
+        watermark_signature: str = "",
+        watermark_font: str = "",
+        watermark_corner: str = "",
+        copy_metadata: bool = True,
     ):
         super().__init__()
         self.file_path = file_path
@@ -2648,6 +2611,12 @@ class _AdjustExportWorker(QRunnable):
         # written, so this stays a separate attribute, not an adj key).
         self.use_ai_denoise = bool(use_ai_denoise)
         self.use_ai_upscale = bool(use_ai_upscale)
+        self.strip_gps = bool(strip_gps)
+        self.watermark_text = str(watermark_text or "")
+        self.watermark_signature = str(watermark_signature or "")
+        self.watermark_font = str(watermark_font or "")
+        self.watermark_corner = str(watermark_corner or "")
+        self.copy_metadata = bool(copy_metadata)
         # Set from the export progress dialog's Cancel button (main thread);
         # polled between export stages and between NN-denoise tiles.
         import threading as _threading
@@ -2778,6 +2747,13 @@ class _AdjustExportWorker(QRunnable):
                 progress_cb=_export_progress,
                 use_ai_denoise=self.use_ai_denoise,
                 use_ai_upscale=self.use_ai_upscale,
+                strip_gps=self.strip_gps,
+                watermark_text=self.watermark_text if self.watermark_text else "",
+                watermark_signature=self.watermark_signature if self.watermark_signature else "",
+                watermark_font=self.watermark_font if self.watermark_font else "",
+                watermark_corner=self.watermark_corner if self.watermark_corner else "",
+                source_path=self.file_path,
+                copy_metadata=self.copy_metadata,
             )
             emit_progress(100, "Done")
             logger.info("[EXPORT] export_adjusted_image() completed without raising")
@@ -3006,6 +2982,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._burst_group_view_members = []
         self._burst_rejected_paths = set()
         self._burst_grouping_enabled = False
+        self._raw_jpeg_pairing_enabled = True
+        self._raw_jpeg_path_to_pair = {}
+        self._raw_jpeg_pair_covers = {}
+        self._export_queue = []
+        self._export_queue_running = False
         self._comparison_session = None
         self._compare_sync_mode = "A"
         self._compare_sync_paused = False
@@ -5680,6 +5661,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             pass
         self._sync_burst_grouping_button_icon()
+        self._rebuild_burst_groups()
         if not checked and getattr(self, "_burst_group_view_active", False):
             self._exit_burst_group_view()
         else:
@@ -5690,6 +5672,116 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             else "Burst grouping off — every image shown separately",
             2500,
         )
+
+    def _is_raw_jpeg_pairing_enabled(self) -> bool:
+        return bool(getattr(self, "_raw_jpeg_pairing_enabled", True))
+
+    def _load_raw_jpeg_pairing_preference(self) -> None:
+        try:
+            from raw_jpeg_pairing import pairing_enabled_from_settings
+
+            self._raw_jpeg_pairing_enabled = pairing_enabled_from_settings(
+                self.get_settings()
+            )
+        except Exception:
+            self._raw_jpeg_pairing_enabled = True
+
+    def _sync_raw_jpeg_pairing_button_icon(self) -> None:
+        btn = getattr(self, "raw_jpeg_pairing_button", None)
+        if btn is None:
+            return
+        enabled = self._is_raw_jpeg_pairing_enabled()
+        try:
+            color = theme.INK if enabled else theme.INK_FAINT
+            btn.blockSignals(True)
+            btn.setChecked(enabled)
+            btn.setIcon(_qta_icon("fa5s.clone", color=color))
+            btn.blockSignals(False)
+        except Exception:
+            btn.blockSignals(True)
+            btn.setChecked(enabled)
+            btn.blockSignals(False)
+
+    def _sync_raw_jpeg_pairing_button_visibility(self) -> None:
+        btn = getattr(self, "raw_jpeg_pairing_button", None)
+        if btn is None:
+            return
+        vm = getattr(self, "view_mode", "single")
+        burst_view = bool(getattr(self, "_burst_group_view_active", False))
+        show = (
+            vm == "gallery"
+            and not burst_view
+            and bool(getattr(self, "image_files", None))
+        )
+        btn.setVisible(show)
+        if show:
+            self._sync_raw_jpeg_pairing_button_icon()
+
+    def _on_raw_jpeg_pairing_toggled(self, checked: bool) -> None:
+        self._raw_jpeg_pairing_enabled = bool(checked)
+        try:
+            from raw_jpeg_pairing import PAIRING_SETTINGS_KEY
+
+            self.get_settings().setValue(PAIRING_SETTINGS_KEY, checked)
+        except Exception:
+            pass
+        self._sync_raw_jpeg_pairing_button_icon()
+        self._rebuild_raw_jpeg_pairs()
+        if getattr(self, "view_mode", "") == "gallery":
+            self._update_gallery_view()
+        self.status_bar.showMessage(
+            "RAW+JPEG pairing on — same-name pairs share one tile"
+            if checked
+            else "RAW+JPEG pairing off — RAW and JPEG shown separately",
+            2500,
+        )
+
+    def _rebuild_raw_jpeg_pairs(self) -> None:
+        if not self._is_raw_jpeg_pairing_enabled():
+            self._raw_jpeg_path_to_pair = {}
+            self._raw_jpeg_pair_covers = {}
+            return
+        from raw_jpeg_pairing import pairs_for_folder
+
+        files = list(getattr(self, "image_files", []) or [])
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        path_to_pair, covers = pairs_for_folder(files, rejected=rejected)
+        self._raw_jpeg_path_to_pair = path_to_pair
+        self._raw_jpeg_pair_covers = covers
+
+    def _raw_jpeg_collapsed_gallery_paths(self, files: List[str]) -> List[str]:
+        from raw_jpeg_pairing import build_collapsed_display_paths
+
+        if not self._is_raw_jpeg_pairing_enabled():
+            return list(files)
+        if getattr(self, "_burst_group_view_active", False):
+            return list(files)
+        path_to_pair = getattr(self, "_raw_jpeg_path_to_pair", {}) or {}
+        if not path_to_pair:
+            return list(files)
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        return build_collapsed_display_paths(
+            files, path_to_pair, getattr(self, "_raw_jpeg_pair_covers", {}) or {}, rejected
+        )
+
+    def _raw_jpeg_members_for_path(self, file_path: str) -> Optional[List[str]]:
+        if not self._is_raw_jpeg_pairing_enabled():
+            return None
+        from raw_jpeg_pairing import pair_members_for_path
+
+        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        return pair_members_for_path(
+            file_path,
+            getattr(self, "_raw_jpeg_path_to_pair", {}) or {},
+            rejected=rejected,
+        )
+
+    def _catalog_paths_for_action(self, file_path: str) -> List[str]:
+        """Rating / label / keyword writes follow a RAW+JPEG pair when stacked."""
+        members = self._raw_jpeg_members_for_path(file_path)
+        if members:
+            return list(members)
+        return [file_path] if file_path else []
 
     def _burst_rejected_settings_key(self, folder: str) -> str:
         return f"burst_rejected/{_norm_path(folder)}"
@@ -5852,6 +5944,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return cached
 
     def _rebuild_burst_groups(self) -> None:
+        self._rebuild_raw_jpeg_pairs()
         if not self._is_burst_grouping_enabled():
             self._burst_groups = []
             self._burst_path_to_group = {}
@@ -6046,15 +6139,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             elif vm == "gallery":
                 self.view_mode_button.hide()
         self._sync_burst_grouping_button_visibility()
+        self._sync_raw_jpeg_pairing_button_visibility()
 
     def _burst_group_compare_plan(self):
-        from burst_grouping import BURST_MIN_COUNT, sort_paths_by_capture_time
+        from burst_grouping import sort_paths_by_capture_time
         from comparison_mode import CompareEntry
 
         if not getattr(self, "_burst_group_view_active", False):
             return None
         members = self._burst_group_view_visible_members()
-        if len(members) < BURST_MIN_COUNT:
+        if len(members) < 2:
             return None
         capture_times = self._capture_times_for_paths(members)
         ordered = sort_paths_by_capture_time(members, capture_times)
@@ -6088,13 +6182,18 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             members = self._burst_members_for_path(canonical)
             if members:
                 return {_norm_path(m) for m in members}
+        pair = self._raw_jpeg_members_for_path(canonical)
+        if pair and getattr(self, "view_mode", "") == "gallery" and not getattr(
+            self, "_burst_group_view_active", False
+        ):
+            return {_norm_path(m) for m in pair}
         return {key}
 
     def _gallery_selected_expanded_norm_keys(self) -> set:
         raw = set(getattr(self, "_gallery_selected_paths", set()) or set())
         if not raw:
             return set()
-        if getattr(self, "_burst_group_view_active", False) or not self._is_burst_grouping_enabled():
+        if getattr(self, "_burst_group_view_active", False):
             return raw
         expanded: set = set()
         processed_groups: set = set()
@@ -7231,6 +7330,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 list(getattr(self, "_burst_group_view_members", []) or [])
             )
         if getattr(self, "view_mode", "") == "gallery":
+            files = self._raw_jpeg_collapsed_gallery_paths(files)
             return self._burst_collapsed_gallery_paths(files)
         return files
 
@@ -9429,7 +9529,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._on_auto_wb_requested
             )
             self.single_image_adjust_panel.auto_tone_requested.connect(
-                self._on_auto_tone_requested
+                self._on_auto_requested
             )
             self.single_image_adjust_panel.auto_straighten_requested.connect(
                 self._on_auto_straighten_requested
@@ -9526,6 +9626,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self.single_image_adjust_panel.reset_requested.connect(
                 self._on_adjust_panel_reset
+            )
+            self.single_image_adjust_panel.dock_side_requested.connect(
+                self._on_adjust_panel_dock_requested
             )
             self.single_image_adjust_panel.calibrate_requested.connect(
                 self._on_calibrate_camera_requested
@@ -9633,6 +9736,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Give most space to the image viewer, but allow the panel to expand/shrink within its limits.
         self.single_view_splitter.setStretchFactor(0, 1)
         self.single_view_splitter.setStretchFactor(1, 0)
+        self._apply_adjust_panel_dock(self._adjust_panel_dock_side())
         
         main_layout.addWidget(self.single_view_splitter)
         self._init_compare_view(main_layout)
@@ -9816,6 +9920,33 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             self._rating_star_buttons.append(_star_btn)
             _rating_stars_layout.addWidget(_star_btn, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        from xmp_catalog import COLOR_LABELS, COLOR_LABEL_RGB, LABEL_KEY_MAP
+
+        self._color_label_buttons = []
+        for name in COLOR_LABELS:
+            _dot = QPushButton()
+            _dot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            _dot.setFlat(True)
+            _dot.setFixedSize(14, 14)
+            r, g, b = COLOR_LABEL_RGB[name]
+            _dot.setStyleSheet(
+                f"QPushButton {{ background: rgb({r},{g},{b});"
+                f" border: 1px solid {theme.rgba(theme.VOID_RGB, 180)};"
+                " border-radius: 7px; }}"
+                f" QPushButton:hover {{ border: 2px solid {theme.INK}; }}"
+            )
+            shortcut = next((k for k, v in LABEL_KEY_MAP.items() if v == name), None)
+            tip = f"{name} label"
+            if name == "Purple":
+                tip += " (Shift+6)"
+            elif shortcut:
+                tip += f" ({shortcut})"
+            _dot.setToolTip(tip)
+            _dot.clicked.connect(
+                lambda checked=False, lab=name: self.label_current_image(lab)
+            )
+            self._color_label_buttons.append(_dot)
+            _rating_stars_layout.addWidget(_dot, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.single_view_rating_stars.hide()
 
         # Gallery-view rating filter: 5 clickable stars, click star N to show
@@ -10115,6 +10246,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._gallery_search_show_index_progress = False
 
         self._load_burst_grouping_preference()
+        self._load_raw_jpeg_pairing_preference()
 
         self.burst_grouping_button = QPushButton()
         self.burst_grouping_button.setCheckable(True)
@@ -10137,6 +10269,28 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.burst_grouping_button.toggled.connect(self._on_burst_grouping_toggled)
         self._sync_burst_grouping_button_icon()
         self.burst_grouping_button.hide()
+
+        self.raw_jpeg_pairing_button = QPushButton()
+        self.raw_jpeg_pairing_button.setCheckable(True)
+        self.raw_jpeg_pairing_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.raw_jpeg_pairing_button.setToolTip(
+            "Pair RAW+JPEG — same-name pairs share one gallery tile"
+        )
+        _style_bottom_icon_button(self.raw_jpeg_pairing_button)
+        self.raw_jpeg_pairing_button.setStyleSheet(
+            bottom_icon_only_btn_style
+            + f"""
+            QPushButton:checked,
+            QPushButton:checked:flat {{
+                color: {theme.INK};
+                background: transparent;
+            }}
+        """
+        )
+        self.raw_jpeg_pairing_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.raw_jpeg_pairing_button.toggled.connect(self._on_raw_jpeg_pairing_toggled)
+        self._sync_raw_jpeg_pairing_button_icon()
+        self.raw_jpeg_pairing_button.hide()
 
         self.compare_bottom_button = QPushButton()
         self.compare_bottom_button.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -10223,6 +10377,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         right_status_actions_layout.setSpacing(8)
         right_status_actions_layout.addWidget(
             self.burst_grouping_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
+        right_status_actions_layout.addWidget(
+            self.raw_jpeg_pairing_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
             self.compare_bottom_button, 0, alignment=Qt.AlignmentFlag.AlignVCenter)
         right_status_actions_layout.addWidget(
@@ -10480,6 +10636,40 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self.reveal_action.setStatusTip("Select this file in the system file manager")
         self.reveal_action.triggered.connect(self._reveal_current_file_in_os_file_manager)
         file_menu.addAction(self.reveal_action)
+
+        file_menu.addSeparator()
+        add_queue_action = QAction("Add to Export Queue", self)
+        add_queue_action.setStatusTip("Queue the current photo or gallery selection for later export")
+        add_queue_action.triggered.connect(self._add_current_to_export_queue)
+        file_menu.addAction(add_queue_action)
+        self._add_queue_action = add_queue_action
+
+        export_queue_action = QAction("Export Queue…", self)
+        export_queue_action.setStatusTip("Export queued photos with a filename template")
+        export_queue_action.triggered.connect(self._run_export_queue_dialog)
+        file_menu.addAction(export_queue_action)
+        self._export_queue_action = export_queue_action
+
+        keywords_action = QAction("Keywords…", self)
+        keywords_action.setStatusTip("Edit XMP keywords (dc:subject)")
+        keywords_action.triggered.connect(self._prompt_keywords_for_current)
+        file_menu.addAction(keywords_action)
+
+        share_ai_action = QAction("Share to AI agent", self)
+        share_ai_action.setStatusTip(
+            "Send a preview JPEG and paths to an AI agent (MCP / XMP edits)"
+        )
+        share_ai_action.triggered.connect(self._share_current_to_ai_agent)
+        file_menu.addAction(share_ai_action)
+        self._share_ai_action = share_ai_action
+
+        style_brief_action = QAction("AI description template…", self)
+        style_brief_action.setStatusTip(
+            "Optional starter text you can insert when sharing to an AI agent"
+        )
+        style_brief_action.triggered.connect(self._edit_ai_style_brief)
+        file_menu.addAction(style_brief_action)
+        self._style_brief_action = style_brief_action
 
         file_menu.addSeparator()
 
@@ -14945,6 +15135,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_bookmark_indicator()
         self._sync_slideshow_button_visibility()
         self._sync_burst_grouping_button_visibility()
+        self._sync_raw_jpeg_pairing_button_visibility()
         self._sync_compare_button_visibility()
         if hasattr(self, "rotate_bottom_button"):
             self.rotate_bottom_button.hide()
@@ -17182,6 +17373,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 pass
         return 0
 
+    def _gallery_path_color_label(self, file_path: str) -> str:
+        if not file_path:
+            return ""
+        meta = getattr(self, "_gallery_bulk_metadata", None) or {}
+        row = meta.get(file_path)
+        if row and row.get("color_label"):
+            return str(row.get("color_label") or "")
+        try:
+            cache = getattr(self, "image_cache", None)
+            exif = (
+                cache.get_exif_memory_only(file_path)
+                if cache is not None and hasattr(cache, "get_exif_memory_only")
+                else None
+            )
+        except Exception:
+            exif = None
+        if exif and exif.get("color_label"):
+            return str(exif.get("color_label") or "")
+        inner = (exif or {}).get("exif_data") if exif else None
+        if isinstance(inner, dict) and inner.get("color_label"):
+            return str(inner.get("color_label") or "")
+        return ""
+
     def _gallery_folder_has_any_rating(self, files) -> bool:
         """True if any path in ``files`` has a known in-memory rating > 0."""
         files = list(files or [])
@@ -17492,6 +17706,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             members = self._burst_members_for_path(file_path)
             if members:
                 self._enter_burst_group_view(members, cover=file_path)
+                return
+        if (
+            getattr(self, "view_mode", "") == "gallery"
+            and not getattr(self, "_burst_group_view_active", False)
+        ):
+            pair = self._raw_jpeg_members_for_path(file_path)
+            if pair:
+                self._enter_burst_group_view(pair, cover=file_path)
                 return
         self._clear_gallery_selection()
         # SYNC: Update current file index immediately to prevent navigation jumps
@@ -18664,6 +18886,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             "Trackpad Pinch / Ctrl+Scroll — Smooth zoom in/out",
             "← / → — Previous / next image",
             "0–5 — Star rating (0 clears; click bottom stars too)",
+            "6–9 — Color label (Red / Yellow / Green / Blue; Shift+6 Purple; same key clears)",
+            "K — Keywords (comma-separated, written to XMP)",
             "↓ — Single view: move to Discard (not while the Adjust panel is open)",
             "Delete — Delete image(s); on the Masks tab, delete the selected mask",
             "Esc — Gallery: clear selection / exit filters; single view: back to gallery",
@@ -21928,12 +22152,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._clear_location_map()
             # Give the adjust panel its preferred width so slider values
             # aren't clipped (panel min-width alone isn't enough under QSplitter).
-            splitter = getattr(self, "single_view_splitter", None)
-            if splitter is not None and splitter.count() >= 2:
-                total = max(splitter.width(), 1)
-                panel_w = max(panel.minimumWidth(), getattr(panel, "_PANEL_W", 440))
-                image_w = max(120, total - panel_w)
-                splitter.setSizes([image_w, panel_w])
+            self._apply_adjust_panel_dock(self._adjust_panel_dock_side())
             self._sync_adjust_panel_for_current_file()
             path = getattr(self, "current_file_path", None)
             if path:
@@ -22005,6 +22224,54 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if hasattr(self, "shortcuts_hint_button"):
             self.shortcuts_hint_button.setToolTip(self._keyboard_shortcuts_tooltip())
         QTimer.singleShot(0, self._restore_keyboard_focus)
+
+    def _adjust_panel_dock_side(self) -> str:
+        """Persisted Adjust panel edge: ``left`` or ``right`` (default)."""
+        try:
+            from rawviewer_ui.adjust_panel import (
+                ADJUST_DOCK_DEFAULT,
+                ADJUST_DOCK_SETTINGS_KEY,
+                normalize_adjust_dock,
+            )
+        except Exception:
+            return "right"
+        try:
+            return normalize_adjust_dock(
+                self.get_settings().value(ADJUST_DOCK_SETTINGS_KEY, ADJUST_DOCK_DEFAULT)
+            )
+        except Exception:
+            return "right"
+
+    def _apply_adjust_panel_dock(self, side: str) -> None:
+        panel = getattr(self, "single_image_adjust_panel", None)
+        splitter = getattr(self, "single_view_splitter", None)
+        container = getattr(self, "single_view_container", None)
+        if panel is None or splitter is None or container is None:
+            return
+        try:
+            from rawviewer_ui.adjust_panel import apply_adjust_splitter_dock
+        except Exception:
+            return
+        applied = apply_adjust_splitter_dock(splitter, container, panel, side)
+        if hasattr(panel, "set_dock_side"):
+            panel.set_dock_side(applied)
+        if container is not None and hasattr(container, "relayout_adjust"):
+            container.relayout_adjust()
+
+    def _on_adjust_panel_dock_requested(self, side: str) -> None:
+        try:
+            from rawviewer_ui.adjust_panel import (
+                ADJUST_DOCK_SETTINGS_KEY,
+                normalize_adjust_dock,
+            )
+        except Exception:
+            return
+        side = normalize_adjust_dock(side)
+        try:
+            self.get_settings().setValue(ADJUST_DOCK_SETTINGS_KEY, side)
+        except Exception:
+            pass
+        self._apply_adjust_panel_dock(side)
 
     def _adjust_maximize_brightness_enabled(self) -> bool:
         """Default on; disable with settings or RAWVIEWER_ADJUST_MAX_BRIGHTNESS=0."""
@@ -22364,6 +22631,8 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         norm = _norm_path(path)
         if not force and norm == getattr(self, "_adjust_panel_loaded_norm", None):
             return
+        if hasattr(panel, "clear_lut_preview_source"):
+            panel.clear_lut_preview_source()
         db_serial = ""
         heal_serial = ""
         has_edit = False
@@ -22434,6 +22703,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         if panel.isVisible():
             self._request_adjust_edit_base(path)
+            self._push_lut_chooser_previews()
             # Applying a saved edit means a full adjustment render (measured
             # 2.8-5.5s on a 32MP file) before the photo on screen reflects
             # the sidecar -- show an overlay over the image for that window
@@ -22937,6 +23207,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._adjust_preview_base_rgb = base
         self._adjust_edit_base_path = norm
         self._adjust_preview_base_rgb_fast = _make_fast_preview_base(base)
+        self._push_lut_chooser_previews()
         if panel is not None and panel.isVisible():
             self._pending_adjust_preview = dict(panel.get_adjustments())
             # See _sync_adjust_panel_for_current_file: skip while the mask
@@ -23567,7 +23838,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         return None
 
     def _on_mask_ai_requested(self, kind: str) -> None:
-        """One-shot AI mask (Subject / Sky) -> a new mask layer."""
+        """One-shot AI mask (Subject / Sky / Depth / Blur background)."""
         panel = getattr(self, "single_image_adjust_panel", None)
         mask_shape = self._dodge_burn_mask_shape()
         rgb = self._ai_mask_source_rgb()
@@ -23583,7 +23854,21 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._show_status("AI masks unavailable (onnxruntime missing).", 4000)
             return
 
-        ready = bool(raw_ai_masks.op_is_ready(kind))
+        focus_xy = None
+        if kind in ("subject", "bokeh"):
+            focus_xy = self._ai_mask_focus_xy(mask_shape)
+
+        if kind == "bokeh":
+            reused = self._bokeh_reuse_subject_alpha()
+            if reused is not None:
+                self._commit_bokeh_layer(reused, already_grown=False)
+                return
+            model_kind = raw_ai_masks.bokeh_model_kind(focus_xy is not None)
+            ready = bool(raw_ai_masks.op_is_ready(model_kind))
+        else:
+            model_kind = kind
+            ready = bool(raw_ai_masks.op_is_ready(kind))
+
         if not ready:
             # First use on macOS: the weights download on demand, exactly
             # like the denoise models. Say so rather than looking hung.
@@ -23596,11 +23881,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._ai_mask_busy = True
         self._set_ai_mask_buttons_enabled(False)
         self._show_status(_AI_MASK_BUSY_TEXT.get(kind, f"Finding {kind}..."), 0)
-        self._begin_ai_mask_busy(kind, downloading=not ready)
-
-        focus_xy = None
-        if kind == "subject":
-            focus_xy = self._ai_mask_focus_xy(mask_shape)
+        self._begin_ai_mask_busy(
+            kind, downloading=not ready, download_op=model_kind
+        )
 
         signals = _AIMaskSignals()
         signals.finished.connect(self._on_ai_mask_finished)
@@ -23643,7 +23926,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         except Exception:
             return None
 
-    def _begin_ai_mask_busy(self, kind: str, *, downloading: bool) -> None:
+    def _begin_ai_mask_busy(
+        self, kind: str, *, downloading: bool, download_op: str | None = None
+    ) -> None:
         """Put a dialog up for the wait, and arm the timeout.
 
         These runs take long enough that the status-bar line alone read as a
@@ -23667,8 +23952,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         message = _AI_MASK_BUSY_TEXT.get(kind, "Working…")
         if downloading:
             # Worker kinds map onto the user-facing ops in _OP_REQUIREMENTS.
-            # sam_encode is the encoder half of click; the rest share a name.
-            download_op = "click" if kind == "sam_encode" else kind
+            # sam_encode is the encoder half of click; Blur background may
+            # download click (AF point) or subject (no AF) instead of a
+            # dedicated "bokeh" model.
+            if not download_op:
+                download_op = "click" if kind == "sam_encode" else kind
             try:
                 import raw_ai_masks as _ram
 
@@ -23742,6 +24030,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "_mask_ai_subject_btn",
                 "_mask_ai_sky_btn",
                 "_mask_ai_depth_btn",
+                "_mask_ai_bokeh_btn",
                 "_mask_ai_click_btn",
             ):
                 btn = getattr(panel, name, None)
@@ -23816,7 +24105,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # memory, so it returns a byte-identical matte every time. Without
         # this the second press silently stacked a duplicate layer whose
         # adjustments then compound on the same pixels.
-        existing = self._find_equivalent_mask_layer(result)
+        existing = self._find_equivalent_mask_layer(result, source=kind)
         if existing is not None:
             panel.select_mask_index(existing)
             self._sync_mask_layer_overlay()
@@ -23837,6 +24126,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
             return
 
+        if kind == "bokeh":
+            self._commit_bokeh_layer(result, already_grown=True)
+            return
+
         self._add_mask_layer_from_alpha(
             result, name=_AI_MASK_LAYER_NAMES.get(kind, kind.capitalize()), source=kind
         )
@@ -23847,7 +24140,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             3500,
         )
 
-    def _find_equivalent_mask_layer(self, alpha) -> Optional[int]:
+    def _find_equivalent_mask_layer(self, alpha, *, source: str = "") -> Optional[int]:
         """Index of an existing layer already covering the same pixels, or None.
 
         Compared on mean absolute difference rather than exact equality: a
@@ -23855,12 +24148,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         SHOULD be treated as a different mask, but one that merely round-
         tripped through the sidecar's 8-bit alpha is the same mask and must
         not be duplicated.
+
+        ``source`` restricts the match so Blur background can share a matte
+        with Smart Object without being treated as the same layer.
         """
         import numpy as np
 
         stack = getattr(self, "_mask_layer_stack", None)
         for index, layer in enumerate(getattr(stack, "layers", []) or []):
             if not layer.enabled:
+                continue
+            if source and getattr(layer, "source", "") != source:
                 continue
             try:
                 other = layer.alpha
@@ -23882,11 +24180,19 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             getattr(layer, "source", "")
             for layer in (getattr(stack, "layers", []) or [])
         }
-        for kind in ("subject", "sky", "depth"):
+        for kind in ("subject", "sky", "depth", "bokeh"):
             panel.set_ai_tool_used(kind, kind in present)
 
-    def _add_mask_layer_from_alpha(self, alpha, *, name: str, select: bool = True,
-                                   source: str = ""):
+    def _add_mask_layer_from_alpha(
+        self,
+        alpha,
+        *,
+        name: str,
+        select: bool = True,
+        source: str = "",
+        invert: bool = False,
+        adjustments: Optional[dict] = None,
+    ):
         """Wrap a model-produced alpha in a MaskLayer and push it on the stack.
 
         The layer is an ordinary MaskLayer from here on -- brushable,
@@ -23918,6 +24224,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         layer = MaskLayer(
             np.ascontiguousarray(alpha, dtype=np.float32), name=name, source=source
         )
+        if invert:
+            layer.invert = True
+        if adjustments:
+            layer.adjustments.update(adjustments)
         # Turn the overlay on for a mask the user did not paint: they cannot
         # judge what a model selected without seeing it, and hunting for the
         # Mask button first is a step nobody should have to take. Force, not
@@ -23937,6 +24247,80 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # action is moving a slider, so leave the brushes disarmed.
         self._on_adjust_panel_editing_finished(panel.get_adjustments())
         return layer
+
+    def _bokeh_reuse_subject_alpha(self):
+        """Copy an existing subject/SAM matte so Blur background can skip the net."""
+        import numpy as np
+
+        stack = getattr(self, "_mask_layer_stack", None)
+        best = None
+        for layer in getattr(stack, "layers", []) or []:
+            if not layer.enabled:
+                continue
+            src = getattr(layer, "source", "") or ""
+            if src not in ("subject", "sam"):
+                continue
+            alpha = getattr(layer, "alpha", None)
+            if alpha is None or not hasattr(alpha, "shape"):
+                continue
+            try:
+                coverage = float(np.count_nonzero(alpha > 0.10)) / float(
+                    max(1, alpha.size)
+                )
+            except Exception:
+                continue
+            if coverage < _AI_MASK_MIN_COVERAGE:
+                continue
+            # Prefer Smart Object (cleaner edge) over a SAM click.
+            if src == "subject":
+                return np.ascontiguousarray(alpha, dtype=np.float32)
+            best = alpha
+        if best is None:
+            return None
+        return np.ascontiguousarray(best, dtype=np.float32)
+
+    def _commit_bokeh_layer(self, alpha, *, already_grown: bool) -> None:
+        """Invert + Blur a subject matte as a Background blur layer."""
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is None or alpha is None:
+            return
+        import numpy as np
+
+        work = np.ascontiguousarray(alpha, dtype=np.float32)
+        if not already_grown:
+            try:
+                from raw_ai_masks import grow_subject_lock
+
+                work = grow_subject_lock(work)
+            except Exception:
+                pass
+        existing = self._find_equivalent_mask_layer(work, source="bokeh")
+        if existing is not None:
+            panel.select_mask_index(existing)
+            self._sync_mask_layer_overlay()
+            self._show_status(
+                "Blur background is already masked in this photo — selected it.",
+                4000,
+            )
+            return
+        try:
+            coverage = float(np.count_nonzero(work > 0.10)) / float(max(1, work.size))
+        except Exception:
+            coverage = 1.0
+        layer = self._add_mask_layer_from_alpha(
+            work,
+            name="Background blur",
+            source="bokeh",
+            invert=True,
+            adjustments={"Blur": float(_BOKEH_BLUR_AMOUNT)},
+        )
+        if layer is None:
+            return
+        self._show_status(
+            f"Background blur added ({coverage * 100:.0f}% subject kept sharp). "
+            "Amount is under Blur — Ctrl+Z undoes.",
+            4000,
+        )
 
     def _on_mask_range_click(self, pt, mode: str) -> bool:
         """Sample luminance or colour under the click → new range mask layer."""
@@ -25633,6 +26017,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_adjust_preview_dirty", False):
             self._apply_adjust_panel_preview(full_quality=dirty_full_quality)
 
+    def _push_lut_chooser_previews(self) -> None:
+        """Feed Looks-list LUT thumbs from a tiny as-shot display of this photo.
+
+        Reuses the already-decoded edit base (fast preview downsample when
+        present), encoded with identity adj. Slider moves must not rebuild.
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        path = getattr(self, "current_file_path", None)
+        if panel is None or not path or not hasattr(panel, "set_lut_preview_source"):
+            return
+        if (
+            str(getattr(panel, "_lut_thumb_path", "") or "") == str(path)
+            and getattr(panel, "_lut_thumb_display_u8", None) is not None
+        ):
+            return
+        try:
+            from raw_lut import lut_chooser_as_shot_display_u8
+
+            base = getattr(self, "_adjust_preview_base_rgb_fast", None)
+            if base is None:
+                base = getattr(self, "_adjust_preview_base_rgb", None)
+            if base is None:
+                return
+            tiny = lut_chooser_as_shot_display_u8(base, None)
+            if tiny is None:
+                return
+            panel.set_lut_preview_source(tiny, path, 0)
+        except Exception:
+            pass
+
     def _dodge_burn_overlay_adj(self, adj: dict) -> dict:
         """Fold main.py's local-mask state into an adjustments dict.
 
@@ -25776,6 +26190,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         submitted[gen] = dict(adj)
         for stale in [g for g in submitted if g < gen - 4]:
             del submitted[stale]
+        lite_map = getattr(self, "_adjust_preview_submitted_lite", None)
+        if lite_map is None:
+            lite_map = self._adjust_preview_submitted_lite = {}
+        lite_map[gen] = bool(use_fast)
+        for stale in [g for g in lite_map if g < gen - 4]:
+            del lite_map[stale]
         worker = _AdjustPreviewWorker(
             gen,
             path,
@@ -26695,6 +27115,93 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
         QTimer.singleShot(0, self._restore_keyboard_focus)
 
+    def _on_auto_requested(self) -> None:
+        """One Auto: WB + Light sliders + straighten, one undo, no colour grade.
+
+        Saturation / Vibrance / HSL stay put so colour is edited by hand after
+        Auto (Color / WB section and HSL mixer).
+        """
+        panel = getattr(self, "single_image_adjust_panel", None)
+        base = getattr(self, "_adjust_preview_base_rgb", None)
+        if panel is None or base is None or not hasattr(base, "shape"):
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto needs a decoded edit base — try again in a moment",
+                    3000,
+                )
+            return
+        from raw_adjustments import solve_white_balance_from_sample, wb_reference_temperature
+        from raw_auto_adjust import estimate_auto_tone, estimate_neutral_rgb, estimate_straighten_angle
+        from raw_edit_pipeline import _linear_float_from_buffer, linear_to_display_uint8
+
+        fast = _make_fast_preview_base(base)
+        lin = _linear_float_from_buffer(fast)
+        updates: dict[str, float] = {}
+        parts: list[str] = []
+        skipped: list[str] = []
+
+        est = estimate_neutral_rgb(lin)
+        if est is None:
+            skipped.append("WB")
+        else:
+            r, g, b = est
+            ref_temp = wb_reference_temperature(panel.get_adjustments())
+            temperature, tint = solve_white_balance_from_sample(r, g, b, ref_temp)
+            updates["Temperature"] = float(temperature)
+            updates["Tint"] = float(tint)
+            parts.append(f"WB {int(round(temperature))}K")
+
+        tone = estimate_auto_tone(lin)
+        if tone is None:
+            skipped.append("tone")
+        else:
+            for key, value in tone.items():
+                updates[key] = float(value)
+            ev = float(tone.get("Exposure2012", 0.0))
+            parts.append(f"tone {ev:+.2f} EV")
+
+        rgb = None
+        try:
+            adj0 = dict(panel.get_adjustments())
+            adj0.update(updates)
+            adj0["CropAngle"] = 0.0
+            adj0["PerspectiveVertical"] = 0.0
+            adj0["PerspectiveHorizontal"] = 0.0
+            rgb = linear_to_display_uint8(fast, adj0)
+        except Exception:
+            rgb = None
+        if rgb is None:
+            last = getattr(self, "_adjust_last_render", None)
+            if last is not None and last[0] is not None:
+                rgb = last[0]
+        if rgb is None:
+            skipped.append("straighten")
+        else:
+            angle = estimate_straighten_angle(rgb)
+            if angle is None:
+                skipped.append("straighten")
+            else:
+                import numpy as np
+
+                new_angle = float(np.clip(angle, -45.0, 45.0))
+                updates["CropAngle"] = new_angle
+                parts.append(f"straighten {new_angle:+.1f}°")
+
+        if not updates:
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(
+                    "Auto: already balanced — colour is in Color / WB and HSL",
+                    3500,
+                )
+            return
+        panel.apply_auto_tone(updates)
+        msg = "Auto: " + ", ".join(parts)
+        if skipped:
+            msg += f" (skipped {', '.join(skipped)})"
+        msg += " — grade colour in Color / WB · Ctrl+Z undoes"
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage(msg, 5000)
+
     def _on_auto_wb_requested(self) -> None:
         """Auto WB: robust gray-world estimate on the edit base, solved through
         the same Temperature/Tint inverse the WB dropper uses."""
@@ -26816,6 +27323,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 3500,
             )
 
+    @staticmethod
+    def _export_watermark_kwargs(opts: dict | None) -> dict:
+        from export_options import watermark_kwargs_from_prefs
+
+        return watermark_kwargs_from_prefs(opts or {})
+
     def _on_adjust_panel_export_requested(
         self, export_format: str, adj: dict, use_ai_denoise: bool = False,
         use_ai_upscale: bool = False,
@@ -26848,12 +27361,36 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         raw_fmt = (export_format or EXPORT_FORMAT_TIFF16).strip().lower()
         fmt = raw_fmt
-        base = os.path.splitext(os.path.basename(path))[0]
+        from export_options import (
+            format_export_filename,
+            load_export_prefs,
+            save_export_prefs,
+            template_context_for_path,
+        )
+        from rawviewer_ui.export_options_dialog import ExportOptionsDialog
+
+        prefs = load_export_prefs(self.get_settings())
+        opt_dlg = ExportOptionsDialog(self, prefs=prefs, queue_mode=False)
+        if not opt_dlg.exec():
+            logger.info("[EXPORT] Options dialog cancelled")
+            return
+        prefs = opt_dlg.values()
+        save_export_prefs(self.get_settings(), prefs)
+        self._pending_export_opts = prefs
+
+        ctx = template_context_for_path(
+            path,
+            export_format=fmt,
+            rating=self._gallery_path_rating(path),
+            label=self._gallery_path_color_label(path),
+            capture_time=str((self.image_cache.get_exif(path) or {}).get("capture_time") or ""),
+        )
+        default_name = format_export_filename(prefs.get("filename_template") or "", ctx)
         # Default next to the RAW when that folder is writable; otherwise jump to
         # Pictures/Desktop so users browsing a locked SD/camera card don't sit
         # on a read-only destination and fail after a long full-res decode.
         source_dir = os.path.dirname(os.path.abspath(path))
-        start_dir = self._preferred_writable_export_dir(source_dir)
+        start_dir = prefs.get("last_directory") or self._preferred_writable_export_dir(source_dir)
         if start_dir != self._sanitize_dialog_start_dir(source_dir):
             logger.info(
                 "[EXPORT] Source folder not writable (%s) — defaulting save dialog to %s",
@@ -26862,15 +27399,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             )
 
         if fmt == EXPORT_FORMAT_JPEG:
-            default_name = f"{base}_edited.jpg"
             dialog_title = "Export JPEG"
             file_filter = "JPEG (*.jpg *.jpeg)"
         elif fmt == EXPORT_FORMAT_WEBP:
-            default_name = f"{base}_edited.webp"
             dialog_title = "Export WebP"
             file_filter = "WebP (*.webp)"
         else:
-            default_name = f"{base}_edited.tif"
             dialog_title = "Export 16-bit TIFF"
             file_filter = "TIFF (*.tif *.tiff)"
 
@@ -26982,6 +27516,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._adjust_export_signals,
             use_ai_denoise=use_ai_denoise,
             use_ai_upscale=use_ai_upscale,
+            strip_gps=bool((getattr(self, "_pending_export_opts", {}) or {}).get("strip_gps", True)),
+            **self._export_watermark_kwargs(getattr(self, "_pending_export_opts", {}) or {}),
+            copy_metadata=bool((getattr(self, "_pending_export_opts", {}) or {}).get("copy_metadata", True)),
         )
         logger.info("[EXPORT] Handing off to background worker (format=%s)", raw_fmt)
         # Modal progress dialog: freezes app interaction for the duration
@@ -27092,11 +27629,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         7000,
                     )
                     self.register_new_file(output_path)
+            self._finish_export_queue_item(source_path, success=err is None)
             return
         if err is not None:
             if type(err).__name__ == "ExportCancelled":
                 if hasattr(self, "status_bar"):
                     self.status_bar.showMessage("Export cancelled", 4000)
+                self._finish_export_queue_item(source_path, success=False)
                 return
             msg = str(err) or repr(err)
             if isinstance(err, (PermissionError, OSError)) and getattr(err, "errno", None) in (
@@ -27122,6 +27661,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.show_error("Export failed", msg)
             except Exception:
                 pass
+            self._finish_export_queue_item(source_path, success=False)
             return
         fmt = (export_format or "tiff16").strip().lower()
         labels = {
@@ -27144,6 +27684,163 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # Show it now if it landed in the folder being browsed, rather than
         # leaving it invisible until the folder is reopened.
         self.register_new_file(output_path)
+        self._finish_export_queue_item(source_path, success=True)
+
+    def _add_current_to_export_queue(self) -> None:
+        paths = []
+        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
+            paths = self._gallery_selected_canonical_paths()
+        else:
+            p = getattr(self, "current_file_path", None)
+            if p:
+                paths = [p]
+        self._add_paths_to_export_queue(paths)
+
+    def _add_paths_to_export_queue(self, paths: List[str]) -> None:
+        # Paths only — loading XMP here freezes the gallery on fat mask sidecars.
+        # Adjustments are read in _pump_export_queue immediately before launch.
+        queue = list(getattr(self, "_export_queue", []) or [])
+        seen = {_norm_path(item["path"]) for item in queue}
+        added = 0
+        for path in paths or []:
+            if not path or not os.path.isfile(path):
+                continue
+            key = _norm_path(path)
+            if key in seen:
+                continue
+            queue.append({"path": path})
+            seen.add(key)
+            added += 1
+        self._export_queue = queue
+        n = len(queue)
+        self.status_bar.showMessage(
+            f"Added {added} to export queue ({n} total)" if added else f"Export queue: {n}",
+            3000,
+        )
+
+    def _run_export_queue_dialog(self) -> None:
+        queue = list(getattr(self, "_export_queue", []) or [])
+        if not queue:
+            self.status_bar.showMessage("Export queue is empty — add photos first", 3000)
+            return
+        from export_options import load_export_prefs, save_export_prefs
+        from rawviewer_ui.export_options_dialog import ExportOptionsDialog
+
+        prefs = load_export_prefs(self.get_settings())
+        dlg = ExportOptionsDialog(self, prefs=prefs, queue_mode=True, count=len(queue))
+        if not dlg.exec():
+            return
+        prefs = dlg.values()
+        dest = str(prefs.get("last_directory") or "").strip()
+        if not dest:
+            dest = self._preferred_writable_export_dir(
+                os.path.dirname(queue[0]["path"])
+            )
+        prefs["last_directory"] = dest
+        save_export_prefs(self.get_settings(), prefs)
+        self._export_queue_prefs = prefs
+        self._export_queue_seq = 1
+        self._export_queue_running = True
+        self._pump_export_queue()
+
+    def _pump_export_queue(self) -> None:
+        if not getattr(self, "_export_queue_running", False):
+            return
+        if getattr(self, "_adjust_export_in_progress", False):
+            return
+        queue = list(getattr(self, "_export_queue", []) or [])
+        if not queue:
+            self._export_queue_running = False
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage("Export queue finished", 4000)
+            return
+        # Keep the current item until export succeeds. Popping here dropped
+        # the job on _launch_export_job early-return and on failure/cancel.
+        item = queue[0]
+        prefs = getattr(self, "_export_queue_prefs", None) or {}
+        self._pending_export_opts = prefs
+        path = item.get("path")
+        from raw_adjustments import load_adjustments_for_file
+
+        try:
+            adj = load_adjustments_for_file(path) or {}
+        except Exception:
+            adj = {}
+        fmt = str(prefs.get("queue_format") or "jpeg")
+        seq = int(getattr(self, "_export_queue_seq", 1) or 1)
+        from export_options import format_export_filename, template_context_for_path
+
+        ctx = template_context_for_path(
+            path,
+            export_format=fmt,
+            seq=seq,
+            rating=self._gallery_path_rating(path),
+            label=self._gallery_path_color_label(path),
+        )
+        name = format_export_filename(prefs.get("filename_template") or "", ctx)
+        dest_dir = str(prefs.get("last_directory") or os.path.dirname(path))
+        output_path = os.path.join(dest_dir, name)
+        base, ext = os.path.splitext(output_path)
+        n = 2
+        while os.path.exists(output_path):
+            output_path = f"{base}_{n}{ext}"
+            n += 1
+        if not self._launch_export_job(path, output_path, adj, fmt):
+            return
+        self._export_queue_seq = seq + 1
+
+    def _finish_export_queue_item(self, source_path: str, *, success: bool) -> None:
+        """Pop the head item only after a successful export; keep it on failure."""
+        if not getattr(self, "_export_queue_running", False):
+            return
+        if success:
+            queue = list(getattr(self, "_export_queue", []) or [])
+            if queue and _norm_path(queue[0].get("path")) == _norm_path(source_path):
+                queue.pop(0)
+                self._export_queue = queue
+            QTimer.singleShot(0, self._pump_export_queue)
+            return
+        self._export_queue_running = False
+
+    def _launch_export_job(self, path: str, output_path: str, adj: dict, raw_fmt: str) -> bool:
+        """Shared start path for Adjust export and the export queue."""
+        if getattr(self, "_adjust_export_in_progress", False):
+            return False
+        self._adjust_export_in_progress = True
+        self._adjust_export_format = raw_fmt
+        try:
+            from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
+            from raw_spot_heal import (
+                MASK_KEY as HEAL_MASK_KEY,
+                MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
+            )
+            from raw_spot_heal import serialize_mask as serialize_heal_mask
+
+            adj = self._dodge_burn_overlay_adj(adj)
+            adj = dict(adj)
+            mask_obj = adj.pop(MASK_OBJ_KEY, None)
+            if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
+                adj[MASK_KEY] = serialize_mask(mask_obj)
+            heal_obj = adj.pop(HEAL_MASK_OBJ_KEY, None)
+            if heal_obj is not None and not getattr(heal_obj, "is_empty", True):
+                adj[HEAL_MASK_KEY] = serialize_heal_mask(heal_obj)
+        except Exception:
+            pass
+        opts = getattr(self, "_pending_export_opts", {}) or {}
+        pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
+        worker = _AdjustExportWorker(
+            path,
+            output_path,
+            adj,
+            raw_fmt,
+            pool,
+            self._adjust_export_signals,
+            strip_gps=bool(opts.get("strip_gps", True)),
+            **self._export_watermark_kwargs(opts),
+            copy_metadata=bool(opts.get("copy_metadata", True)),
+        )
+        _get_bg_thread_pool().start(worker)
+        return True
 
     def _sync_adjust_panel(self) -> None:
         panel = getattr(self, "single_image_adjust_panel", None)
@@ -27547,6 +28244,158 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     )
                 )
                 menu.addAction(copy_action)
+        share_ai = QAction("Share to AI agent", self)
+        share_ai.setToolTip(
+            "Preview JPEG + paths for an AI editor (MCP / XMP, not the RAW)"
+        )
+        share_ai.triggered.connect(
+            lambda _checked=False, ps=list(paths): self._share_paths_to_ai_agent(ps)
+        )
+        menu.addAction(share_ai)
+
+    def _share_current_to_ai_agent(self) -> None:
+        paths = self._gallery_share_target_paths()
+        if not paths:
+            p = getattr(self, "current_file_path", None)
+            paths = [p] if p and os.path.isfile(p) else []
+        self._share_paths_to_ai_agent(paths)
+
+    def _edit_ai_style_brief(self) -> None:
+        from rawviewer_share_agent import (
+            description_template_from_store,
+            save_description_template_to_store,
+        )
+        from rawviewer_ui.share_agent_dialog import DescriptionTemplateDialog
+
+        settings = self.get_settings()
+        dlg = DescriptionTemplateDialog(
+            self, template=description_template_from_store(settings)
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        save_description_template_to_store(settings, dlg.template_text())
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(
+                "AI description template saved (insert it when sharing)", 3000
+            )
+
+    def _bake_ai_share_preview(self, src_path: str, dest_path: str) -> bool:
+        from rawviewer_share_agent import bake_preview_jpeg, is_jpeg_file, strip_jpeg_gps
+
+        current = getattr(self, "current_file_path", None)
+        pixmap = getattr(self, "current_pixmap", None)
+        if (
+            current
+            and pixmap is not None
+            and not pixmap.isNull()
+            and _norm_path(current) == _norm_path(src_path)
+        ):
+            try:
+                if pixmap.save(dest_path, "JPEG", 90):
+                    strip_jpeg_gps(dest_path)
+                    if is_jpeg_file(dest_path):
+                        return True
+            except Exception:
+                pass
+        return bake_preview_jpeg(src_path, dest_path)
+
+    def _share_paths_to_ai_agent(self, paths: List[str]) -> None:
+        from rawviewer_share_agent import (
+            SharePathError,
+            build_batch_ticket,
+            build_share_tickets,
+            description_template_from_store,
+            folder_root_for_photos,
+            launch_agent,
+            new_share_dir,
+            persist_share_descriptions,
+            write_ticket_sidecars,
+        )
+        from rawviewer_ui.share_agent_dialog import ShareToAgentDialog
+
+        valid = [
+            os.path.abspath(p)
+            for p in (paths or [])
+            if p and os.path.isfile(p)
+        ]
+        if not valid:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage("No image to share to AI agent", 2500)
+            return
+        settings = self.get_settings()
+        dlg = ShareToAgentDialog(
+            self,
+            paths=valid,
+            photo_name=os.path.basename(valid[0]),
+            extra_count=max(0, len(valid) - 1) if len(valid) == 1 else 0,
+            template=description_template_from_store(settings),
+            settings_store=settings,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        description = dlg.description()
+        save_on = dlg.save_on_photos()
+        share_mode = dlg.mode()
+        folder = getattr(self, "current_folder", None)
+        try:
+            root = folder_root_for_photos(valid, folder)
+        except SharePathError as exc:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(str(exc), 4000)
+            return
+        dest = new_share_dir(os.path.splitext(os.path.basename(valid[0]))[0])
+        items: List[tuple] = []
+        for i, src in enumerate(valid, start=1):
+            preview = os.path.join(dest, f"preview_{i:02d}.jpg")
+            if not self._bake_ai_share_preview(src, preview):
+                _share_log(logging.WARNING, "AI share preview failed: %s", src)
+                continue
+            items.append((src, preview))
+        if not items:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage("Could not bake a preview JPEG for the agent", 4000)
+            return
+        try:
+            tickets = build_share_tickets(
+                items,
+                description=description,
+                folder_root=root,
+                mode=share_mode,
+            )
+            batch = tickets[0] if len(tickets) == 1 else build_batch_ticket(tickets)
+            paths_written = write_ticket_sidecars(batch, dest)
+        except SharePathError as exc:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(str(exc), 4000)
+            return
+        persist_share_descriptions(
+            [src for src, _prev in items], description, save_on_photos=save_on
+        )
+        launched = launch_agent(
+            batch,
+            prompt_path=paths_written["prompt_path"],
+            preview_path=[p for _s, p in items],
+        )
+        if launched.get("ok"):
+            n = len(items)
+            msg = (
+                f"Shared {n} photo{'s' if n != 1 else ''} to AI agent"
+                if launched.get("method") != "clipboard"
+                else "Shared to AI agent"
+            )
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 4000)
+            return
+        prompt_text = str(launched.get("prompt") or "")
+        try:
+            QApplication.clipboard().setText(prompt_text)
+        except Exception:
+            pass
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(
+                "Preview saved — description and paths copied for the agent",
+                5000,
+            )
 
     def _populate_stitch_actions(self, menu, paths: List[str]) -> None:
         """Stitch & Merge submenu. Only meaningful for a multi-photo selection."""
@@ -27632,6 +28481,30 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         clear_act.triggered.connect(lambda _checked=False: self.rate_gallery_selection(0))
         rate_menu.addAction(clear_act)
         menu.addMenu(rate_menu)
+
+        label_menu = QMenu("Color label", menu)
+        from xmp_catalog import COLOR_LABELS
+
+        for name in COLOR_LABELS:
+            act = QAction(name, self)
+            act.triggered.connect(
+                lambda _checked=False, lab=name: self.label_gallery_selection(lab)
+            )
+            label_menu.addAction(act)
+        clear_lab = QAction("Clear label", self)
+        clear_lab.triggered.connect(lambda _checked=False: self.label_gallery_selection(""))
+        label_menu.addAction(clear_lab)
+        menu.addMenu(label_menu)
+
+        kw_act = QAction("Keywords…", self)
+        kw_act.triggered.connect(lambda _checked=False: self._prompt_keywords_for_current())
+        menu.addAction(kw_act)
+
+        queue_act = QAction(
+            f"Add {n} to Export Queue" if n > 1 else "Add to Export Queue", self
+        )
+        queue_act.triggered.connect(lambda _checked=False: self._add_paths_to_export_queue(paths))
+        menu.addAction(queue_act)
 
         self._populate_stitch_actions(menu, paths)
 
@@ -28043,41 +28916,45 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # current_file_path is the viewer's attribute; self.file_path only
         # exists on worker classes, so the old getattr always returned None and
         # this menu entry could never open.
+        # The dialog always offers "Use my own file" plus a DPReview browser
+        # search — do not require a ColorChecker to already be the current photo.
         target_path = getattr(self, "current_file_path", None)
-        if not target_path or not os.path.isfile(target_path):
-            if hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage("Please open an image containing a ColorChecker target first.", 4000)
-            return
+        make, model, iso_val = "", "", None
+        img = None
+        factory = None
+        source_file = None
 
         try:
             from unified_image_processor import UnifiedImageProcessor
             from rawviewer_ui.color_calibration_dialog import ColorCalibrationDialog
             from PyQt6.QtWidgets import QDialog
 
-            make, model, iso_val = self._camera_identity_for_file(target_path)
+            if target_path and os.path.isfile(target_path):
+                make, model, iso_val = self._camera_identity_for_file(target_path)
+                source_file = target_path
+                img = getattr(self, "_adjust_preview_base_rgb", None)
+                if img is None:
+                    img = self._ensure_adjust_preview_base(target_path)
+                if img is None:
+                    proc = UnifiedImageProcessor()
+                    img = proc.decode_raw_edit_base(target_path, use_full_resolution=False)
+                if img is not None and not hasattr(img, "shape"):
+                    img = None
+                try:
+                    from color_calibration import has_factory_color_profile
 
-            img = getattr(self, "_adjust_preview_base_rgb", None)
-            if img is None:
-                img = self._ensure_adjust_preview_base(target_path)
-            if img is None:
-                proc = UnifiedImageProcessor()
-                img = proc.decode_raw_edit_base(target_path, use_full_resolution=False)
-            if img is None or not hasattr(img, "shape"):
-                if hasattr(self, "status_bar") and self.status_bar:
-                    self.status_bar.showMessage("Failed to load image buffer for calibration.", 4000)
-                return
-
-            try:
-                from color_calibration import has_factory_color_profile
-
-                factory = has_factory_color_profile(target_path)
-            except Exception:
-                factory = None
+                    factory = has_factory_color_profile(target_path)
+                except Exception:
+                    factory = None
+            elif hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(
+                    "Choose a ColorChecker file, or find a DPReview sample.", 4000
+                )
 
             dlg = ColorCalibrationDialog(
                 img, make, model, iso=iso_val, parent=self,
                 has_factory_profile=factory,
-                source_file=getattr(self, "current_file_path", None),
+                source_file=source_file,
             )
             if dlg.exec() == QDialog.DialogCode.Accepted and dlg.calibrated_profile:
                 profile = dlg.calibrated_profile
@@ -28094,10 +28971,13 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
                     # Surface the just-saved profile immediately, so the banner
                     # and its Remove button are available without a reload.
-                    self._refresh_camera_profile_banner(panel, target_path)
+                    # Banner follows the photo in the viewer, not a DPReview
+                    # sample the user picked only as a ColorChecker reference.
+                    if target_path and os.path.isfile(target_path):
+                        self._refresh_camera_profile_banner(panel, target_path)
 
-                camera_name = f"{make} {model}".strip() or "Camera"
-                iso_label = f" (ISO {iso_val})" if iso_val else ""
+                camera_name = f"{dlg.make} {dlg.model}".strip() or "Camera"
+                iso_label = f" (ISO {dlg.iso})" if dlg.iso else ""
                 if hasattr(self, "status_bar") and self.status_bar:
                     self.status_bar.showMessage(f"Calibrated profile saved for {camera_name}{iso_label}", 4000)
 
@@ -32583,9 +33463,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
 
         failed = 0
+        seen = set()
         for path in paths:
-            if not self._apply_rating_to_path(path, rating):
-                failed += 1
+            for member in self._catalog_paths_for_action(path):
+                key = _norm_path(member)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if not self._apply_rating_to_path(member, rating):
+                    failed += 1
 
         self._bump_gallery_rating_presence_epoch()
         self._refresh_rating_visuals_for_paths(paths)
@@ -32694,9 +33580,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         # Same per-file work the gallery's multi-select rating does; only the
         # single-view star display and the message differ.
-        saved = self._apply_rating_to_path(path, rating)
+        saved = True
+        for member in self._catalog_paths_for_action(path):
+            if not self._apply_rating_to_path(member, rating):
+                saved = False
         self._bump_gallery_rating_presence_epoch()
-        self._refresh_rating_visuals_for_paths([path])
+        self._refresh_rating_visuals_for_paths(self._catalog_paths_for_action(path))
         self._update_single_view_rating_display(rating)
 
         if not saved:
@@ -32720,6 +33609,134 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not cached_exif:
             return 0
         return cached_exif.get('rating', 0) or 0
+
+    def _apply_label_to_path(self, path: str, label: str) -> bool:
+        from xmp_catalog import normalize_color_label
+
+        label = normalize_color_label(label)
+        exif_data = self.image_cache.get_exif(path)
+        if exif_data is None:
+            exif_data = {
+                "orientation": 1,
+                "camera_make": "Unknown",
+                "camera_model": "Unknown",
+                "exif_data": {},
+                "capture_time": None,
+                "original_width": None,
+                "original_height": None,
+            }
+        else:
+            exif_data = exif_data.copy()
+        exif_data["color_label"] = label
+        if "exif_data" in exif_data and isinstance(exif_data["exif_data"], dict):
+            exif_data["exif_data"] = exif_data["exif_data"].copy()
+            exif_data["exif_data"]["color_label"] = label
+        self.image_cache.put_exif(path, exif_data)
+        if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
+            self._gallery_bulk_metadata.setdefault(path, {})["color_label"] = label
+        try:
+            from raw_adjustments import write_label_for_file
+
+            write_label_for_file(path, label)
+            return True
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to write color label to XMP sidecar for %s", path, exc_info=True
+            )
+            return False
+
+    def label_current_image(self, label: str) -> None:
+        path = getattr(self, "current_file_path", None)
+        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
+            self.label_gallery_selection(label)
+            return
+        if not path or not os.path.isfile(path):
+            self.status_bar.showMessage("No active image to label", 2000)
+            return
+        from xmp_catalog import normalize_color_label
+
+        label = normalize_color_label(label)
+        current = self._gallery_path_color_label(path)
+        if current == label:
+            label = ""
+        for member in self._catalog_paths_for_action(path):
+            self._apply_label_to_path(member, label)
+        self._refresh_rating_visuals_for_paths(self._catalog_paths_for_action(path))
+        self.status_bar.showMessage(
+            f"Color label: {label}" if label else "Color label cleared", 2000
+        )
+
+    def label_gallery_selection(self, label: str) -> None:
+        from xmp_catalog import normalize_color_label
+
+        label = normalize_color_label(label)
+        paths = [p for p in self._gallery_selected_canonical_paths() if os.path.isfile(p)]
+        if not paths:
+            self.status_bar.showMessage("No images selected in gallery", 2500)
+            return
+        seen = set()
+        applied = []
+        for path in paths:
+            for member in self._catalog_paths_for_action(path):
+                key = _norm_path(member)
+                if key in seen:
+                    continue
+                seen.add(key)
+                self._apply_label_to_path(member, label)
+                applied.append(member)
+        self._refresh_rating_visuals_for_paths(applied)
+        self.status_bar.showMessage(
+            f"Color label {label or 'cleared'} on {len(applied)} photo{'s' if len(applied) != 1 else ''}",
+            2500,
+        )
+
+    def _prompt_keywords_for_current(self) -> None:
+        paths = []
+        if getattr(self, "view_mode", "") == "gallery" and self._gallery_has_selection():
+            paths = [p for p in self._gallery_selected_canonical_paths() if os.path.isfile(p)]
+        else:
+            p = getattr(self, "current_file_path", None)
+            if p:
+                paths = [p]
+        if not paths:
+            self.status_bar.showMessage("No image to keyword", 2000)
+            return
+        from raw_adjustments import load_keywords_for_file
+        from rawviewer_ui.keywords_dialog import KeywordsDialog
+        from xmp_catalog import keywords_to_display, parse_keywords_text
+
+        existing = load_keywords_for_file(paths[0])
+        dlg = KeywordsDialog(
+            self,
+            text=keywords_to_display(existing),
+            count=len(paths),
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        words = parse_keywords_text(dlg.text())
+        seen = set()
+        for path in paths:
+            for member in self._catalog_paths_for_action(path):
+                key = _norm_path(member)
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    from raw_adjustments import write_keywords_for_file
+
+                    write_keywords_for_file(member, words)
+                    exif_data = self.image_cache.get_exif(member) or {}
+                    exif_data = dict(exif_data)
+                    exif_data["keywords"] = words
+                    self.image_cache.put_exif(member, exif_data)
+                except Exception:
+                    logging.getLogger(__name__).warning(
+                        "Failed to write keywords for %s", member, exc_info=True
+                    )
+        self.status_bar.showMessage(
+            f"Keywords saved ({len(words)})" if words else "Keywords cleared",
+            2500,
+        )
 
     def _restore_keyboard_focus(self) -> None:
         """Return keyboard focus to the active view surface (gallery or single image)."""
@@ -33099,9 +34116,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         key = event.key()
         modifiers = event.modifiers()
         vm = getattr(self, "view_mode", "single")
+        ctrl_or_cmd = bool(
+            modifiers
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier)
+        )
 
         if vm == "single" and getattr(self, "_adjust_overlay_visible", False):
-            ctrl_or_cmd = bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier))
             # Bound ONCE for the whole block. It used to be assigned inside the
             # Ctrl+C / Ctrl+V / M branches only, so the Invert (I) test below --
             # which reads `panel` without going through any of them -- raised
@@ -33169,10 +34189,29 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 return True
         
         if Qt.Key.Key_0 <= key <= Qt.Key.Key_5:
-            if vm == "single":
+            if vm == "single" or vm == "gallery":
                 rating = key - Qt.Key.Key_0
-                self.rate_current_image(rating)
+                if vm == "gallery":
+                    self.rate_gallery_selection(rating)
+                else:
+                    self.rate_current_image(rating)
                 return True
+
+        if Qt.Key.Key_6 <= key <= Qt.Key.Key_9:
+            from xmp_catalog import LABEL_KEY_MAP
+
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if shift and key == Qt.Key.Key_6:
+                label = "Purple"
+            else:
+                label = LABEL_KEY_MAP.get(key - Qt.Key.Key_0, "")
+            if label:
+                self.label_current_image(label)
+                return True
+
+        if key == Qt.Key.Key_K and not ctrl_or_cmd:
+            self._prompt_keywords_for_current()
+            return True
         
         if key == Qt.Key.Key_Space:
             if vm == "compare":
@@ -37584,8 +38623,7 @@ def main():
 
             # 2. Update existing splash if present
             if splash:
-                splash.showMessage("Initializing core components...", Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter, Qt.GlobalColor.white)
-                app.processEvents()
+                splash_show_status(splash, "Starting…")
                 safe_print("Splash screen updated", flush=True)
             elif _should_show_startup_splash():
                 # Fallback splash if top-level creation failed (frozen or Windows installed).
@@ -37606,13 +38644,8 @@ def main():
                     ),
                 )
                 splash.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-                splash.showMessage(
-                    "Starting RAWviewer...",
-                    Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignCenter,
-                    Qt.GlobalColor.white,
-                )
                 splash.show()
-                app.processEvents()
+                splash_show_status(splash, "Starting…")
                 safe_print("Fallback splash screen displayed", flush=True)
             else:
                 splash = None

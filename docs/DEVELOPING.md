@@ -141,9 +141,13 @@ Full list and dev defaults: [`scripts/Launch/README.md`](../scripts/Launch/READM
 
 **Lite builds** do not use MobileCLIP models.
 
+## UI languages
+
+Prepared copy (not loaded at runtime yet): [`i18n/catalog.json`](../i18n/catalog.json) — English source, Traditional Chinese, Japanese. See [`i18n/README.md`](../i18n/README.md). Language will follow the OS once `QTranslator` is wired; there is no in-app language picker until then.
+
 ## Upcoming / remaining work
 
-Tracked in the README — [Looking ahead](../README.md#looking-ahead) (not in release notes; those cover shipped features only).
+Not-done / later trains: README [Looking ahead](../README.md#looking-ahead) (**3.2+**). **3.1.0 is a stability + performance patch vs 3.0.2**, not the mask/feature release: [RELEASE_NOTES.md](../RELEASE_NOTES.md#version-310) and [`testplan/TEST_PLAN_3.1.md`](../testplan/TEST_PLAN_3.1.md).
 
 **Shipped in 3.0:** Fast RAW vs 2.5, Adjust panel (HSL, Creative LUT, WB presets, crop, D&B + Heal, vignette/dehaze, XMP presets), OpenMP LibRaw in macOS packages, star ratings, burst / Compare (**C**), Lite without torch, gallery loading overhaul. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 
@@ -159,3 +163,8 @@ Tracked in the README — [Looking ahead](../README.md#looking-ahead) (not in re
 - **RAW recovery preview** — **P** key: half-res Reconstruct decode + local polish; **not** the Adjust Highlights/Shadows sliders (**v2.5.0**). Edit-base (Adjust working buffer) also Reconstructs clipped CFA, then restores browse brightness — default Adjust is not the P-key preview.
 - **Clipping overlay** — **J** key (`exposure_clipping.py`; **v2.5.0**)
 - **Lite profile** — no torch/kornia; semantic/face off; CPU Fast RAW + Adjust (**v3.0.0**)
+- **Headless MCP** — later train (**3.2+**, not 3.1.0). Code may be in the working tree (`src/rawviewer_mcp/`; **[MCP.md](MCP.md)**).
+
+## Headless MCP *(3.2+, not 3.1.0 shipping)*
+
+AI agents can develop photos without the GUI when that train ships. All paths are rooted (`--root` / `RAWVIEWER_MCP_ROOT`). See **[MCP.md](MCP.md)**.

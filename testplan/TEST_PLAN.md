@@ -86,3 +86,4 @@ Run after significant display/editing changes:
 - `run_all.sh` (full) — before pushing decode/edit-pipeline changes; after
   `pixi install` / LibRaw rebuild (`scripts/libraw/build_libraw_openmp.sh`)
 - Manual checklist — before tagging a release
+- **3.1.0 vs 3.0.2 (stability / performance only):** [`TEST_PLAN_3.1.md`](TEST_PLAN_3.1.md). Feature tours (masks, pairing, MCP, …) wait for **3.2+**.

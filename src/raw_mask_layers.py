@@ -253,7 +253,7 @@ class MaskLayer:
     blend: str = "add"  # "add" | "subtract" -- reserved for Phase 2 stack composability
     kind: str = "brush"
     # What produced this layer: "" (hand-painted), "subject", "sky", "depth",
-    # "sam".
+    # "sam", "bokeh".
     # Distinct from ``kind``, which is how the alpha is *stored*. Used to stop
     # a one-shot AI tool being offered again when its mask already exists --
     # matching on the layer NAME would break the moment a user renames a row.
