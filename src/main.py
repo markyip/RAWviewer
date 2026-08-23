@@ -3154,6 +3154,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._metadata_index_deferred_pending = None
         self._last_single_view_interactivity_ts = 0.0
         self._single_view_index_defer_opened_ts = 0.0
+
+        self._memory_pressure_timer = QTimer(self)
+        self._memory_pressure_timer.setInterval(4000)
+        self._memory_pressure_timer.timeout.connect(self._on_memory_pressure_tick)
+        QTimer.singleShot(5000, self._start_memory_pressure_monitor)
         
         safe_print("  [RAWImageViewer] ImageLoadManager signals connected", flush=True)
 
@@ -3210,6 +3215,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             update_delay_ms = 12000
         QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
+
+    def _start_memory_pressure_monitor(self) -> None:
+        """Idle QTimer (every few seconds). Not on thumbnail paint."""
+        try:
+            from memory_pressure import backoff_enabled
+
+            if not backoff_enabled():
+                return
+        except Exception:
+            return
+        timer = getattr(self, "_memory_pressure_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _on_memory_pressure_tick(self) -> None:
+        try:
+            from memory_pressure import poll_and_apply
+
+            poll_and_apply(viewer=self)
+        except Exception:
+            logging.getLogger(__name__).debug("memory-pressure poll failed", exc_info=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
         """Set image_label pixmap with optional dashed focus / subject outline."""
@@ -32950,6 +32976,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         zoomed = not getattr(self, "fit_to_window", True)
         near = self._nav_preload_display_near_count()
         next_count = min(self._PRELOAD_NEXT_COUNT, len(self.image_files) - 1)
+        try:
+            from memory_pressure import adjacent_preload_cap
+
+            _cap = adjacent_preload_cap()
+            if _cap is not None:
+                next_count = min(next_count, _cap)
+        except Exception:
+            pass
         for i in range(1, next_count + 1):
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
@@ -32975,6 +33009,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
 
         prev_count = min(self._PRELOAD_PREV_COUNT, len(self.image_files) - 1)
+        try:
+            from memory_pressure import adjacent_preload_cap
+
+            _cap = adjacent_preload_cap()
+            if _cap is not None:
+                prev_count = min(prev_count, 1 if _cap <= 1 else max(1, _cap - 1))
+        except Exception:
+            pass
         for i in range(1, prev_count + 1):
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]

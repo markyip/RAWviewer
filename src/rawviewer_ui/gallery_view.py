@@ -2017,7 +2017,12 @@ class JustifiedGallery(QWidget):
         """RAM-tiered QPixmap budget (128–768 MiB)."""
         cached = getattr(self, "_thumb_cache_byte_budget_cached", None)
         if cached is not None:
-            return int(cached)
+            try:
+                from memory_pressure import scale_thumb_budget_bytes
+
+                return scale_thumb_budget_bytes(int(cached))
+            except Exception:
+                return int(cached)
         try:
             from rawviewer_profile import classify_memory_tier, system_total_ram_gb
 
@@ -2032,7 +2037,13 @@ class JustifiedGallery(QWidget):
             "ultra": 768,
         }.get(tier, 384)
         self._thumb_cache_byte_budget_cached = int(mb) * 1024 * 1024
-        return self._thumb_cache_byte_budget_cached
+        cached = self._thumb_cache_byte_budget_cached
+        try:
+            from memory_pressure import scale_thumb_budget_bytes
+
+            return scale_thumb_budget_bytes(int(cached))
+        except Exception:
+            return int(cached)
 
     def _prune_path_caches(self, keep: set) -> None:
         """Forget cached data for paths that are no longer on show.
@@ -2071,15 +2082,16 @@ class JustifiedGallery(QWidget):
         except Exception:
             pass
 
-    def _enforce_thumbnail_cache_budget(self) -> None:
+    def _enforce_thumbnail_cache_budget(self, *, force: bool = False) -> None:
         """Evict LRU thumbnails until the cache is under the byte budget.
 
         Recounts actual pixmap bytes, but only every N puts to keep the hot
         path cheap. Complements the count-only LRUCache cap.
         """
-        self._thumb_cache_puts_since_check += 1
-        if self._thumb_cache_puts_since_check < 64:
-            return
+        if not force:
+            self._thumb_cache_puts_since_check += 1
+            if self._thumb_cache_puts_since_check < 64:
+                return
         self._thumb_cache_puts_since_check = 0
         cache = self._thumbnail_cache
         with cache.lock:

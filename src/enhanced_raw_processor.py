@@ -102,7 +102,38 @@ _rawpy_global_lock = (
     if _UNPACK_CONCURRENCY == 1
     else threading.BoundedSemaphore(_UNPACK_CONCURRENCY)
 )
+_unpack_held_permits = 0
+_unpack_cap_lock = threading.Lock()
 _heavy_fallback_semaphore = threading.Semaphore(8)
+
+
+def set_unpack_concurrency_cap(cap: int) -> int:
+    """Lower in-process unpack overlap (never raise) for memory-pressure backoff.
+
+    Holds extra BoundedSemaphore permits so in-flight unpacks still complete.
+    A Lock (already concurrency 1) is left unchanged.
+    """
+    global _unpack_held_permits
+    target = max(1, min(int(cap), _UNPACK_CONCURRENCY))
+    if _UNPACK_CONCURRENCY <= 1 or target >= _UNPACK_CONCURRENCY:
+        return max(1, _UNPACK_CONCURRENCY - _unpack_held_permits)
+    inner = _rawpy_global_lock
+    need_hold = _UNPACK_CONCURRENCY - target
+    with _unpack_cap_lock:
+        extra = need_hold - _unpack_held_permits
+        if extra <= 0:
+            return max(1, _UNPACK_CONCURRENCY - _unpack_held_permits)
+        got = 0
+        for _ in range(extra):
+            try:
+                if inner.acquire(blocking=False):
+                    got += 1
+                else:
+                    break
+            except TypeError:
+                break
+        _unpack_held_permits += got
+        return max(1, _UNPACK_CONCURRENCY - _unpack_held_permits)
 
 # RAW formats where the lock-free byte-scan extractor reliably yields a correctly
 # oriented embedded preview (finalize_index_thumbnail_array heals container EXIF).

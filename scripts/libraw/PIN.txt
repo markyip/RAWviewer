@@ -1,0 +1,22 @@
+# Pinned LibRaw used for RAWviewer packaging (new Sony ARW6 / A7 V support).
+#
+# LibRaw (third_party/LibRaw)
+#   commit:  df226ea4178ccd74245f4f13c23adddfa01411c9
+#   date:    2026-08-18
+#   note:    master tip that includes sony_arw6 (PR #824) and follow-ups.
+#            Version macros still say 0.22.0-Release; SHLIB_CURRENT is 26.
+#            We keep installing as rawpy's expected names:
+#              Windows: raw_r.dll
+#              macOS:   libraw_r.25.dylib  (stock rawpy 0.27 soname)
+#
+# LibRaw-cmake (third_party/LibRaw-cmake)
+#   commit:  eb98e43 (master; JasPer optional / unused for 0.22+)
+#
+# Verified locally against Sony ILCE-7M5 _DSC6131.ARW (2026-08-22):
+#   stock rawpy/LibRaw 0.22.1 → LibRawFileUnsupportedError
+#   this pin → open + postprocess + decode_raw_edit_base OK
+#
+# Bump: update both submodule gitlinks, this file, and re-run packaging smoke
+# on an A7 V (or newer) ARW before merging.
+LibRaw=df226ea4178ccd74245f4f13c23adddfa01411c9
+LibRaw-cmake=eb98e43

@@ -58,22 +58,23 @@
 
 完整變更說明：[`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)
 
-## 未發行的 3.1.0（相對 3.0.2 的穩定度＋效能）
+## 3.1.0（相對 3.0.2 的穩定度＋效能）
 
-GitHub Releases 目前仍是 **3.0.x**。**3.1.0 是穩定度與效能補丁**，不是功能車次，**尚未打 tag**。測試：[`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md)。說明：[`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)。
+**3.1.0 是穩定度與效能補丁**，不是功能車次。已合進 **`main`**（PR **#10**）。測試：[`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md)。說明：[`RELEASE_NOTES.zh-TW.md`](RELEASE_NOTES.zh-TW.md)。
 
-3.1.0 **相對 3.0.2 宣稱**的內容：
+3.1.0 **相對 3.0.2 出貨**的內容：
 
-- **RAM 分級 Adjust 上限** — 較慢／≤16 GB 機器用較小工作底圖 settle；匯出仍全解析度。沒有記憶體分級選單。
-- **圖庫捲動與載入** — 佇列對準可視範圍、消失的縮圖會回來、觸控板次像素、切資料夾不清縮圖、取消載入只收尾一次。
-- **快取** — 完整影像改位元組預算；開啟 Adjust 未編輯離開不清所有層；sidecar 解析共用。
-- **匯出可靠度** — 分帶接縫、分段路徑靜默跳過 AI 降噪、OpenMP／BLAS 不占滿核心。
-- **當機／執行緒／取消** — 工作執行緒不建 `QPixmap`、配額重複釋放、`id()` 登錄表、CUDA-GL 執行緒、預載錯誤風暴。
-- **HE/HE\* NEF** — Adjust 走內嵌 JPEG 而不拒檔；無法解碼的 RAW 保留內嵌預覽（不是灰格）。
+- **低記憶體機器上 RAM 分級會真正覆寫** — idle 預載／游標停留全圖不再繼承 24 GB 數字；Adjust settle 長邊上限；圖庫縮圖位元組預算；作業系統記憶體壓力退避（本 session 黏住）。匯出仍全解析度。沒有記憶體分級選單。
+- **圖庫捲動與載入** — 佇列對準可視範圍、消失的縮圖會回來、觸控板次像素、切資料夾不清縮圖、取消載入只收尾一次；捲軸日期氣泡有節流（只吃記憶體快取預覽）。
+- **快取** — 完整影像改位元組預算；EXIF blob 只走 JSON（不再 pickle）；開啟 Adjust 未編輯離開不清所有層。
+- **匯出可靠度** — 分帶接縫、分段路徑靜默跳過 AI 降噪、編碼空間 dither；Plus AI 降噪恢復並含 NAFNet／半解析度與 **AI Detail**。
+- **當機／執行緒／取消** — 工作執行緒不建 `QPixmap`、配額重複釋放、`id()` 登錄表、CUDA-GL 執行緒、預載錯誤風暴；Pillow 像素上限；方向驗證佇列上限。
+- **HE/HE\* NEF 與新 Sony（ARW6）** — 能 demosaic 就走 LibRaw，否則內嵌 JPEG；無法解碼的 RAW 保留內嵌預覽（不是灰格）。包裝建置用 LibRaw master。
+- **Adjust Global UX** — 合併的自動色調；面板可停左／右；LUT 縮圖；可重排區段（Histogram 固定最上）；Windows 開啟 Adjust 時提高亮度（macOS 原本就有）；色卡相機描述檔；變形鏡頭反壓平；啟動 splash。
 
-*（未提交、針對此補丁 — 尚未進 git：）* 先前只活在 RAM 的 EXIF 欄位寫進磁碟 blob；捲軸日期氣泡不再每 tick 閃爍／解碼。
+*（不在這次：）* 先前只活在 RAM 的 EXIF 欄位寫進磁碟 blob。sidecar XML 共用解析仍與 3.2 遮罩 XMP 一起在 `development`。
 
-遮罩、成對、MCP、Share to AI，以及工作區其餘功能車次**不是** 3.1.0 出貨——見[展望](#展望)（**3.2+**）。生成式編輯仍暫緩。
+遮罩、成對、MCP、Share to AI、RAM 分級的分帶匯出執行緒／OpenBLAS 上限，以及其餘功能車次留在 **`development`（3.2+）**——見[展望](#展望)。生成式編輯仍暫緩。
 
 ---
 
@@ -357,7 +358,7 @@ RAWviewer 不上傳任何東西。搜尋、地圖、AI 功能全部在你的電�
 
 ## 展望
 
-**3.1.0** 是[相對 3.0.2 的穩定度／效能補丁](#未發行的-310相對-302-的穩定度效能)。下列為**後續車次（3.2+）**。其中許多**已在 `development` 工作區**（有些只在髒工作區）。程式碼**保留**；**不是** 3.1.0 宣稱要出的內容。
+**3.1.0** 是[相對 3.0.2 的穩定度／效能補丁](#310相對-302-的穩定度效能)，在 **`main`**。下列為 **`development` 上的後續車次（3.2+）**。程式碼**留在 development**；**不是** 3.1.0 出貨內容。
 
 原則：**只要 Plus 版能交付就算可行**，即使 Standard 因大小／無 ML 而必須省略。
 
@@ -366,15 +367,13 @@ RAWviewer 不上傳任何東西。搜尋、地圖、AI 功能全部在你的電�
 | 範圍 | 位置 | 說明 |
 |------|------|------|
 | **遮罩分頁**（筆刷、亮度、色彩、反轉、群組）＋ Plus AI 遮罩／景深／Blur background | `development` | 不是 3.1.0 產品宣稱 |
-| **Auto Tone**（白平衡＋光線＋拉直；不烤 P／不做 VLM） | `development` | |
 | **合成** — HDR、全景、全景 HDR、對焦疊加 | `development` | |
 | **點陣顯影**（JPEG／TIFF／WebP／PNG／BMP + XMP） | `development` | HE-NEF *拒檔*修正是 3.1.0 例外 |
-| **色卡**、手動畸變、變形鏡頭反壓平 | `development` | DPReview 樣本按鈕在髒工作區 |
+| **手動畸變** | `development` | 色卡相機描述檔、DPReview 搜尋（僅開瀏覽器 URL）與變形鏡頭反壓平已在 **3.1.0** |
 | **分享** WhatsApp／Signal（RAW 轉 JPEG）與 AirDrop | `development` | |
 | **AI 2× 放大** | `development` | Plus 降噪*可靠度*屬 3.1.0 |
 | **彩色標籤／關鍵字** | 髒工作區 | 標籤**快取持久化**是 3.1.0 針對的硬化，不是目錄 UI |
-| **RAW+JPEG 成對**、Adjust 左右停駐、LUT 縮圖、splash | 髒工作區 | |
-| **匯出樣板／去 GPS／浮水印／佇列** | 髒工作區 | 該車次出貨時佇列不可丟工作；浮水印用**角落小圖**（非整頁疊圖）省記憶體 |
+| **RAW+JPEG 成對** | 髒工作區 | 啟動 splash、Adjust 左右停駐、LUT 縮圖、自動色調、可重排 Global 區段，以及 Windows 開啟 Adjust 時提高亮度已在 **3.1.0** || **匯出樣板／去 GPS／浮水印／佇列** | 髒工作區 | 該車次出貨時佇列不可丟工作；浮水印用**角落小圖**（非整頁疊圖）省記憶體 |
 | **Headless MCP**、Share to AI agent | 髒工作區 | GUI **不會**即時重載 MCP sidecar |
 | **App 內介面語言** | 髒工作區（`i18n/`） | 文案在磁碟；接上 `QTranslator` 前介面仍為英文 |
 

@@ -92,3 +92,4 @@ Copied into `dist/RAWviewer-v*-macOS*.zip` by `build_macos.sh`:
 - Env-var reference for memory / GPU / session: [`docs/DEVELOPING.md`](../../docs/DEVELOPING.md).
 - Day-to-day: `pixi run start`, or `launch_dev_full` on your platform.
 - **clear_cache** does not uninstall the app; use `uninstall.bat` (Windows install folder) or `uninstall_macos_app.sh` (release zip).
+- **LibRaw (new Sony / ARW6):** packaging builds LibRaw from `third_party/LibRaw` (git submodule) and swaps it into rawpy — Windows via `scripts/libraw/build_libraw_windows.ps1` (hooked from `build.py`), macOS via `scripts/libraw/build_libraw_openmp.sh` (OpenMP + ARW6). After clone: `git submodule update --init --recursive`. Details: [`scripts/libraw/README.md`](../libraw/README.md).

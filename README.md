@@ -58,22 +58,23 @@
 
 Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
 
-## Unreleased 3.1.0 (stability + performance vs 3.0.2)
+## 3.1.0 (stability + performance vs 3.0.2)
 
-GitHub Releases still ship **3.0.x**. **3.1.0 is a stability and performance patch**, not a feature train, and is **not tagged**. Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md). Notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md#version-310).
+**3.1.0 is a stability and performance patch**, not a feature train. It is **on `main`** (PR **#10**). Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md). Notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md#version-310).
 
-What 3.1.0 **claims** vs 3.0.2:
+What 3.1.0 **ships** vs 3.0.2:
 
-- **RAM-tier Adjust cap** — slower / ≤16 GB machines settle on a smaller working base; export stays full-res. No memory-tier picker.
-- **Gallery scroll and load** — viewport-aimed queue, missing tiles return, trackpad sub-pixel, folder change does not wipe thumbs, cancel-once loads.
-- **Caches** — byte-budget full-image cache; no wipe of every tier when Adjust is opened and left unchanged; sidecar parse shared.
-- **Export reliability** — band seams, silent AI-denoise skip on the banded path, OpenMP/BLAS not taking every core.
-- **Crash / thread / cancel** — no `QPixmap` on workers, slot double-free, `id()` registry, CUDA-GL thread, prefetch error storm.
-- **HE/HE\* NEF** — Adjust via embedded JPEG instead of refusing the file; undecodable RAW keeps the embedded preview (not a grey tile).
+- **RAM-tier overlay that actually sticks on ≤16 GB** — idle-preload / hover full-res no longer inherit 24 GB numbers; Adjust settle long-edge cap; gallery thumbnail byte budget; session-sticky OS memory-pressure backoff. Export stays full-res. No memory-tier picker.
+- **Gallery scroll and load** — viewport-aimed queue, missing tiles return, trackpad sub-pixel, folder change does not wipe thumbs, cancel-once loads; scrollbar date bubble is throttled (cache-hit preview only).
+- **Caches** — byte-budget full-image cache; JSON-only EXIF blobs (no pickle); no wipe of every tier when Adjust is opened and left unchanged.
+- **Export reliability** — band seams, silent AI-denoise skip on the banded path, encoded-space dither; Plus AI denoise restored with NAFNet / half-res + **AI Detail**.
+- **Crash / thread / cancel** — no `QPixmap` on workers, slot double-free, `id()` registry, CUDA-GL thread, prefetch error storm; Pillow pixel cap; orientation-verify queue cap.
+- **HE/HE\* NEF and new Sony (ARW6)** — Adjust via LibRaw when possible, otherwise embedded JPEG; undecodable RAW keeps the embedded preview (not a grey tile). Packaged builds use LibRaw master.
+- **Adjust Global UX** — combined Auto Tone; panel docks left/right; LUT thumbs; rearrangeable sections (histogram pinned); Windows display brightness while Adjust is open (macOS already did this); ColorChecker camera profile; anamorphic desqueeze; startup splash.
 
-*(Uncommitted, targeted for this patch — not in git yet:)* EXIF blob persist for fields that only lived in RAM; scrollbar date bubble without per-tick flash/decode.
+*(Not in this cut:)* EXIF blob persist for fields that only lived in RAM. Shared sidecar XML parse stays with 3.2 mask XMP on `development`.
 
-Masks, pairing, MCP, Share to AI, and the rest of the working-tree feature train are **not** 3.1.0 shipping — see [Looking ahead](#looking-ahead) (**3.2+**). Generative editing stays shelved.
+Masks, pairing, MCP, Share to AI, RAM-tiered banded-export workers / OpenBLAS caps, and the rest of the feature train stay on **`development` (3.2+)** — see [Looking ahead](#looking-ahead). Generative editing stays shelved.
 
 ---
 
@@ -357,7 +358,7 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 
 ## Looking ahead
 
-**3.1.0** is the [stability / performance patch vs 3.0.2](#unreleased-310-stability--performance-vs-302). The items below are **later trains (3.2+)**. Much of this **already exists in the `development` tree** (some only in the dirty working tree). It is **kept**; it is **not** what 3.1.0 claims to ship.
+**3.1.0** is the [stability / performance patch vs 3.0.2](#310-stability--performance-vs-302) on **`main`**. The items below are **later trains (3.2+)** on **`development`**. They are **kept** there; they are **not** what 3.1.0 ships.
 
 Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
 
@@ -366,15 +367,13 @@ Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Stand
 | Area | Where | Notes |
 |------|--------|-------|
 | **Masks tab** (brush, luminance, colour, invert, grouping) + Plus AI masks / Depth / Blur background | `development` | Not a 3.1.0 product claim |
-| **Auto Tone** (WB + Light + straighten; no P-bake / VLM look) | `development` | |
 | **Merges** — HDR, panorama, panorama HDR, focus stack | `development` | |
 | **Raster develop** (JPEG / TIFF / WebP / PNG / BMP + XMP) | `development` | HE-NEF *refuse* fix is the 3.1.0 exception |
-| **ColorChecker**, manual distortion, anamorphic desqueeze | `development` | DPReview sample button is dirty-tree |
+| **Manual distortion** | `development` | ColorChecker camera profile, DPReview search (browser URL only), and anamorphic desqueeze ship in **3.1.0** |
 | **Share** WhatsApp / Signal (JPEG for RAW) and AirDrop | `development` | |
 | **AI Upscale 2×** | `development` | Plus denoise *reliability* is 3.1.0 |
 | **Color labels / keywords** | dirty tree | Label **cache persist** is 3.1.0-targeted hardening, not the catalog UI |
-| **RAW+JPEG pairing**, Adjust dock L/R, LUT thumbs, splash | dirty tree | |
-| **Export template / GPS strip / watermark / queue** | dirty tree | Queue must not drop jobs *when that train ships*; watermark uses a **corner patch** (not a full-page overlay) as a memory choice |
+| **RAW+JPEG pairing** | dirty tree | Startup splash, Adjust dock L/R, LUT thumbs, Auto Tone, rearrangeable Global sections, and Windows Adjust brightness ship in **3.1.0** || **Export template / GPS strip / watermark / queue** | dirty tree | Queue must not drop jobs *when that train ships*; watermark uses a **corner patch** (not a full-page overlay) as a memory choice |
 | **Headless MCP**, Share to AI agent | dirty tree | GUI does **not** live-reload MCP sidecars |
 | **In-app UI language** | dirty tree (`i18n/`) | Catalog on disk; UI still English until `QTranslator` |
 
