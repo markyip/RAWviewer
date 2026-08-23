@@ -32,6 +32,32 @@ class McpToolError(ValueError):
     pass
 
 
+_EXPORT_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".webp"})
+
+
+def _assert_safe_image_dest(dest_path: str, *, source_photo: str = "") -> None:
+    """Refuse RAW/source overwrite and existing photos (export / derivative)."""
+    ext = os.path.splitext(dest_path)[1].lower()
+    if ext not in _EXPORT_IMAGE_EXTS:
+        raise McpToolError("dest must be a .jpg/.jpeg/.webp path")
+    dest_abs = os.path.abspath(dest_path)
+    if source_photo:
+        try:
+            if os.path.normcase(os.path.realpath(dest_abs)) == os.path.normcase(
+                os.path.realpath(source_photo)
+            ):
+                raise McpToolError("must not overwrite the source photo")
+        except OSError:
+            pass
+    if os.path.lexists(dest_path):
+        from raw_file_extensions import get_supported_extensions
+
+        photo_exts = {e.lower() for e in get_supported_extensions()}
+        if ext in photo_exts:
+            raise McpToolError("refusing to overwrite an existing photo")
+        raise McpToolError("refusing to overwrite an existing file")
+
+
 def _exif_summary(path: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     try:
@@ -338,6 +364,7 @@ class RawviewerMcpService:
 
         photo = self._photo(path)
         dest_path = ensure_parent_under_root(self.root, dest)
+        _assert_safe_image_dest(dest_path, source_photo=photo)
         parent = os.path.dirname(dest_path)
         if parent and not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
@@ -387,13 +414,8 @@ class RawviewerMcpService:
                 )
             dest_text = os.path.splitext(source_photo)[0] + "_gen.jpg"
         dest_path = ensure_parent_under_root(self.root, dest_text)
+        _assert_safe_image_dest(dest_path, source_photo=source_photo)
         ext = os.path.splitext(dest_path)[1].lower()
-        if ext not in {".jpg", ".jpeg", ".webp"}:
-            raise McpToolError("save_derivative only writes JPEG or WebP")
-        if source_photo and os.path.normcase(os.path.realpath(dest_path)) == os.path.normcase(
-            os.path.realpath(source_photo)
-        ):
-            raise McpToolError("save_derivative must not overwrite the source photo")
         raw = str(image_base64 or "").strip()
         if raw.startswith("data:") and "," in raw:
             raw = raw.split(",", 1)[1]

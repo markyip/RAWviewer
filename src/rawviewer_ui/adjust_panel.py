@@ -4415,6 +4415,11 @@ class ImageAdjustPanelWidget(QWidget):
         # over to judge. Turned off both ways, so Global's dodge/burn mask
         # does not follow you into Masks either.
         self._set_mask_overlay_visible(False)
+        if not masks:
+            mw = self.window()
+            on_left = getattr(mw, "_on_masks_page_left", None)
+            if callable(on_left):
+                on_left()
 
         # One page, one brush system. Leaving Masks with Paint still armed
         # left the blank brush cursor and stroke routing on Global; arriving

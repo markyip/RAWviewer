@@ -56,6 +56,7 @@ def _manager():
     m._active_tasks = {}
     m._task_keys_by_path = {}
     m._raw_slot_holders = set()
+    m._demosaic_in_flight = set()
     m._active_raw_tasks = 0
     m._running_tasks = set()
     m._running_tasks_lock = threading.Lock()
@@ -101,6 +102,10 @@ def main() -> int:
             "and it is reentrant, so the existing nesting is safe",
             type(real._throttle_lock).__name__ == "RLock",
             type(real._throttle_lock).__name__,
+        )
+        check(
+            "tracks in-flight demosaics separately from slot holders",
+            hasattr(real, "_demosaic_in_flight"),
         )
         real.shutdown()
     except Exception as exc:  # noqa: BLE001

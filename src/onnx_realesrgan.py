@@ -13,6 +13,7 @@ place. Export the model with scripts/models/export_realesrgan_onnx.py.
 
 import logging
 import os
+import threading
 from typing import Optional
 
 import numpy as np
@@ -34,6 +35,29 @@ TILE_OVERLAP = 32
 SCALE = 2
 
 logger = logging.getLogger(__name__)
+
+_SESSION_LOCK = threading.Lock()
+_SHARED_SESSIONS: dict = {}
+_SHARED_IO: dict = {}
+
+
+def _session_key(model_path: str) -> str:
+    return os.path.normcase(os.path.abspath(model_path))
+
+
+def release_realesrgan_sessions() -> None:
+    """Close cached export sessions (call when leaving Adjust / shutting down)."""
+    with _SESSION_LOCK:
+        sessions = list(_SHARED_SESSIONS.values())
+        _SHARED_SESSIONS.clear()
+        _SHARED_IO.clear()
+    for session in sessions:
+        closer = getattr(session, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 def _sha256_of_file(path: str) -> str:
@@ -108,6 +132,14 @@ class RealESRGANONNX:
     def _init_session(self):
         import onnxruntime as ort
 
+        key = _session_key(self.model_path)
+        with _SESSION_LOCK:
+            cached = _SHARED_SESSIONS.get(key)
+            if cached is not None:
+                self._session = cached
+                self._input_name, self._output_name = _SHARED_IO[key]
+                return
+
         # CoreML is requested FIRST here, unlike onnx_scunet, which omits it on
         # purpose. That exclusion is specific to SCUNet's window-attention
         # graph, which partitions into 200+ CoreML segments and ends up slower
@@ -128,9 +160,13 @@ class RealESRGANONNX:
         options = ort.SessionOptions()
         options.log_severity_level = 3
 
-        self._session = ort.InferenceSession(self.model_path, sess_options=options, providers=providers)
-        self._input_name = self._session.get_inputs()[0].name
-        self._output_name = self._session.get_outputs()[0].name
+        session = ort.InferenceSession(self.model_path, sess_options=options, providers=providers)
+        names = (session.get_inputs()[0].name, session.get_outputs()[0].name)
+        with _SESSION_LOCK:
+            _SHARED_SESSIONS[key] = session
+            _SHARED_IO[key] = names
+        self._session = session
+        self._input_name, self._output_name = names
         logger.info("[UPSCALE] Session ready (providers=%s)", self._session.get_providers()[:1])
 
     def process(

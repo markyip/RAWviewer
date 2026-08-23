@@ -50,7 +50,7 @@ pycountry = "*"
 # Auto-Detect in the ColorChecker calibration dialog. ~+10 MB compressed,
 # ~+26 MB installed -- it is one monolithic cv2 binary, so mcc cannot be
 # taken without the rest of contrib.
-opencv-contrib-python-headless = "*"
+opencv-contrib-python-headless = ">=5.0.0,<5.1"
 lensfunpy = ">=1.14.0"
 huggingface_hub = "*"
 requests = "*"

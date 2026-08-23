@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+from collections import OrderedDict
 from typing import Any, Callable
 
 import numpy as np
@@ -12,15 +13,28 @@ PREVIEW_LONG_EDGE = 1000  # ~800–1200 as specified
 
 _DecodeFn = Callable[..., Any]
 
+# Half-res edit bases only. Full-res demosaics are too large to retain, and an
+# unbounded dict grew for every photo an agent previewed in a session.
+_MAX_CACHED_BASES = 2
+_MAX_CACHED_BYTES = 512 * 1024 * 1024
+
 
 class LinearBaseCache:
-    """Cache decoded linear (or uint8 JPEG-base) RGB per path + mtime + flags."""
+    """LRU cache of decoded half-res linear RGB per path + mtime + flags."""
 
     def __init__(self) -> None:
-        self._store: dict[tuple, np.ndarray] = {}
+        self._store: OrderedDict[tuple, np.ndarray] = OrderedDict()
 
     def clear(self) -> None:
         self._store.clear()
+
+    def _evict(self) -> None:
+        while len(self._store) > _MAX_CACHED_BASES:
+            self._store.popitem(last=False)
+        total = sum(int(getattr(v, "nbytes", 0) or 0) for v in self._store.values())
+        while total > _MAX_CACHED_BYTES and self._store:
+            _key, old = self._store.popitem(last=False)
+            total -= int(getattr(old, "nbytes", 0) or 0)
 
     def get(
         self,
@@ -37,18 +51,30 @@ class LinearBaseCache:
             bool(use_full_resolution),
             bool(apply_lens_correction),
         )
+        fn = decode_fn or decode_edit_base
+        if use_full_resolution:
+            arr = fn(
+                path,
+                use_full_resolution=True,
+                apply_lens_correction=apply_lens_correction,
+            )
+            if arr is None:
+                raise RuntimeError(f"Failed to decode edit base: {path}")
+            return arr
         cached = self._store.get(key)
         if cached is not None:
+            self._store.move_to_end(key)
             return cached
-        fn = decode_fn or decode_edit_base
         arr = fn(
             path,
-            use_full_resolution=use_full_resolution,
+            use_full_resolution=False,
             apply_lens_correction=apply_lens_correction,
         )
         if arr is None:
             raise RuntimeError(f"Failed to decode edit base: {path}")
         self._store[key] = arr
+        self._store.move_to_end(key)
+        self._evict()
         return arr
 
 

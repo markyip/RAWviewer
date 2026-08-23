@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import threading
 from typing import Optional
 
 import numpy as np
@@ -114,6 +115,31 @@ def ensure_scunet_model_downloaded() -> bool:
         return False
 
 
+
+_SESSION_LOCK = threading.Lock()
+_SHARED_SESSIONS = {}
+_SHARED_IO = {}
+
+
+def _session_key(model_path: str) -> str:
+    return os.path.normcase(os.path.abspath(model_path))
+
+
+def release_scunet_sessions() -> None:
+    """Close cached denoise sessions (call when leaving Adjust / shutting down)."""
+    with _SESSION_LOCK:
+        sessions = list(_SHARED_SESSIONS.values())
+        _SHARED_SESSIONS.clear()
+        _SHARED_IO.clear()
+    for session in sessions:
+        closer = getattr(session, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 class SCUNetONNX:
     """Wraps an ONNX-based SCUNet noise reduction model with tiled execution."""
 
@@ -123,6 +149,14 @@ class SCUNetONNX:
 
     def _init_session(self):
         import onnxruntime as ort
+
+        key = _session_key(self.model_path)
+        with _SESSION_LOCK:
+            cached = _SHARED_SESSIONS.get(key)
+            if cached is not None:
+                self._session = cached
+                self._input_name, self._output_name = _SHARED_IO[key]
+                return
 
         # NOTE: CoreMLExecutionProvider intentionally omitted — the SCUNet
         # attention graph partitions into 200+ CoreML segments, making the
@@ -142,9 +176,13 @@ class SCUNetONNX:
         options = ort.SessionOptions()
         options.log_severity_level = 3
 
-        self._session = ort.InferenceSession(self.model_path, sess_options=options, providers=providers)
-        self._input_name = self._session.get_inputs()[0].name
-        self._output_name = self._session.get_outputs()[0].name
+        session = ort.InferenceSession(self.model_path, sess_options=options, providers=providers)
+        names = (session.get_inputs()[0].name, session.get_outputs()[0].name)
+        with _SESSION_LOCK:
+            _SHARED_SESSIONS[key] = session
+            _SHARED_IO[key] = names
+        self._session = session
+        self._input_name, self._output_name = names
 
     def process(
         self,

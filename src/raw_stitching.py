@@ -622,6 +622,7 @@ def merge_hdr_exposure_fusion(
     from focus_stacking import _fuse_pyramid
 
     res = np.clip(_fuse_pyramid(norm_imgs, weights_maps), 0.0, 1.0)
+    del norm_imgs
 
     if is_uint8:
         out = (res * 255.0).round().clip(0, 255).astype(np.uint8)
