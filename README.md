@@ -36,7 +36,7 @@
 - **Browse at shooting speed.** Open a folder of RAWs and flick through full-screen previews with the arrow keys — no import, no catalog, no waiting.
 - **Cull with your fingers, not your mouse.** **1–5** rates a keeper, **↓** moves it to a Discard folder, **0** clears the rating, **C** compares similar frames side by side with synchronized zoom.
 - **Find any photo.** Type a place (`tokyo`), a camera (`sony`), or a year (`2024`) in gallery search. The Plus edition also understands plain descriptions like `sunset on beach` — all offline.
-- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, and local masks — brushed by hand or found for you (Plus). Every edit is saved to an XMP sidecar; your RAW is never modified.
+- **Develop without touching your files.** Press **E** for the Adjust panel: exposure, white balance, crop, dodge & burn, healing, LUTs, ColorChecker calibration, and lens correction. Every edit is saved to an XMP sidecar; your RAW is never modified.
 
 <p align="center">
   <img src="docs/images/single-view.jpg" alt="Full-screen single-image view with film strip and star rating" width="900">
@@ -48,33 +48,16 @@
   <br><em>The Adjust panel with before/after split: develop non-destructively, saved to XMP</em>
 </p>
 
-## New in 3.0
+## New in 3.1
 
-- **Much faster than 2.5** — cold Windows suite (cache cleared each run): gallery ready **~2.7–2.9×** sooner (**8.6s → ~3s**); RAW full-res navigation median **~1.6–1.7×** sooner (**0.95s → ~0.6s**). Standard and Plus share the same 3.0 pipeline and both beat 2.5 on cull paths — see [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
-- **Adjust panel** — develop RAWs non-destructively: tone, white-balance presets, crop, dodge & burn, healing, vignette/dehaze, creative LUTs, and savable presets; export JPEG / WebP / 16-bit TIFF
-- **Star ratings** — rate 1–5 with the number keys; filter the gallery by minimum rating
-- **Nikon High Efficiency (HE/HE*) files** now open for browsing and culling
-- **Lean Standard edition** for machines where install size matters
+- **Smoother culling on large shoots.** The gallery prioritizes what is on screen, keeps trackpad movement fluid, and no longer loses thumbnails after rapid scrolling or folder changes.
+- **More dependable on 8–16 GB computers.** RAWviewer automatically scales previews, preloading, and cache use to the installed RAM, then backs off further if the system is under sustained memory pressure. Full-resolution export is unchanged.
+- **Faster first-pass decisions.** A date bubble helps you jump through long shoots, while HE/HE* Nikon files and newer Sony ARWs keep a usable preview even when full RAW development is unavailable.
+- **A more capable darkroom.** One-click Auto Tone, visual LUT thumbnails, movable Adjust panel, ColorChecker camera profiles, anamorphic desqueeze, manual distortion, and improved healing are now part of the non-destructive workflow.
+- **More reliable delivery.** JPEG, WebP, and 16-bit TIFF export fixes include cleaner banded rendering and restored Plus AI noise reduction.
+- **Safer upgrades.** Existing photos and XMP sidecars remain untouched; caches refresh automatically as needed.
 
-Full changelog: [`RELEASE_NOTES.md`](RELEASE_NOTES.md)
-
-## 3.1.0 (stability + performance vs 3.0.2)
-
-**3.1.0 is a stability and performance patch**, not a feature train. It is **on `main`** (PR **#10**). Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md). Notes: [`RELEASE_NOTES.md`](RELEASE_NOTES.md#version-310).
-
-What 3.1.0 **ships** vs 3.0.2:
-
-- **RAM-tier overlay that actually sticks on ≤16 GB** — idle-preload / hover full-res no longer inherit 24 GB numbers; Adjust settle long-edge cap; gallery thumbnail byte budget; session-sticky OS memory-pressure backoff. Export stays full-res. No memory-tier picker.
-- **Gallery scroll and load** — viewport-aimed queue, missing tiles return, trackpad sub-pixel, folder change does not wipe thumbs, cancel-once loads; scrollbar date bubble is throttled (cache-hit preview only).
-- **Caches** — byte-budget full-image cache; JSON-only EXIF blobs (no pickle); no wipe of every tier when Adjust is opened and left unchanged.
-- **Export reliability** — band seams, silent AI-denoise skip on the banded path, encoded-space dither; Plus AI denoise restored with NAFNet / half-res + **AI Detail**.
-- **Crash / thread / cancel** — no `QPixmap` on workers, slot double-free, `id()` registry, CUDA-GL thread, prefetch error storm; Pillow pixel cap; orientation-verify queue cap.
-- **HE/HE\* NEF and new Sony (ARW6)** — Adjust via LibRaw when possible, otherwise embedded JPEG; undecodable RAW keeps the embedded preview (not a grey tile). Packaged builds use LibRaw master.
-- **Adjust Global UX** — combined Auto Tone; panel docks left/right; LUT thumbs; rearrangeable sections (histogram pinned); Windows display brightness while Adjust is open (macOS already did this); ColorChecker camera profile; anamorphic desqueeze; startup splash.
-
-*(Not in this cut:)* EXIF blob persist for fields that only lived in RAM. Shared sidecar XML parse stays with 3.2 mask XMP on `development`.
-
-Masks, pairing, MCP, Share to AI, RAM-tiered banded-export workers / OpenBLAS caps, and the rest of the feature train stay on **`development` (3.2+)** — see [Looking ahead](#looking-ahead). Generative editing stays shelved.
+Full details: [`RELEASE_NOTES.md`](RELEASE_NOTES.md) · [v3.1.0 release](https://github.com/markyip/RAWviewer/releases/tag/v3.1.0)
 
 ---
 
@@ -116,8 +99,6 @@ Open any folder of photos (drag it onto the window, or double-click a photo). Th
 | **← / →** | Previous / next photo |
 | **Space** or double-click | Fit ↔ 100% zoom |
 | **0–5** | Star rating (0 clears; bottom stars work too) |
-| **6–9** | Color label (Red / Yellow / Green / Blue; **Shift+6** Purple; same key clears) |
-| **K** | Edit keywords (XMP `dc:subject`) |
 | **↓** | Move to Discard folder |
 | **C** | Compare selected photos side by side |
 | **E** | Open the Adjust (develop) panel |
@@ -137,8 +118,6 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **←** / **→** | Previous / next image |
 | **Scroll wheel** | Previous / next (single view, fit mode) |
 | **0–5** | Star rating (**0** clears; bottom stars in single view too) |
-| **6–9** | Color label (Red / Yellow / Green / Blue; **Shift+6** Purple; same key clears) |
-| **K** | Edit keywords |
 | **↓** | Move to Discard folder |
 | **Delete** | Delete image(s) |
 | **Esc** | Gallery: clear selection → exit filters · Single view: back to gallery |
@@ -154,13 +133,11 @@ Open a folder (menu, drag-and-drop, or double-click a photo). Scroll the **galle
 | **F** | Show / hide focus overlay (supported files) |
 | **M** | Show / hide GPS map overlay (single view, geotagged photos) |
 
-**Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above. Color-label dots sit on tiles when a label is set.
-
-**RAW+JPEG pairing** (on by default) stacks a same-name RAW and JPEG into one `R+J` tile. **Burst grouping** is optional and **off** by default (needs **3+** frames; you pick the cover). Pairing and bursts are separate toggles — a two-file RAW+JPEG pair is never a burst.
+**Gallery rating filter:** use the bottom **stars** to show only photos rated N★ and above.
 
 **Single-view workflow toggle:** switch between **Embedded JPEG (Fast)** and **RAW (High Quality)** rendering. **Recovery preview (P)** uses Reconstruct + local polish to judge extreme contrast. It is not the Highlights/Shadows sliders (those compress/lift scene-linear luminance and cannot restore hue in fully blown whites).
 
-**Share:** bottom **Share / Open** button, or drag gallery / film-strip thumbnails out. On Mac the menu includes AirDrop (original file) and messaging apps such as WhatsApp / Signal (JPEG proxy for RAW). **File → Share to AI agent** hands a preview JPEG + MCP ticket to an agent (style brief is not a generative prompt). See [`docs/macos-sharing.md`](docs/macos-sharing.md) and [`docs/MCP.md`](docs/MCP.md).
+**Share / Open:** use the button in the bottom bar, or drag gallery / film-strip thumbnails into another application.
 
 </details>
 
@@ -187,16 +164,15 @@ While the Adjust panel is open (**E**):
 | Key | Action |
 |-----|--------|
 | **E** / **Esc** | Close Adjust (returns to browse mode) |
-| **D** / **B** / **X** / **H** | Hold to paint **Dodge** / **Burn** / **Eraser** / **Heal** — sweep the pointer, no mouse button. Releasing puts the tool away |
-| **P** | On the **Masks** tab: hold/arm to paint into the selected mask (**X** erases). In browse (Adjust closed), **P** is still the Reconstruct *preview* — Auto does not bake that |
-| **O** / **M** | Mask overlay (Masks tab: one overlay at a time; **I** invert) |
+| **D** / **B** / **X** / **H** | Arm **Dodge** / **Burn** / **Eraser** / **Heal** (press again to disarm) |
+| **O** | Show / hide the active brush overlay |
 | **Two-finger scroll** | Change **Brush Size** when a brush is armed (**Ctrl+scroll** still zooms) |
 | **←** / **→** | Nudge the focused slider (or previous/next image if none focused) |
 | **Ctrl/Cmd+Z** | Undo last edit step |
 | **Space** / **Double-click** | Fit / 100% zoom |
 | **J** / **G** / **F** | Clipping / composition guide / focus overlay (same as browse) |
 
-Notes: **Effect Strength** applies only to Dodge/Burn; Heal uses **Size** and **Flow** at full inpaint strength. **Brush Feather** sets edge softness for every brush — 0 is a hard circle, 100 fades from the centre. The panel's tool buttons arm persistently if you would rather not hold a key. Browse-only keys (**M**, **P**, histogram **H**) do not apply while Adjust is open — **H** arms Heal instead. By default, edits render inside the Adjust panel and browsing shows original pixels; every edit is written to an XMP sidecar next to the RAW.
+Notes: **Effect Strength** applies only to Dodge/Burn; Heal uses **Size** and **Flow** at full inpaint strength. Browse-only keys (**M**, **P**, histogram **H**) do not apply while Adjust is open — **H** arms Heal instead. By default, edits render inside the Adjust panel and browsing shows original pixels; every edit is written to an XMP sidecar next to the RAW.
 
 </details>
 
@@ -344,7 +320,7 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 | `bash: command not found` | Type `cd `, drag the extracted folder onto Terminal, press Return, then run the command again |
 | Can't read Desktop/Documents | System Settings → Privacy → **Full Disk Access** → add RAWviewer |
 | Search says models missing (**Plus**) | Open gallery search and click **Download** when prompted (needs internet once) |
-| No **AI denoise** in Export menu | Expected — export-time SCUNet denoise was removed in 3.0.1; use Adjust chroma NR + JPEG/WebP/TIFF export. |
+| AI noise reduction is unavailable | AI noise reduction is a Plus feature. Standard keeps conventional chroma/luma noise reduction; both editions can export JPEG, WebP, and 16-bit TIFF. |
 | Download failed (SSL / certificate error) | On a corporate VPN or proxy, add your organization's root certificate to **Keychain Access** and set it to **Always Trust** |
 | Need to uninstall completely | Use **`Uninstall RAWviewer.command`** from the release zip — not Trash alone |
 | Uninstall scripts missing | Re-download the release zip from [Releases](https://github.com/markyip/RAWviewer/releases/latest); scripts are inside the extracted folder |
@@ -358,48 +334,9 @@ To clear cache: **`scripts\Launch\windows\clear_cache.bat`** (Windows) · **`scr
 
 ## Looking ahead
 
-**3.1.0** is the [stability / performance patch vs 3.0.2](#310-stability--performance-vs-302) on **`main`**. The items below are **later trains (3.2+)** on **`development`**. They are **kept** there; they are **not** what 3.1.0 ships.
+Work continues on faster organization, local adjustments, multi-image workflows, and export tools while keeping the same priorities: a fast first pass, non-destructive edits, and local processing.
 
-Rule of thumb: **if it can ship in Plus, it counts as feasible** even when Standard must omit it (size / no ML).
-
-### Later trains (3.2+) — in the tree, not 3.1.0
-
-| Area | Where | Notes |
-|------|--------|-------|
-| **Masks tab** (brush, luminance, colour, invert, grouping) + Plus AI masks / Depth / Blur background | `development` | Not a 3.1.0 product claim |
-| **Merges** — HDR, panorama, panorama HDR, focus stack | `development` | |
-| **Raster develop** (JPEG / TIFF / WebP / PNG / BMP + XMP) | `development` | HE-NEF *refuse* fix is the 3.1.0 exception |
-| **Manual distortion** | `development` | ColorChecker camera profile, DPReview search (browser URL only), and anamorphic desqueeze ship in **3.1.0** |
-| **Share** WhatsApp / Signal (JPEG for RAW) and AirDrop | `development` | |
-| **AI Upscale 2×** | `development` | Plus denoise *reliability* is 3.1.0 |
-| **Color labels / keywords** | dirty tree | Label **cache persist** is 3.1.0-targeted hardening, not the catalog UI |
-| **RAW+JPEG pairing** | dirty tree | Startup splash, Adjust dock L/R, LUT thumbs, Auto Tone, rearrangeable Global sections, and Windows Adjust brightness ship in **3.1.0** || **Export template / GPS strip / watermark / queue** | dirty tree | Queue must not drop jobs *when that train ships*; watermark uses a **corner patch** (not a full-page overlay) as a memory choice |
-| **Headless MCP**, Share to AI agent | dirty tree | GUI does **not** live-reload MCP sidecars |
-| **In-app UI language** | dirty tree (`i18n/`) | Catalog on disk; UI still English until `QTranslator` |
-
-### Still not done
-
-| Rank | Item | Feasibility | Effort | Notes |
-|------|------|-------------|--------|-------|
-| 1 | **MCP live-reload in the GUI** | **High** | M | Headless MCP already writes XMP + previews. Adjust / gallery do not watch those sidecars — re-open the photo (or Adjust) to see agent edits |
-| 2 | **In-app UI language** | **High** | M | `i18n/catalog.json` holds EN / zh-TW / ja wording. The app is not wired to `QTranslator` yet; the UI stays English |
-| 3 | **Cold-folder edited tile regen** | **High** | M | Save-from-Adjust already bakes editor-aligned thumbs; a folder you have never opened in Adjust can still show the embedded JPEG |
-| 4 | **User-facing upscale strength** | **High** | S | Real-ESRGAN can look over-sharp at full strength; the blend exists as an env var, not a slider |
-| 5 | **Negative clicks for AI Selection** | **Medium–High** | M | The model accepts “not this” points; only positive clicks are sent. Trim over-reach with the brush |
-| 6 | **Named People / familiar-face clustering** | **Medium** | L | Plus can filter `has:face`. There is no named People library or “this is the same person” clustering |
-| 7 | **Generative editing via a local server** | **High** | S | **Shelved** in-app. Backend parked on `generative-editing`. Revival is a local OpenAI-compatible `/v1/images/edits` server, not an embedded 6–7 GB model |
-| 8 | **DNG export / round-trip** | **Medium** | L | Writer removed 2026-07; needs a real DNG path, not a stub |
-| 9 | **Windows HDR display path** | **Medium** | L | macOS EDR was removed for Fast RAW speed; Windows stays SDR tone-map |
-| 10 | **Restore macOS EDR alongside Fast RAW** | **Low–Medium** | L | Previously fought the fast load pipeline |
-| 11 | **VLM-assisted Auto** | **Low–Medium** | L | Product Auto is WB + Light + straighten only — no pixel/VLM look. A vision-model Auto is out of scope |
-| 12 | **Google Drive browse / edit / XMP sync** | **Medium** | L | Local cache sync + OAuth; not started |
-| 13 | **Edit Nikon HE/HE\* NEF as sensor data** | **Low** | L+ | Today: embedded JPEG. True RAW waits on a LibRaw HE mosaic decoder |
-
-**Current limits (not a wishlist):**
-- **Cold gallery tiles** for never-opened-in-Adjust edits may still show embedded JPEG.
-- **Nikon HE-NEF** develops from the embedded JPEG (8-bit) once Adjust is allowed (3.1.0 refuse fix).
-- **No memory-tier picker** — RAM caps are automatic.
-- **3.2+ only:** AI mask / upscale weights on first use; Smart Object returns one mask; watermarks JPEG/WebP only; Apply to Burst Group copies tone / colour / noise, not crop, dodge/heal, or local masks.
+Planned work is not part of the current download. See the separate **[3.2 product overview](docs/VERSION_3.2.md)** ([繁體中文](docs/VERSION_3.2.zh-TW.md)) for development status and known limits.
 
 ---
 
