@@ -1374,6 +1374,7 @@ class MobileCLIPCoreMLBackend:
 
     MODEL_ID = "mobileclip-coreml-s2"
     HUB_REPO_ID = "apple/coreml-mobileclip"
+    HUB_REVISION = "3e0a7bfb9fe83da8a3efaa3fd8f7df24214bb947"
     IMAGE_MODEL_FILE = "mobileclip_s2_image.mlpackage"
     TEXT_MODEL_FILE = "mobileclip_s2_text.mlpackage"
     TOKENIZER_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
@@ -1564,6 +1565,7 @@ class MobileCLIPCoreMLBackend:
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
+                revision=self.HUB_REVISION,
                 local_dir=self.model_dir,
                 local_dir_use_symlinks=False,
                 tqdm_class=tqdm_class,
@@ -1574,6 +1576,7 @@ class MobileCLIPCoreMLBackend:
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
+                revision=self.HUB_REVISION,
                 local_dir=self.model_dir,
                 local_dir_use_symlinks=False,
             )
@@ -1981,8 +1984,28 @@ class MobileCLIPONNXBackend:
 
     MODEL_ID = "mobileclip-onnx-2-s0"
     HUB_REPO_ID = "plhery/mobileclip2-onnx"
+    HUB_REVISION = "ba95759a5bdbaca53e9111e2550a76ec09c8fd9e"
     IMAGE_MODEL_FILE = "image_encoder.onnx"
     TEXT_MODEL_FILE = "text_encoder.onnx"
+    # SHA-256 of the Hub LFS objects at HUB_REVISION (vision, text).
+    ONNX_SHA256 = {
+        "s0": (
+            "13d20ebfa8a8f63890eb2727fe4dc63009ff970f43e0f7d9d2ed999659f70c8a",
+            "df590d47744f2ee9f3ccb67c4414d17419568c05bca0c4d166f2faeedf8b92f3",
+        ),
+        "s2": (
+            "a841f72c5a5085748bbe271a1d5718aba877822a15cba865bdbd0d37036b849e",
+            "622f10372bca71b5017f2efc5f8c2886610a2592b636de8984d717f03213f031",
+        ),
+        "b": (
+            "2f3873e400fd1adc5298b72d29e81bb69337e58601cf2853c43bc1211631eecd",
+            "f5cbb08e1eb6a5da690554a43cd37304835c0412c547ddb4ae86f0f8759686e0",
+        ),
+        "l14": (
+            "d48d4392f5805f59896009ea5460c7fa29f59722edd0d7d26c054b0980020998",
+            "9dac2284d0cbbf767ef25363d8536ac183f6c1d02df3a00c477843f7be0e9d17",
+        ),
+    }
     TOKENIZER_URL = "https://openaipublic.azureedge.net/clip/bpe_simple_vocab_16e6.txt.gz"
     SUPPORTS_HUB_DOWNLOAD = True
 
@@ -2077,6 +2100,7 @@ class MobileCLIPONNXBackend:
             hf_hub_download(
                 repo_id=self.HUB_REPO_ID,
                 filename=remote_path,
+                revision=self.HUB_REVISION,
                 local_dir=self.model_dir,
                 local_dir_use_symlinks=False,
                 tqdm_class=tqdm_class,
@@ -2089,6 +2113,24 @@ class MobileCLIPONNXBackend:
                 if os.path.exists(target_path):
                     os.remove(target_path)
                 os.rename(downloaded_path, target_path)
+            if not os.path.exists(target_path):
+                raise RuntimeError(f"MobileCLIP ONNX download missing: {local_name}")
+            expected = (self.ONNX_SHA256.get(self.variant) or (None, None))[
+                0 if local_name == self.IMAGE_MODEL_FILE else 1
+            ]
+            if expected:
+                digest = hashlib.sha256()
+                with open(target_path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest().lower() != expected.lower():
+                    try:
+                        os.remove(target_path)
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        f"MobileCLIP ONNX {local_name} failed SHA-256 verification"
+                    )
             _report(stage_end)
 
         onnx_dir = os.path.join(self.model_dir, "onnx")

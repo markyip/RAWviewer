@@ -104,7 +104,7 @@ def main() -> int:
 
     check(
         "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS still overrides",
-        "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS" in open(ic.__file__).read(),
+        "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS" in open(ic.__file__, encoding="utf-8").read(),
     )
 
     for key in list(lru.cache.keys()):

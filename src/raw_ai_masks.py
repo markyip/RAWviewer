@@ -399,7 +399,16 @@ def _get_session(kind: str):
 def release_sessions() -> None:
     """Drop cached sessions (frees model memory when leaving the Masks tool)."""
     with _SESSION_LOCK:
+        sessions = list(_SESSIONS.values())
         _SESSIONS.clear()
+    for session in sessions:
+        closer = getattr(session, "close", None)
+        if not callable(closer):
+            continue
+        try:
+            closer()
+        except Exception:
+            pass
 
 
 def release_bokeh_sam_predictor() -> None:

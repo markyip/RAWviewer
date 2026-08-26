@@ -40,6 +40,14 @@ Build outputs:
 
 Dependencies are in `pixi.toml`. Packaging scripts use a local `rawviewer_env/` venv when building release artifacts.
 
+**LibRaw submodule (required for release packaging):** newer Sony ARWs (e.g. A7 V / ARW6) need LibRaw newer than the stock rawpy wheel. Sources live under `third_party/LibRaw` + `third_party/LibRaw-cmake`:
+
+```bash
+git submodule update --init --recursive
+```
+
+Windows installer builds call `scripts/libraw/build_libraw_windows.ps1` automatically; macOS release builds use `scripts/libraw/build_libraw_openmp.sh` (OpenMP + same pin). See [`scripts/libraw/README.md`](../scripts/libraw/README.md).
+
 ### Build from source (commands)
 
 **Windows**
@@ -106,6 +114,7 @@ Semantic batch/chunk size for AI indexing is **auto-tuned separately** on first 
 |----------|--------|
 | `RAWVIEWER_MEMORY_TIER_AUTO=1` | **Default.** Tune workers, cache, and prefetch from installed RAM at startup |
 | `RAWVIEWER_MEMORY_TIER_AUTO=0` | Disable RAM-tier defaults; only explicit env vars apply |
+| `RAWVIEWER_MEMORY_PRESSURE_BACKOFF=0` | Disable session-sticky OS-pressure backoff (installed-RAM tier still applies) |
 | `RAWVIEWER_MOBILECLIP_VARIANT` | Windows ONNX model: `b` (default), `s0`, `s2`, `l14` |
 | `RAWVIEWER_GPU_VIEW=1` | GPU single-image viewport (OpenGL zoom/pan; on by default in release builds) |
 | `RAWVIEWER_GPU_VIEW=0` | Force legacy scroll-area single-image view |
@@ -147,7 +156,7 @@ Prepared copy (not loaded at runtime yet): [`i18n/catalog.json`](../i18n/catalog
 
 ## Upcoming / remaining work
 
-Not-done / later trains: README [Looking ahead](../README.md#looking-ahead) (**3.2+**). **3.1.0 is a stability + performance patch vs 3.0.2**, not the mask/feature release: [RELEASE_NOTES.md](../RELEASE_NOTES.md#version-310) and [`testplan/TEST_PLAN_3.1.md`](../testplan/TEST_PLAN_3.1.md).
+Not-done / later trains: README [Looking ahead](../README.md#looking-ahead) (**3.2+ on `development`**). **3.1.0 is the stability + performance patch vs 3.0.2 on `main`**, not the mask/feature release: [RELEASE_NOTES.md](../RELEASE_NOTES.md#version-310) and [`testplan/TEST_PLAN_3.1.md`](../testplan/TEST_PLAN_3.1.md).
 
 **Shipped in 3.0:** Fast RAW vs 2.5, Adjust panel (HSL, Creative LUT, WB presets, crop, D&B + Heal, vignette/dehaze, XMP presets), OpenMP LibRaw in macOS packages, star ratings, burst / Compare (**C**), Lite without torch, gallery loading overhaul. GPU **viewport** on by default (`RAWVIEWER_GPU_VIEW=0` to disable).
 

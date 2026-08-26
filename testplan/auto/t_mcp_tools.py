@@ -233,6 +233,59 @@ def main() -> int:
     except Exception:
         check("save_derivative refuses overwrite source", True)
 
+    try:
+        svc.export_jpeg("a.jpg", "a.jpg")
+        check("export refuses overwrite source", False)
+    except Exception:
+        check("export refuses overwrite source", True)
+
+    try:
+        svc.export_jpeg("a.jpg", "b.CR3")
+        check("export refuses raw dest", False)
+    except Exception:
+        check("export refuses raw dest", True)
+
+    try:
+        svc.save_derivative("a.jpg", jpeg_b64, source="b.CR3")
+        check("save_derivative refuses existing jpeg", False)
+    except Exception:
+        check("save_derivative refuses existing jpeg", True)
+
+    from rawviewer_mcp.preview import LinearBaseCache
+
+    n = {"c": 0}
+
+    def counting(path, **kwargs):
+        n["c"] += 1
+        return fake_decode(path, **kwargs)
+
+    lru = LinearBaseCache()
+    lru.get(jpeg_path, decode_fn=counting)
+    lru.get(jpeg_path, decode_fn=counting)
+    check("half-res cache hits", n["c"] == 1, str(n["c"]))
+    n0 = n["c"]
+    lru.get(jpeg_path, use_full_resolution=True, decode_fn=counting)
+    lru.get(jpeg_path, use_full_resolution=True, decode_fn=counting)
+    check("full-res is not cached", n["c"] == n0 + 2, str(n["c"]))
+
+    extra1 = os.path.join(inside, "c.jpg")
+    extra2 = os.path.join(inside, "d.jpg")
+    _tiny_jpeg(extra1)
+    _tiny_jpeg(extra2)
+    n["c"] = 0
+    lru2 = LinearBaseCache()
+    lru2.get(jpeg_path, decode_fn=counting)
+    lru2.get(extra1, decode_fn=counting)
+    lru2.get(extra2, decode_fn=counting)
+    check("lru keeps at most 2 bases", len(lru2._store) <= 2, str(len(lru2._store)))
+    lru2.get(jpeg_path, decode_fn=counting)
+    check("lru evicted the oldest base", n["c"] == 4, str(n["c"]))
+
+    from rawviewer_share_agent import mcp_launch_command
+
+    quoted = mcp_launch_command(os.path.join(inside, 'quote"me'))
+    check("mcp launch command quotes the folder", "quote" in quoted and "RAWVIEWER_MCP_ROOT=" in quoted)
+
     if FAILURES:
         print(f"\n{len(FAILURES)} failed")
         return 1

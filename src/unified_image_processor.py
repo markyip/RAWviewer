@@ -137,6 +137,15 @@ def release_edit_base_cache() -> int:
     return freed
 
 
+def trim_edit_base_lru(max_items: int = 1) -> int:
+    """Cap the edit-base LRU (session memory-pressure backoff). Returns items kept."""
+    keep = max(0, int(max_items))
+    with _EDIT_BASE_LRU_LOCK:
+        while len(_EDIT_BASE_LRU) > keep:
+            _EDIT_BASE_LRU.popitem(last=False)
+        return len(_EDIT_BASE_LRU)
+
+
 def _normalise_raster_edit_base(img):
     """Coerce a decoded raster into the edit base contract.
 

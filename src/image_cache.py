@@ -6,6 +6,7 @@ to dramatically improve browsing performance.
 """
 
 import os
+import sys
 import json
 import logging
 import platform
@@ -23,6 +24,111 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import QObject, pyqtSignal
 
 logger = logging.getLogger(__name__)
+
+
+def _is_libraw_native_name(name: str) -> bool:
+    lower = name.lower()
+    return lower == "raw_r.dll" or (
+        lower.startswith("libraw_r") and lower.endswith((".dylib", ".so", ".dll"))
+    )
+
+
+def _libraw_native_search_dirs() -> list[str]:
+    """Directories that may hold the packaged LibRaw shared library.
+
+    Dev installs keep ``raw_r.dll`` beside the rawpy package. Frozen / installer
+    layouts often put it next to the exe or under ``_internal/`` (PyInstaller
+    ``sys._MEIPASS``). Searching only rawpy's folder made the stamp report
+    ``nolib`` after packaging, so a later pin swap would not invalidate caches.
+    """
+    dirs: list[str] = []
+    try:
+        import rawpy
+
+        rawpy_dir = os.path.dirname(os.path.abspath(rawpy.__file__))
+        dirs.append(rawpy_dir)
+        parent = os.path.dirname(rawpy_dir)
+        if parent:
+            dirs.append(parent)
+    except Exception:
+        pass
+    try:
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        dirs.append(exe_dir)
+        dirs.append(os.path.join(exe_dir, "_internal"))
+        dirs.append(os.path.join(exe_dir, "_internal", "rawpy"))
+    except Exception:
+        pass
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(meipass)
+        dirs.append(os.path.join(meipass, "rawpy"))
+    try:
+        if getattr(sys, "frozen", False) and sys.argv:
+            root = os.path.dirname(os.path.abspath(sys.argv[0]))
+            dirs.append(root)
+            dirs.append(os.path.join(root, "_internal"))
+            dirs.append(os.path.join(root, "_internal", "rawpy"))
+    except Exception:
+        pass
+    out: list[str] = []
+    seen: set[str] = set()
+    for d in dirs:
+        if not d:
+            continue
+        key = os.path.normcase(os.path.abspath(d))
+        if key in seen:
+            continue
+        if os.path.isdir(d):
+            seen.add(key)
+            out.append(d)
+    return out
+
+
+def _libraw_native_fingerprint() -> str:
+    candidates: list[str] = []
+    for directory in _libraw_native_search_dirs():
+        try:
+            for name in os.listdir(directory):
+                if _is_libraw_native_name(name):
+                    candidates.append(os.path.join(directory, name))
+        except Exception:
+            continue
+    if not candidates:
+        return "nolib"
+    primary = None
+    for path in candidates:
+        base = os.path.basename(path).lower()
+        if base == "raw_r.dll" or base.startswith("libraw_r.") or base == "libraw_r.dylib":
+            primary = path
+            break
+    path = primary or sorted(candidates)[0]
+    st = os.stat(path)
+    return f"{os.path.basename(path)}:{st.st_size}:{int(st.st_mtime)}"
+
+
+def libraw_runtime_stamp() -> str:
+    """Fingerprint the LibRaw binary backing rawpy (version + native lib file).
+
+    Packaging may swap ``raw_r.dll`` / ``libraw_r*.dylib`` while leaving
+    ``rawpy.libraw_version`` unchanged (master still reports 0.22.0). Size and
+    mtime of the bundled native library catch that swap so demosaic caches
+    invalidate. Returns "" if rawpy is unavailable.
+    """
+    try:
+        import rawpy
+    except Exception:
+        return ""
+    try:
+        ver = getattr(rawpy, "libraw_version", None) or ()
+        ver_s = ".".join(str(int(x)) for x in ver[:3]) if ver else "unknown"
+    except Exception:
+        ver_s = "unknown"
+    try:
+        lib_s = _libraw_native_fingerprint()
+    except Exception:
+        lib_s = "nolib"
+    return f"{ver_s}|{lib_s}"
 
 
 def _encode_exif_blob(data: Dict[str, Any] | None) -> bytes:
@@ -68,21 +174,67 @@ def _safe_path_under_root(path: str | None, root: str | None) -> Optional[str]:
     return None
 
 _psutil_vm_fallback_logged = False
+_darwin_total_ram_cached: Optional[int] = None
+
+
+def _darwin_os_proc_available_memory() -> Optional[int]:
+    """Jetsam headroom via os_proc_available_memory (no subprocess)."""
+    if platform.system() != "Darwin":
+        return None
+    try:
+        import ctypes
+
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        lib.os_proc_available_memory.restype = ctypes.c_uint64
+        lib.os_proc_available_memory.argtypes = []
+        n = int(lib.os_proc_available_memory())
+        return n if n > 0 else None
+    except Exception:
+        return None
 
 
 def _sysctl_hw_memsize_bytes() -> Optional[int]:
-    """Physical RAM via sysctl (macOS fallback when psutil virtual_memory fails)."""
+    """Physical RAM via sysctlbyname (cached); subprocess only if ctypes fails."""
+    global _darwin_total_ram_cached
     if platform.system() != "Darwin":
         return None
+    if _darwin_total_ram_cached:
+        return _darwin_total_ram_cached
+    try:
+        import ctypes
+
+        lib = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        val = ctypes.c_uint64(0)
+        size = ctypes.c_size_t(ctypes.sizeof(val))
+        lib.sysctlbyname.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+        lib.sysctlbyname.restype = ctypes.c_int
+        rc = lib.sysctlbyname(
+            b"hw.memsize", ctypes.byref(val), ctypes.byref(size), None, 0
+        )
+        if rc == 0 and int(val.value) > 0:
+            _darwin_total_ram_cached = int(val.value)
+            return _darwin_total_ram_cached
+    except Exception:
+        pass
     try:
         out = subprocess.check_output(
             ["sysctl", "-n", "hw.memsize"],
             text=True,
             timeout=2,
         ).strip()
-        return int(out)
+        n = int(out)
+        if n > 0:
+            _darwin_total_ram_cached = n
+            return n
     except Exception:
         return None
+    return None
 
 
 def _darwin_page_size_bytes() -> int:
@@ -109,12 +261,22 @@ def _parse_vm_stat_page_count(vm_stat_output: str, label: str) -> int:
 
 
 def _darwin_memory_stats_from_vm_stat() -> Optional[Tuple[int, int, float]]:
-    """Installed RAM, available bytes, and percent used via sysctl + vm_stat."""
+    """Installed RAM + available bytes. Prefer os_proc_available_memory (jetsam).
+
+    Never shells out to the ``memory_pressure`` CLI. ``vm_stat`` is a last
+    resort when jetsam headroom is unavailable.
+    """
     if platform.system() != "Darwin":
         return None
     total = _sysctl_hw_memsize_bytes()
     if not total:
         return None
+    jetsam = _darwin_os_proc_available_memory()
+    if jetsam is not None:
+        available = min(int(total), int(jetsam))
+        used = max(0, int(total) - available)
+        percent = min(100.0, max(0.0, (used / float(total)) * 100.0))
+        return int(total), available, percent
     try:
         vm_out = subprocess.check_output(["vm_stat"], text=True, timeout=2)
     except Exception:
@@ -335,7 +497,12 @@ class LRUCache:
         with self.lock:
             self.max_size = new_max_size
             while len(self.cache) > self.max_size:
-                self.cache.popitem(last=False)
+                evicted_key, _ = self.cache.popitem(last=False)
+                if self.on_evict is not None:
+                    try:
+                        self.on_evict(evicted_key)
+                    except Exception:
+                        pass
 
     def __contains__(self, key: str) -> bool:
         with self.lock:
@@ -1854,8 +2021,12 @@ class ImageCache(QObject):
         # Initialize caches
         self.thumbnail_cache = LRUCache(max_size=cache_sizes['thumbnails'])
         self.grid_cache = LRUCache(max_size=cache_sizes['thumbnails'] // 2)
+        def _note_preview_evicted(key):
+            self.libraw_preview_paths.discard(key)
+
         self.preview_cache = LRUCache(
-            max_size=cache_sizes['preview_images']
+            max_size=cache_sizes['preview_images'],
+            on_evict=_note_preview_evicted,
         )  # High-res preview working set (RAM-adaptive)
         # Why a full image is no longer cached. A repeated full decode of the
         # same file is expensive (a 33MP embedded JPEG, seconds of work) and
@@ -1895,6 +2066,7 @@ class ImageCache(QObject):
             self.disk_preview_cache = PersistentPreviewCache(cache_dir)
             self._purge_stale_oriented_pixel_caches(cache_dir)
             self._purge_stale_edit_baked_pixel_caches(cache_dir)
+            self._purge_stale_libraw_pixel_caches(cache_dir)
         else:
             # Trial mode: keep all acceleration in RAM and never create/write local cache files.
             self.exif_cache = MemoryOnlyPersistentCache()
@@ -1917,20 +2089,16 @@ class ImageCache(QObject):
 
         # Memory management
         self.max_memory_mb = cache_sizes['cache_budget_mb']
+        self._tier_max_memory_mb = int(self.max_memory_mb)
         self.memory_check_interval = 5  # seconds
         self.last_memory_check = 0
         self.last_aggressive_purge = 0.0
         self.last_reduce_cache = 0.0
 
-        # Background memory-pressure polling: get_memory_info() spawns a
-        # `vm_stat` subprocess on macOS (see _darwin_memory_stats_from_vm_stat),
-        # tens of ms per call. _check_memory_pressure() used to call it inline
-        # on whatever thread touched the cache -- during gallery scrolling
-        # that's the main/GUI thread, so every memory_check_interval seconds
-        # of active scrolling paid a synchronous subprocess-spawn cost right
-        # in the scroll path. A lazily-started daemon thread now refreshes a
-        # cached snapshot on that same interval; _check_memory_pressure only
-        # ever reads it.
+        # Background memory-pressure polling: macOS prefers ctypes
+        # os_proc_available_memory (jetsam headroom). A lazily-started daemon
+        # thread refreshes a cached snapshot; _check_memory_pressure only
+        # ever reads it — never inline on the gallery scroll path.
         self._mem_poll_lock = threading.Lock()
         self._mem_poll_info: Optional[Dict[str, float]] = None
         self._mem_poll_pressure = 'ok'
@@ -1952,6 +2120,7 @@ class ImageCache(QObject):
         # enhanced_raw_processor._embedded_scan_miss_cache.
         self._orient_verify_attempted_max = 4096
         self._orient_verify_queue: list = []
+        self._orient_verify_queue_max = 256
         self._orient_verify_thread: Optional[threading.Thread] = None
         self._closing = False
 
@@ -2038,6 +2207,68 @@ class ImageCache(QObject):
         except Exception:
             pass
 
+    def _purge_stale_libraw_pixel_caches(self, cache_dir: str) -> None:
+        """Purge demosaic/preview pixel tiers when the LibRaw binary changes.
+
+        Disk thumb/grid/preview for RAW often hold LibRaw-rendered pixels.
+        Stock rawpy and the packaging-swapped LibRaw (ARW6 master pin) can
+        report the same libraw_version tuple while producing different pixels,
+        so the stamp fingerprints the native library file beside rawpy as well.
+        """
+        try:
+            stamp = libraw_runtime_stamp()
+            if not stamp:
+                return
+            marker = os.path.join(cache_dir, "libraw_pixel_ver.txt")
+            stored = None
+            try:
+                with open(marker, "r", encoding="utf-8") as fh:
+                    stored = (fh.read() or "").strip() or None
+            except Exception:
+                stored = None
+            if stored == stamp:
+                return
+            print(
+                "[CACHE] LibRaw runtime changed "
+                f"({stored!r} -> {stamp!r}); purging persisted pixel caches"
+            )
+            for cache in (
+                self.disk_thumbnail_cache,
+                self.disk_grid_cache,
+                self.disk_preview_cache,
+            ):
+                try:
+                    cache.clear()
+                except Exception:
+                    pass
+            try:
+                from unified_image_processor import (
+                    prune_libraw_unsupported_paths,
+                    release_edit_base_cache,
+                )
+            except Exception:
+                prune_libraw_unsupported_paths = None
+                release_edit_base_cache = None
+            if release_edit_base_cache is not None:
+                try:
+                    release_edit_base_cache()
+                except Exception:
+                    pass
+            if prune_libraw_unsupported_paths is not None:
+                try:
+                    prune_libraw_unsupported_paths(clear_all=True)
+                except Exception:
+                    pass
+            try:
+                self.libraw_preview_paths.clear()
+                self._save_libraw_preview_paths()
+            except Exception:
+                pass
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(stamp)
+        except Exception:
+            pass
+
     @staticmethod
     def _path_key(file_path: str) -> str:
         return _cache_path_key(file_path)
@@ -2076,10 +2307,8 @@ class ImageCache(QObject):
         """Check if we're under memory pressure and need to reduce cache sizes.
 
         Reads the snapshot the background poller last collected rather than
-        collecting it inline -- get_memory_info() spawns a `vm_stat`
-        subprocess on macOS, and this is called from cache-read paths
-        (get_grid/get_thumbnail/etc.) that run on whatever thread touches
-        the cache, including the main/GUI thread during gallery scrolling.
+        collecting it inline. Cache-read paths (get_grid/get_thumbnail) run
+        on whatever thread touches the cache, including the GUI thread.
         """
         current_time = time.time()
         if current_time - self.last_memory_check < self.memory_check_interval:
@@ -2621,16 +2850,23 @@ class ImageCache(QObject):
         jpeg_data: bytes = None,
         *,
         libraw_rendered: bool = False,
+        copy: bool = True,
     ) -> None:
         """Cache a preview image (memory); optional disk JPEG clamped to disk_preview_max_edge().
 
         ``libraw_rendered`` marks the preview as LibRaw-pipeline pixels (vs
         embedded-JPEG-derived) so the RAW workflow can refuse to paint
         camera-JPEG interim tiers (session-scoped provenance).
+
+        ``copy=False`` transfers ownership of a freshly allocated buffer the
+        caller will not mutate, matching ``put_full_image``.
         """
         if preview is not None:
             key = self._path_key(file_path)
-            self.preview_cache.put(key, preview.copy())
+            stored = (
+                np.ascontiguousarray(preview) if not copy else preview.copy()
+            )
+            self.preview_cache.put(key, stored)
             if libraw_rendered:
                 self.libraw_preview_paths.add(key)
                 self._prune_libraw_preview_paths()
@@ -2799,9 +3035,14 @@ class ImageCache(QObject):
                     return
                 evicted = 0
                 while total > budget_bytes and len(cache) > max(1, min_keep):
-                    _, oldest = cache.popitem(last=False)
+                    evicted_key, oldest = cache.popitem(last=False)
                     total -= self._estimate_entry_bytes(oldest)
                     evicted += 1
+                    if lru.on_evict is not None:
+                        try:
+                            lru.on_evict(evicted_key)
+                        except Exception:
+                            pass
             if evicted:
                 logger.info(
                     "%s cache: evicted %d oldest (budget ~%.0fMB, now ~%.0fMB, %d left)",
@@ -2822,6 +3063,23 @@ class ImageCache(QObject):
             min_keep=2,
             label="full-image",
         )
+
+    def apply_pressure_budget_scale(self, scale: float, *, min_mb: int = 128) -> int:
+        """Shrink the full-image byte budget for the rest of the session.
+
+        Never raises the budget (session-sticky). Installed-RAM tier is unchanged.
+        """
+        original = int(getattr(self, "_tier_max_memory_mb", self.max_memory_mb) or self.max_memory_mb)
+        self._tier_max_memory_mb = original
+        new_mb = max(int(min_mb), int(original * float(scale)))
+        self.max_memory_mb = min(int(self.max_memory_mb), new_mb)
+        try:
+            new_full = max(2, int(self.full_image_cache.max_size * float(scale)))
+            self.full_image_cache.shrink_to_size(min(self.full_image_cache.max_size, new_full))
+        except Exception:
+            pass
+        self._enforce_full_image_byte_budget()
+        return int(self.max_memory_mb)
 
     def get_pixmap(self, file_path: str) -> Optional[QPixmap]:
         """Get cached QPixmap or return None if not cached."""
@@ -2983,10 +3241,12 @@ class ImageCache(QObject):
                 return
             if file_path in self._orient_verify_attempted:
                 return
+            if len(self._orient_verify_queue) >= self._orient_verify_queue_max:
+                return
             if len(self._orient_verify_attempted) >= self._orient_verify_attempted_max:
                 self._orient_verify_attempted.clear()
             self._orient_verify_attempted.add(file_path)
-            self._orient_verify_queue.append((file_path, dict(exif_data)))
+            self._orient_verify_queue.append(file_path)
             if (
                 self._orient_verify_thread is None
                 or not self._orient_verify_thread.is_alive()
@@ -3004,12 +3264,19 @@ class ImageCache(QObject):
                 if not self._orient_verify_queue or getattr(self, "_closing", False):
                     self._orient_verify_thread = None
                     return
-                path, cached = self._orient_verify_queue.pop(0)
+                path = self._orient_verify_queue.pop(0)
             try:
                 from enhanced_raw_processor import (
                     cached_raw_exif_orientation_trustworthy,
                 )
 
+                cached = self.exif_memory_cache.peek(path)
+                if not cached:
+                    getter = getattr(self.exif_cache, "get", None)
+                    cached = getter(path) if callable(getter) else None
+                if not cached:
+                    continue
+                cached = dict(cached)
                 if cached_raw_exif_orientation_trustworthy(path, cached):
                     cached["verified_orientation"] = True
                     if not getattr(self, "_closing", False):
@@ -3303,7 +3570,9 @@ class ImageCache(QObject):
             if self._libraw_preview_paths_file and os.path.isfile(self._libraw_preview_paths_file):
                 import json
                 with open(self._libraw_preview_paths_file, "r", encoding="utf-8") as f:
-                    self.libraw_preview_paths = set(json.load(f))
+                    loaded = json.load(f)
+                self.libraw_preview_paths = set(loaded) if isinstance(loaded, list) else set()
+                self._prune_libraw_preview_paths()
         except Exception:
             self.libraw_preview_paths = set()
 

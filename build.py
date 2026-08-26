@@ -331,6 +331,57 @@ def update_macos_plist(app_path, profile: str = "full"):
         return False
 
 
+def ensure_packaged_libraw() -> bool:
+    """Swap an ARW6-capable LibRaw into the build env's rawpy (Windows).
+
+    Stock rawpy 0.27 wheels ship LibRaw 0.22.1, which cannot open some newer
+    Sony ARWs (e.g. ILCE-7M5). Official packaging builds LibRaw from
+    ``third_party/LibRaw`` and replaces ``raw_r.dll``. macOS uses
+    ``scripts/libraw/build_libraw_openmp.sh`` via ``build_macos.sh`` instead.
+    Skip with ``RAWVIEWER_LIBRAW_SKIP=1``.
+    """
+    if _env_flag("RAWVIEWER_LIBRAW_SKIP"):
+        print("[INFO] RAWVIEWER_LIBRAW_SKIP=1 — using stock rawpy LibRaw.")
+        return True
+    if platform.system() != "Windows":
+        return True
+
+    script = REPO_ROOT / "scripts" / "libraw" / "build_libraw_windows.ps1"
+    if not script.is_file():
+        print(f"[ERROR] Missing {script}")
+        return False
+    arw6 = REPO_ROOT / "third_party" / "LibRaw" / "src" / "decoders" / "sony_arw6.cpp"
+    if not arw6.is_file():
+        print("[ERROR] third_party/LibRaw not checked out (sony_arw6.cpp missing).")
+        print("  Run: git submodule update --init --recursive")
+        return False
+
+    _build_log("Installing packaged LibRaw (ARW6) into rawpy...")
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-PythonExe",
+        sys.executable,
+    ]
+    # Reuse a previously bootstrapped vcpkg under .cache when present.
+    print(f"[INFO] {' '.join(cmd)}")
+    try:
+        completed = subprocess.run(cmd, cwd=str(REPO_ROOT), check=False)
+    except OSError as exc:
+        print(f"[ERROR] Failed to launch LibRaw build script: {exc}")
+        return False
+    if completed.returncode != 0:
+        print(f"[ERROR] LibRaw packaging failed (exit {completed.returncode}).")
+        print("  See scripts/libraw/README.md")
+        return False
+    _build_log("Packaged LibRaw installed.")
+    return True
+
+
 def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
     """Install required dependencies"""
     lite = profile.strip().lower() == "lite"
@@ -1090,6 +1141,12 @@ def main():
     # Install dependencies first
     if not install_dependencies(windows_accel=args.windows_accel, profile=args.profile):
         print("[ERROR] Dependency installation failed.")
+        sys.exit(1)
+
+    # After rawpy is present (pip or pixi), swap in the packaging LibRaw.
+    # Runs even when RAWVIEWER_BUILD_SKIP_DEPS=1 so incremental builds keep ARW6.
+    if not ensure_packaged_libraw():
+        print("[ERROR] Packaged LibRaw install failed.")
         sys.exit(1)
 
     if platform.system() == "Darwin":

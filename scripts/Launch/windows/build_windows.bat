@@ -34,7 +34,20 @@ if exist build rmdir /s /q build 2>nul
 if exist dist rmdir /s /q dist 2>nul
 if exist *.spec del /q *.spec 2>nul
 
+REM Ensure git submodules for LibRaw (ARW6 / new Sony) before packaging.
+if exist ".gitmodules" (
+    echo Ensuring third_party LibRaw submodules...
+    git submodule update --init --recursive third_party/LibRaw third_party/LibRaw-cmake
+    if errorlevel 1 (
+        echo [ERROR] git submodule update failed. Clone with submodules or run:
+        echo   git submodule update --init --recursive
+        pause
+        exit /b 1
+    )
+)
+
 echo Building Windows unified installer and launcher stub...
+echo   (build.py will swap an ARW6-capable LibRaw into rawpy — see scripts\libraw\)
 python build.py --profile full
 if %errorlevel% neq 0 (
     echo.

@@ -2013,7 +2013,37 @@ class JustifiedGallery(QWidget):
         except Exception:
             return True
 
-    _THUMB_CACHE_BYTE_BUDGET = 768 * 1024 * 1024  # ~768 MiB of QPixmaps
+    def _thumb_cache_byte_budget(self) -> int:
+        """RAM-tiered QPixmap budget (128–768 MiB)."""
+        cached = getattr(self, "_thumb_cache_byte_budget_cached", None)
+        if cached is not None:
+            try:
+                from memory_pressure import scale_thumb_budget_bytes
+
+                return scale_thumb_budget_bytes(int(cached))
+            except Exception:
+                return int(cached)
+        try:
+            from rawviewer_profile import classify_memory_tier, system_total_ram_gb
+
+            tier = classify_memory_tier(system_total_ram_gb())
+        except Exception:
+            tier = "balanced"
+        mb = {
+            "low": 128,
+            "medium": 256,
+            "balanced": 384,
+            "high": 512,
+            "ultra": 768,
+        }.get(tier, 384)
+        self._thumb_cache_byte_budget_cached = int(mb) * 1024 * 1024
+        cached = self._thumb_cache_byte_budget_cached
+        try:
+            from memory_pressure import scale_thumb_budget_bytes
+
+            return scale_thumb_budget_bytes(int(cached))
+        except Exception:
+            return int(cached)
 
     def _prune_path_caches(self, keep: set) -> None:
         """Forget cached data for paths that are no longer on show.
@@ -2052,15 +2082,16 @@ class JustifiedGallery(QWidget):
         except Exception:
             pass
 
-    def _enforce_thumbnail_cache_budget(self) -> None:
+    def _enforce_thumbnail_cache_budget(self, *, force: bool = False) -> None:
         """Evict LRU thumbnails until the cache is under the byte budget.
 
         Recounts actual pixmap bytes, but only every N puts to keep the hot
         path cheap. Complements the count-only LRUCache cap.
         """
-        self._thumb_cache_puts_since_check += 1
-        if self._thumb_cache_puts_since_check < 64:
-            return
+        if not force:
+            self._thumb_cache_puts_since_check += 1
+            if self._thumb_cache_puts_since_check < 64:
+                return
         self._thumb_cache_puts_since_check = 0
         cache = self._thumbnail_cache
         with cache.lock:
@@ -2073,7 +2104,7 @@ class JustifiedGallery(QWidget):
                     b = 4096
                 sizes[k] = b
                 total += b
-            while total > self._THUMB_CACHE_BYTE_BUDGET and cache.cache:
+            while total > self._thumb_cache_byte_budget() and cache.cache:
                 k, _pm = cache.cache.popitem(last=False)
                 total -= sizes.get(k, 0)
 

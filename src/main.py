@@ -29,7 +29,8 @@ from datetime import datetime
 from typing import Callable, List, Optional, Tuple, Any, cast, Set
 
 from PIL import Image
-Image.MAX_IMAGE_PIXELS = None
+# Finite decompression-bomb cap (~200 MP). None disables Pillow's check.
+Image.MAX_IMAGE_PIXELS = 200_000_000
 
 
 def _is_multiprocessing_worker_process() -> bool:
@@ -3295,6 +3296,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._metadata_index_deferred_pending = None
         self._last_single_view_interactivity_ts = 0.0
         self._single_view_index_defer_opened_ts = 0.0
+
+        self._memory_pressure_timer = QTimer(self)
+        self._memory_pressure_timer.setInterval(4000)
+        self._memory_pressure_timer.timeout.connect(self._on_memory_pressure_tick)
+        QTimer.singleShot(5000, self._start_memory_pressure_monitor)
         
         safe_print("  [RAWImageViewer] ImageLoadManager signals connected", flush=True)
 
@@ -3351,6 +3357,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             update_delay_ms = 12000
         QTimer.singleShot(update_delay_ms, self._check_for_updates_on_launch)
         safe_print("  [RAWImageViewer] Initialization complete!", flush=True)
+
+    def _start_memory_pressure_monitor(self) -> None:
+        """Idle QTimer (every few seconds). Not on thumbnail paint."""
+        try:
+            from memory_pressure import backoff_enabled
+
+            if not backoff_enabled():
+                return
+        except Exception:
+            return
+        timer = getattr(self, "_memory_pressure_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+
+    def _on_memory_pressure_tick(self) -> None:
+        try:
+            from memory_pressure import poll_and_apply
+
+            poll_and_apply(viewer=self)
+        except Exception:
+            logging.getLogger(__name__).debug("memory-pressure poll failed", exc_info=True)
 
     def _set_single_view_pixmap(self, base: QPixmap) -> None:
         """Set image_label pixmap with optional dashed focus / subject outline."""
@@ -18339,9 +18366,9 @@ class RAWImageViewer(SessionMixin, QMainWindow):
 
         capture_time_only: read ONLY the capture_time column (via
         get_capture_times_for_sort) instead of the full per-file EXIF blob.
-        Sorting needs nothing else, and get_multiple_exif() does a pickle.loads
-        of a ~97-tag EXIF dict per file -- on a background sort worker that
-        pickle.loads burst holds the GIL and starves the on-screen image's
+        Sorting needs nothing else, and get_multiple_exif() JSON-decodes
+        a ~97-tag EXIF dict per file -- on a background sort worker that
+        burst holds the GIL and starves the on-screen image's
         decode/paint (measured stalling session-restore first-image display).
         In this mode bulk_metadata is returned EMPTY: the full per-file EXIF
         (gallery tile geometry) is fetched lazily when the gallery is actually
@@ -22365,12 +22392,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._drop_adjust_preview_bases()
                 self._adjust_edit_base_path = None
                 self._reset_adjust_compare_state()
-                try:
-                    from raw_ai_masks import release_mask_runtime
-
-                    release_mask_runtime(sessions=True)
-                except Exception:
-                    pass
+                self._release_adjust_heavy_state()
             if bar is not None:
                 bar.setEnabled(True)
                 if getattr(self, "_filmstrip_hidden_for_adjust", False):
@@ -24707,9 +24729,65 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sam_points = []
         self._sam_layer = None
         try:
-            from raw_ai_masks import release_bokeh_sam_predictor
+            from raw_ai_masks import release_bokeh_sam_predictor, release_sessions
 
             release_bokeh_sam_predictor()
+            release_sessions()
+        except Exception:
+            pass
+
+    def _on_masks_page_left(self) -> None:
+        """Free SAM / ONNX sessions when leaving the Masks tab."""
+        self._sam_predictor = None
+        self._sam_predictor_path = None
+        try:
+            from raw_ai_masks import release_sessions
+
+            release_sessions()
+        except Exception:
+            pass
+
+    def _release_adjust_heavy_state(self) -> None:
+        """Drop edit-base caches, mask stack, and AI sessions when closing Adjust."""
+        for attr in ("_adjust_preview_stage_cache", "_adjust_preview_stage_cache_fast"):
+            cache = getattr(self, attr, None)
+            if cache is not None and hasattr(cache, "reset"):
+                try:
+                    cache.reset()
+                except Exception:
+                    pass
+        self._mask_layer_stack = None
+        panel = getattr(self, "single_image_adjust_panel", None)
+        if panel is not None and hasattr(panel, "set_mask_layer_stack"):
+            try:
+                panel.set_mask_layer_stack(None)
+            except Exception:
+                pass
+        self._sam_predictor = None
+        self._sam_predictor_path = None
+        try:
+            from raw_ai_masks import release_bokeh_sam_predictor, release_sessions
+
+            release_bokeh_sam_predictor()
+            release_sessions()
+        except Exception:
+            pass
+        try:
+            from unified_image_processor import release_edit_base_cache
+
+            release_edit_base_cache()
+        except Exception:
+            pass
+        try:
+            from onnx_scunet import release_scunet_sessions
+
+            release_scunet_sessions()
+        except Exception:
+            pass
+        try:
+            from onnx_realesrgan import release_realesrgan_sessions
+
+            release_realesrgan_sessions()
         except Exception:
             pass
 
@@ -33165,6 +33243,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         zoomed = not getattr(self, "fit_to_window", True)
         near = self._nav_preload_display_near_count()
         next_count = min(self._PRELOAD_NEXT_COUNT, len(self.image_files) - 1)
+        try:
+            from memory_pressure import adjacent_preload_cap
+
+            _cap = adjacent_preload_cap()
+            if _cap is not None:
+                next_count = min(next_count, _cap)
+        except Exception:
+            pass
         for i in range(1, next_count + 1):
             next_index = (self.current_file_index + i) % len(self.image_files)
             next_file = self.image_files[next_index]
@@ -33190,6 +33276,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 )
 
         prev_count = min(self._PRELOAD_PREV_COUNT, len(self.image_files) - 1)
+        try:
+            from memory_pressure import adjacent_preload_cap
+
+            _cap = adjacent_preload_cap()
+            if _cap is not None:
+                prev_count = min(prev_count, 1 if _cap <= 1 else max(1, _cap - 1))
+        except Exception:
+            pass
         for i in range(1, prev_count + 1):
             prev_index = (self.current_file_index - i) % len(self.image_files)
             prev_file = self.image_files[prev_index]
@@ -38156,7 +38250,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     # Refinement only reorders image_files; it does not need the
                     # full per-file EXIF blob (the gallery fetches that lazily on
                     # first open). Reading capture_time-only keeps this background
-                    # sort worker from stealing the GIL via a pickle.loads-per-file
+                    # sort worker from stealing the GIL via a JSON-decode-per-file
                     # burst while the current image is decoding/painting.
                     sorted_files, bulk_metadata = viewer.sort_files_by_capture_time(
                         paths,

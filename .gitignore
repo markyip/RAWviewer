@@ -3,6 +3,8 @@ build/
 dist/
 *.spec
 .cache/
+third_party/LibRaw-cmake/build-rawviewer/
+third_party/LibRaw-cmake/build/
 
 # Python cache
 __pycache__/

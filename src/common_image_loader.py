@@ -631,7 +631,7 @@ def _pil_file_to_qimage(file_path: str, max_edge: int = 0):
     from PIL import Image, ImageFile, ImageOps
 
     ImageFile.LOAD_TRUNCATED_IMAGES = True
-    Image.MAX_IMAGE_PIXELS = None
+    Image.MAX_IMAGE_PIXELS = 200_000_000
     with Image.open(file_path) as pil_image:
         pil_image = ImageOps.exif_transpose(pil_image)
         if max_edge > 0:
@@ -661,7 +661,7 @@ def _pil_file_to_qpixmap(file_path: str, max_edge: int = 0) -> QPixmap:
         from PIL import Image, ImageOps, ImageFile
 
         ImageFile.LOAD_TRUNCATED_IMAGES = True
-        Image.MAX_IMAGE_PIXELS = None
+        Image.MAX_IMAGE_PIXELS = 200_000_000
         with Image.open(file_path) as pil_image:
             pil_image = ImageOps.exif_transpose(pil_image)
             if max_edge > 0:

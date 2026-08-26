@@ -30,8 +30,11 @@ run "compile check" -m py_compile \
   src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
   src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py src/torch_bootstrap.py \
   src/raw_detail_enhance.py src/raw_tone_recovery.py src/edit_gpu_policy.py \
+  src/raw_auto_adjust.py src/raw_lut.py src/display_brightness.py src/memory_pressure.py \
   src/xmp_catalog.py src/raw_jpeg_pairing.py src/export_options.py \
-  src/rawviewer_ui/export_options_dialog.py \
+  src/rawviewer_ui/export_options_dialog.py src/rawviewer_ui/adjust_panel.py \
+  src/startup_splash.py src/color_calibration.py src/dpreview_samples.py \
+  src/rawviewer_ui/color_calibration_dialog.py src/rawviewer_ui/color_checker_overlay.py \
   src/rawviewer_mcp/server.py src/rawviewer_mcp/service.py \
   src/rawviewer_mcp/paths.py src/rawviewer_mcp/adjustments.py src/rawviewer_mcp/preview.py \
   src/rawviewer_share_agent.py src/rawviewer_ui/share_agent_dialog.py

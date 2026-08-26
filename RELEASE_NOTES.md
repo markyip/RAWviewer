@@ -4,24 +4,40 @@
 
 
 ## 🚀 Version 3.1.0
-**Status: not yet released — stability + performance patch vs tagged 3.0.2**
+**Status: on `main` (PR #10 merged). GitHub Release tags `v3.1.0`.**
 
-GitHub Releases still ship **3.0.x**. **3.1.0 is not a feature dump.** It is the next patch for memory, gallery load/scroll, cache, export reliability, and crash/cancel paths relative to **3.0.2**. Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md).
+**3.1.0 is not a feature dump.** It is the next patch for memory, gallery load/scroll, cache, export reliability, crash/cancel paths, LibRaw for new Sony bodies, and Plus AI denoise speed relative to **3.0.2**. Testers: [`testplan/TEST_PLAN_3.1.md`](testplan/TEST_PLAN_3.1.md).
 
 There is **no** user-facing memory-tier picker; RAM caps stay automatic. **Generative editing stays shelved.**
 
-**Honest provenance.** `development` also holds a large **later train** (masks, merges, ColorChecker, pairing, MCP, Share to AI, …). That code is **kept in the tree** for **3.2+**; it is **not** what 3.1.0 claims to ship. Items marked *(uncommitted)* are dirty-tree hardening aimed at this patch and are **not** in git yet.
+**Branch policy.** `origin/main` is the 3.1.0 line. `development` keeps the **later train** (masks, merges, pairing, MCP, Share to AI, …) for **3.2+** — that code is **not** in 3.1.0. OS memory-pressure backoff and the scrollbar date bubble **are** in this git.
 
-### Memory and RAM tier *(in `development`)*
+### Memory and RAM tier *(low-end / limited-RAM machines)*
 
-- **Low-RAM machines keep a usable gallery** without inheriting 24 GB prefetch defaults (idle-preload 120, 12 preload threads, hover full-res). The RAM tier overlays those numbers.
-- **Adjust settle stays light on slower machines.** Live-drag was already 640 px; settle still used a half-sensor frame (often ~12 MP). On ≤16 GB the RAM tier now caps that working base (and the live-drag edge). **Export still decodes at full resolution.**
-- **Gallery, Compare, and heavy jobs stay usable on slower machines**, in shoot order — not a 24 GB studio profile on an 8 GB laptop.
-- **Banded export / OpenCV and native math threads no longer take every core.** Caps follow the RAM tier; OpenBLAS / Accelerate follow the same OpenMP limit so decode + preview do not freeze the UI.
-- **Full-image cache is a byte budget**, not a hard count of 8, so smaller files keep more of them.
+3.0.2 already classified installed RAM (`low` &lt;10 GB, `medium` 10–14, `balanced` 14–20, `high` 20–28, `ultra` ≥28) and tuned **indexing / decode concurrency**. The 3.0.2 overlay used `setdefault` *after* shared gallery prefetch, so an 8 GB laptop still inherited idle-preload **120**, **12** preload threads, and hover full-res. **3.1.0 overlays those numbers** (user-exported `RAWVIEWER_*` still win). Opt out: `RAWVIEWER_MEMORY_TIER_AUTO=0`.
 
-### Gallery scroll and load *(in `development`; bubble throttle uncommitted)*
+- **Low-RAM gallery stays usable.** On ≤16 GB the tier now also cuts idle-preload batch, preload threads, filmstrip radius, adjacent preload, and turns **hover full-res decode off**. Not a 24 GB studio profile on an 8 GB laptop.
+- **Adjust settle stays light.** Live-drag was already ~640 px; settle still used a half-sensor frame (often ~12 MP). On ≤16 GB the working Adjust base is now long-edge capped (`RAWVIEWER_EDIT_BASE_MAX_EDGE`: 1600 / 2048 / 2560 on low / medium / balanced) and live-drag may shrink (480 / 560 / 640). Edit-base LRU is 1 on low/medium. **Export still decodes at full resolution.**
+- **Gallery thumbnail RAM is a byte budget**, not an unbounded QPixmap pile: 128 / 256 / 384 / 512 / 768 MiB by tier (low → ultra). LRU eviction when the budget is exceeded.
+- **Full-image cache is a byte budget** (~55% of the cache memory cap), not a hard count of 8, so smaller files keep more of them.
+- **OS memory-pressure backoff**: if available RAM stays low (or Windows `dwMemoryLoad` / macOS jetsam headroom is tight) for several idle samples, shrink thumbnail / full-image budgets, pause idle preload, and cap unpack concurrency for the rest of the session. Does **not** re-tier from installed RAM, does **not** change `RAWVIEWER_EDIT_BASE_MAX_EDGE` mid-Adjust, and does not auto-upgrade budgets until the next launch. Opt out: `RAWVIEWER_MEMORY_PRESSURE_BACKOFF=0`.
+- **Preview long-edge and unpack overlap** follow the same tiers (e.g. low: preview max 1280 px, unpack concurrency 1). Fast RAW / GPU demosaic fallbacks are unchanged 3.0 paths; GPU in-flight count still follows **VRAM**, not this RAM overlay.
+- **Not in 3.1.0:** RAM-tiered `RAWVIEWER_BANDED_WORKERS` and OpenBLAS / Accelerate following the same cap. Those live on `development` (3.2+). 3.1 still setdefaults `OMP_NUM_THREADS` to half the cores (2–8), as 3.0.2 already did.
 
+### Adjust tab (ported from the later train, Global only)
+
+These are editor UX / performance on the **existing 3.0 Adjust** — not 3.2 products (no Masks, MCP, pairing).
+
+- **Auto Tone (one AUTO)** on the Light section: white balance + Exposure / Contrast / Highlights / Shadows / Whites / Blacks + straighten from the unedited photo. Does not move Saturation, Vibrance, or HSL. Color / WB still has Auto WB; Transform still has Auto straighten. Not the P-key RAW recovery preview. Ctrl+Z undoes the lot.
+- **Adjust docks left or right.** Header arrow flips the panel across a horizontal splitter; the side is remembered.
+- **Looks list shows LUT thumbs** of the current photo (as-shot, not live sliders). Names-only until the edit base is ready.
+- **Global sections can be reordered.** Histogram stays pinned at the top. Right-click a section header: Move Up / Move Down / Reset Order. Survives restart (QSettings, not the image cache).
+- **Windows: raise display brightness while Adjust is open** (same as macOS). Uses DDC/CI on the monitor nearest the window, then `\\.\LCD`, then WMI `WmiMonitorBrightness`. Never `SetDeviceGammaRamp`. Disable with `RAWVIEWER_ADJUST_MAX_BRIGHTNESS=0`.
+- **Heal (H) uses NS+Telea on large holes.** Dust stays on fast Telea; bigger strokes run Navier–Stokes then a light Telea clean-up. Inpaint cache is keyed with a weakref to the source buffer (so Exposure/WB ticks cannot reuse a stale fill). Banded export passes `row_offset` so a heal stamp stays on the painted rows. (3.0.2 shipped Telea-only.)
+- **Startup splash (packaged / installed):** branded card with version · edition and a status footer. Shown for frozen and Windows-installed launches; skipped for bare `python src/main.py` unless `RAWVIEWER_SHOW_SPLASH=1`. Dismisses when the main window is ready (macOS retries hide if Qt lags).
+- **ColorChecker calibration:** Color section **Calibrate…** opens a four-corner chart dialog (optional DPReview sample search). Saved camera profile auto-applies to later photos from that body with no XMP; banner + Remove.
+
+### Gallery scroll and load *(bubble throttle still uncommitted)*
 - **The load queue aims at the viewport**, not enqueue order. Jumping no longer waits behind everything you scrolled past. Cancelled off-screen thumbs no longer block visible ones (a stall that needed a folder reload).
 - **A cancelled-at-start load finishes once**, not twice.
 - **Missing tiles come back.** A transient failure used to cache a grey placeholder for the rest of the session.
@@ -33,32 +49,35 @@ There is **no** user-facing memory-tier picker; RAM caps stay automatic. **Gener
 
 ### EXIF / sidecar cache
 
-- **Sidecar XML is parsed once and shared** while a photo is in use *(in `development`)* — opening an edited file is cheaper and less likely to storm the parser.
-- **EXIF disk cache can persist fields that previously lived only in RAM** *(uncommitted)* so gallery metadata (stars today; later-train labels if present) survives restart instead of vanishing until a rescan. This is a cache-correctness fix, not a new catalog product.
-
+- **EXIF blobs on disk are JSON only.** 3.1.0 no longer unpickles leftover cache rows (that was arbitrary code execution if the cache directory was writable). Non-JSON rows miss once and are rewritten as JSON. Writing JSON was already 3.0.2; stopping pickle is the 3.1 safety delta.
+- **Shared sidecar XML parse** while a photo is in use is **not** in 3.1.0 *(still on `development` with 3.2 mask XMP)*. Opening Adjust in 3.1 does not depend on it.
+- **EXIF disk cache can persist fields that previously lived only in RAM** *(uncommitted)* so gallery metadata (stars today) survives restart instead of vanishing until a rescan. This is a cache-correctness fix, not a new catalog product.
 ### Export and Plus AI denoise *(fixes on the 3.0.2 path)*
 
 - **Export band seams** and a path where **AI denoise was silently skipped** on banded export.
 - **Dither in encoded space, not linear** — shadow noise on JPEG/WebP.
 - **Plus AI denoise export still cancels and reports progress** (3.0.2 behaviour) and must not hang or leave a partial file. First-use model download is not timed out as a failed denoise.
-- Faster CPU denoise (NAFNet / half-res + detail restore) and **AI Detail** stay on the existing Plus denoise export — performance of a 3.0.2 feature, not a new export menu.
+- Faster CPU denoise (NAFNet / half-res + detail restore) and **AI Detail** stay on the existing Plus denoise export — performance of a 3.0.2 feature, not a new export menu. The ONNX session is **reused** instead of rebuilt per pass.
 
-### Crashes, threads, cancel *(in `development`)*
+### Crashes, threads, cancel
 
 Review rounds on this line fixed: **`QPixmap` built on worker threads**, a **decode-slot double-free** on cancel paths, a registry keyed on **`id()`** that could match a recycled object, **shared caches with per-instance locks** (so they can be purged), and a **CUDA-GL resource released on the wrong thread**. Idle prefetch no longer error-storms on undecodable files.
 
+P0–P2 safety on the 3.1 line also: **Pillow pixel cap** (200 MP) so huge JPEGs do not inflate without bound; **orientation-verify queue** capped (256 queued / 4096 attempted) so a long browse does not pile daemon probes; denoise ONNX session reuse as above.
+
 ### Necessary exception (crash / refuse, not a feature tour)
 
-- **Nikon HE/HE\* NEF:** 3.0 already browsed these; 3.1.0 **stops refusing Adjust** by developing the **embedded JPEG** (8-bit base). LibRaw still cannot demosaic HE. **Undecodable RAW keeps the embedded preview** instead of a permanent grey tile. This is here so those files do not error out — not a new JPEG-develop product (that waits with 3.2+).
+- **Nikon HE/HE\* NEF and other demosaic-failed RAW (including Sony ARW6 / A7 V):** 3.0 already browsed these; 3.1.0 **stops refusing Adjust** by developing the **embedded JPEG** (8-bit base) when LibRaw cannot demosaic. Packaged builds ship **LibRaw master** so ARW6 can demosaic when the decoder knows the body. **Undecodable RAW keeps the embedded preview** instead of a permanent grey tile. This is here so those files do not error out — not a new JPEG-develop product (that waits with 3.2+).
 
 ### What 3.1.0 does **not** claim
 
-Masks tab / AI masks / Blur background, Auto Tone, HDR / panorama / focus stack, ColorChecker, anamorphic / manual distortion, raster develop, WhatsApp / Signal / AirDrop share, AI Upscale, color labels / keywords, RAW+JPEG pairing, export filename template / GPS strip / watermark / export queue, MCP, Share to AI, splash, LUT thumbs, DPReview ColorChecker samples, Adjust dock left/right. See README [Looking ahead](README.md#looking-ahead) (**3.2+**). Watermark **corner-patch** (when that train ships) composites a corner instead of a full-page overlay — a memory choice, not a 3.1.0 feature.
+Masks tab / AI masks / Blur background, HDR / panorama / focus stack, anamorphic / manual distortion, raster develop, WhatsApp / Signal / AirDrop share, AI Upscale, color labels / keywords catalog, RAW+JPEG pairing, export filename template / GPS strip / watermark / export queue, MCP GUI or headless, Share to AI, RAM-tiered banded-export worker caps. Auto WB and Auto straighten as separate **AUTO** buttons, and the QSplitter Adjust panel, already shipped in **3.0.2**. Combined Auto Tone, Adjust left/right dock, LUT thumbs, rearrangeable Global sections, Windows display-brightness, branded startup splash, and ColorChecker camera calibration **are** in 3.1.0 (Global tab only; macOS brightness while Adjust is open already shipped in 3.0.2).
+
+See README [Looking ahead](README.md#looking-ahead) (**3.2+**). Watermark **corner-patch** (when that train ships) composites a corner instead of a full-page overlay — a memory choice, not a 3.1.0 feature.
 
 ### Upgrade
 
-Install over 3.0.2. No cache clear required for this patch.
-
+Install over 3.0.2. No cache clear required for this patch. Old pickle EXIF cache rows are ignored once and rewritten as JSON on next extract.
 ---
 
 ## 🚀 Version 3.0.2
@@ -141,8 +160,7 @@ RAWviewer 3.0 turns the viewer into a complete **cull-and-develop** tool: a full
 - **Tone & color:** exposure/contrast/highlights/shadows/whites/blacks, point + parametric **tone curve** (RGB and per-channel), **HSL color mixer**, saturation/vibrance.
 - **White balance:** As Shot (from EXIF Kelvin when present), presets (Daylight / Cloudy / Shade / Tungsten / Fluorescent / Flash), eyedropper, and **Auto WB** estimation.
 - **Transform:** interactive **crop overlay** with aspect presets (Free / Original / 1:1 / 4:3 / 3:2 / 16:9), **straighten with Auto**, keystone perspective, optional lens correction.
-- **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal — small strokes stay on Telea, larger holes use Navier–Stokes then a light Telea clean-up. Both work in Lite and Full.
-- **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
+- **Local tools:** **Dodge & Burn** with soft circular stamps, Edge Assist, and mask overlay; **Heal (H)** inpainting for dust/smudge removal via OpenCV Telea. Both work in Lite and Full.- **Effects & detail:** vignette (Amount/Midpoint), dehaze, sharpness, chroma noise reduction with selectable method.
 - **Looks:** **Creative LUT** (`.cube` drag-drop + managed library) and managed **XMP presets** — import, apply, remove.
 - **Export** to JPEG / WebP / 16-bit TIFF with a progress dialog and cancel.
 - A new **Adjust button** in the single-view bar opens the editor (mirrors the **E** shortcut, highlights while active).

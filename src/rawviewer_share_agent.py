@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -290,16 +291,18 @@ def mcp_launch_command(folder_root: str) -> str:
     """Documented stdio launch; Cursor should spawn this, not a detached orphan."""
     root = repo_root()
     folder = os.path.abspath(folder_root)
+    q_root = shlex.quote(root)
+    q_folder = shlex.quote(folder)
     pixi = shutil.which("pixi")
     if pixi and os.path.isfile(os.path.join(root, "pixi.toml")):
         return (
-            f'cd "{root}" && PYTHONPATH=src RAWVIEWER_MCP_ROOT="{folder}" '
-            f'pixi run python3 -m rawviewer_mcp --root "{folder}"'
+            f"cd {q_root} && PYTHONPATH=src RAWVIEWER_MCP_ROOT={q_folder} "
+            f"pixi run python3 -m rawviewer_mcp --root {q_folder}"
         )
-    py = sys.executable or "python3"
+    py = shlex.quote(sys.executable or "python3")
     return (
-        f'cd "{root}" && PYTHONPATH=src RAWVIEWER_MCP_ROOT="{folder}" '
-        f'"{py}" -m rawviewer_mcp --root "{folder}"'
+        f"cd {q_root} && PYTHONPATH=src RAWVIEWER_MCP_ROOT={q_folder} "
+        f"{py} -m rawviewer_mcp --root {q_folder}"
     )
 
 
