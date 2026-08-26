@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+from collections import OrderedDict
 from typing import Any, Callable
 
 import numpy as np
@@ -12,12 +13,19 @@ PREVIEW_LONG_EDGE = 1000  # ~800–1200 as specified
 
 _DecodeFn = Callable[..., Any]
 
+# Full-resolution linear buffers can run ~250-300MB each (24MP RAW). The MCP
+# server is a long-lived process with no GUI memory-pressure monitor behind
+# it, so this cache must bound itself: keep only the most recently used
+# photos rather than growing without limit across a session.
+_LINEAR_BASE_CACHE_MAX = 3
+
 
 class LinearBaseCache:
-    """Cache decoded linear (or uint8 JPEG-base) RGB per path + mtime + flags."""
+    """LRU cache of decoded linear (or uint8 JPEG-base) RGB per path + mtime + flags."""
 
-    def __init__(self) -> None:
-        self._store: dict[tuple, np.ndarray] = {}
+    def __init__(self, maxsize: int = _LINEAR_BASE_CACHE_MAX) -> None:
+        self._store: "OrderedDict[tuple, np.ndarray]" = OrderedDict()
+        self._maxsize = max(1, int(maxsize))
 
     def clear(self) -> None:
         self._store.clear()
@@ -39,6 +47,7 @@ class LinearBaseCache:
         )
         cached = self._store.get(key)
         if cached is not None:
+            self._store.move_to_end(key)
             return cached
         fn = decode_fn or decode_edit_base
         arr = fn(
@@ -49,6 +58,9 @@ class LinearBaseCache:
         if arr is None:
             raise RuntimeError(f"Failed to decode edit base: {path}")
         self._store[key] = arr
+        self._store.move_to_end(key)
+        while len(self._store) > self._maxsize:
+            self._store.popitem(last=False)
         return arr
 
 

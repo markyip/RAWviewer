@@ -29,6 +29,7 @@ from export_options import (
     list_watermark_corners,
     normalize_signature_font_id,
     normalize_watermark_corner,
+    queue_ai_export_availability,
     template_context_for_path,
 )
 import theme
@@ -119,8 +120,26 @@ class ExportOptionsForm(QWidget):
             self.format_combo.addItem("WebP", "webp")
             self.format_combo.addItem("16-bit TIFF", "tiff16")
             layout.addRow("Format", self.format_combo)
+            denoise_ready, upscale_ready = queue_ai_export_availability()
+            self.ai_denoise = QCheckBox("AI denoise (SCUNet) — this queue only")
+            self.ai_denoise.setToolTip(
+                "Uses AI instead of the sidecar Chroma NR method. Same Plus gate as Adjust export."
+            )
+            self.ai_upscale = QCheckBox("AI upscale 2× (Real-ESRGAN) — this queue only")
+            self.ai_upscale.setToolTip("Exports at double width and height.")
+            self.ai_denoise.setEnabled(denoise_ready)
+            self.ai_upscale.setEnabled(upscale_ready)
+            if not denoise_ready:
+                self.ai_denoise.setToolTip("AI denoise is unavailable (edition or model).")
+            if not upscale_ready:
+                self.ai_upscale.setToolTip("AI upscale is unavailable (edition or model).")
+            if denoise_ready or upscale_ready:
+                layout.addRow(self.ai_denoise)
+                layout.addRow(self.ai_upscale)
         else:
             self.format_combo = None
+            self.ai_denoise = None
+            self.ai_upscale = None
 
         if show_directory:
             row = QHBoxLayout()
@@ -182,6 +201,14 @@ class ExportOptionsForm(QWidget):
             idx = self.format_combo.findData(fmt)
             if idx >= 0:
                 self.format_combo.setCurrentIndex(idx)
+        if getattr(self, "ai_denoise", None) is not None:
+            self.ai_denoise.setChecked(
+                bool(prefs.get("queue_ai_denoise")) and self.ai_denoise.isEnabled()
+            )
+        if getattr(self, "ai_upscale", None) is not None:
+            self.ai_upscale.setChecked(
+                bool(prefs.get("queue_ai_upscale")) and self.ai_upscale.isEnabled()
+            )
         if self.dir_edit is not None:
             self.dir_edit.setText(str(prefs.get("last_directory") or ""))
 
@@ -210,6 +237,16 @@ class ExportOptionsForm(QWidget):
             "watermark_corner": corner,
             "watermark_image": "",
             "queue_format": fmt,
+            "queue_ai_denoise": bool(
+                getattr(self, "ai_denoise", None) is not None
+                and self.ai_denoise.isEnabled()
+                and self.ai_denoise.isChecked()
+            ),
+            "queue_ai_upscale": bool(
+                getattr(self, "ai_upscale", None) is not None
+                and self.ai_upscale.isEnabled()
+                and self.ai_upscale.isChecked()
+            ),
             "last_directory": directory,
         }
 

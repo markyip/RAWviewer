@@ -4423,6 +4423,12 @@ class ImageAdjustPanelWidget(QWidget):
             self.disarm_dodge_burn()
         else:
             self.disarm_mask_layer_tools()
+            try:
+                from raw_ai_masks import release_mask_runtime
+
+                release_mask_runtime(sessions=True)
+            except Exception:
+                pass
 
         # Crop's edge handles sit on the photo boundary. Leaving Crop armed
         # while switching to Masks makes every edge drag look like the image

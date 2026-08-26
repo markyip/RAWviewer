@@ -351,6 +351,8 @@ def op_download_mb(op: str) -> int:
 
 _SESSIONS: dict = {}
 _SESSION_LOCK = threading.Lock()
+_bokeh_sam_lock = threading.Lock()
+_bokeh_sam_predictor: Optional["SamPredictor"] = None
 
 
 def _make_session(path: str):
@@ -398,6 +400,38 @@ def release_sessions() -> None:
     """Drop cached sessions (frees model memory when leaving the Masks tool)."""
     with _SESSION_LOCK:
         _SESSIONS.clear()
+
+
+def release_bokeh_sam_predictor() -> None:
+    """Drop the process-wide background-blur SAM embedding (not the ONNX session).
+
+    Best-effort and non-blocking: this is called synchronously from the UI
+    thread (leaving the Masks page), while a background one-press-blur
+    worker can hold _bokeh_sam_lock for the whole SAM encoder run (hundreds
+    of ms to seconds -- see prepare_background_blur_matte). Blocking here
+    would freeze the UI for that long, so if the lock is busy this just
+    skips the release; the predictor gets dropped on the next call instead.
+    """
+    global _bokeh_sam_predictor
+    if not _bokeh_sam_lock.acquire(blocking=False):
+        return
+    try:
+        pred = _bokeh_sam_predictor
+        _bokeh_sam_predictor = None
+    finally:
+        _bokeh_sam_lock.release()
+    if pred is not None:
+        try:
+            pred.reset()
+        except Exception:
+            pass
+
+
+def release_mask_runtime(*, sessions: bool = True) -> None:
+    """Free Masks-tool RAM. ``sessions=False`` keeps ONNX graphs for the next photo."""
+    release_bokeh_sam_predictor()
+    if sessions:
+        release_sessions()
 
 
 def _graph_input_layout(session, fallback: int) -> tuple:
@@ -599,6 +633,8 @@ def prepare_background_blur_matte(
     rgb: np.ndarray,
     target_hw: tuple,
     focus_xy: Optional[tuple[float, float]] = None,
+    *,
+    image_key=None,
 ) -> Optional[np.ndarray]:
     """Foreground matte for one-press background blur (invert + Blur).
 
@@ -606,17 +642,35 @@ def prepare_background_blur_matte(
     there — that is the thing the photographer focused, not the most
     salient blob. If SAM is missing, misses the point, or there is no AF
     hint, fall back to BiRefNet with the same focus bias Smart Object uses.
+
+    ``image_key`` (typically the file path) lets repeated one-press calls
+    on the same photo -- e.g. nudging the focus point -- reuse the SAM
+    embedding instead of re-running the encoder every time. This keeps its
+    own predictor instance rather than sharing MainWindow's Click-tool
+    predictor, since this runs on a QThreadPool worker thread and the
+    Click-tool instance is read/written from the UI thread.
     """
+    global _bokeh_sam_predictor
     alpha = None
     if focus_xy is not None and op_is_ready("click"):
-        pred = SamPredictor()
-        if pred.set_image(rgb):
-            src_xy = _focus_xy_in_image(focus_xy, rgb, target_hw)
-            cand = pred.predict([src_xy], [1], target_hw)
-            if cand is not None and (
-                _matte_covers_focus(cand, focus_xy) or float(cand.mean()) > 0.002
-            ):
-                alpha = cand
+        # set_image (encoder) and predict (decoder) both run under the lock:
+        # predict() reads embedding state set_image() just wrote, so a
+        # second bokeh call for a different photo must not be able to
+        # interleave a set_image() between them on the shared instance. The
+        # encoder itself can take hundreds of ms to seconds, so this lock is
+        # held for a while -- release_bokeh_sam_predictor() (called from the
+        # UI thread) never blocks on it for that reason.
+        with _bokeh_sam_lock:
+            if _bokeh_sam_predictor is None:
+                _bokeh_sam_predictor = SamPredictor()
+            pred = _bokeh_sam_predictor
+            if pred.set_image(rgb, image_key=image_key):
+                src_xy = _focus_xy_in_image(focus_xy, rgb, target_hw)
+                cand = pred.predict([src_xy], [1], target_hw)
+                if cand is not None and (
+                    _matte_covers_focus(cand, focus_xy) or float(cand.mean()) > 0.002
+                ):
+                    alpha = cand
     if alpha is None and (focus_xy is None or op_is_ready("subject")):
         alpha = segment_subject(rgb, target_hw, focus_xy=focus_xy)
     if alpha is None:

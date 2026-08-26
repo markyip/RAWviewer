@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import os
 from glob import glob as _glob
 
@@ -11,6 +12,18 @@ ENV_ROOT = "RAWVIEWER_MCP_ROOT"
 
 class PathSandboxError(ValueError):
     """Raised when a path is missing, outside the rooted folder, or unsafe."""
+
+
+class _LexMax:
+    """Max-heap wrapper so heapq can keep the N lexicographically smallest paths."""
+
+    __slots__ = ("s",)
+
+    def __init__(self, s: str) -> None:
+        self.s = s
+
+    def __lt__(self, other: "_LexMax") -> bool:
+        return self.s > other.s
 
 
 def _norm_real(path: str) -> str:
@@ -73,6 +86,19 @@ def ensure_parent_under_root(root: str, dest_path: str) -> str:
     return dest
 
 
+def _is_under_normalized_root(root_n: str, path: str) -> bool:
+    """Like ``is_within_root`` but skips re-deriving ``root``'s realpath.
+
+    ``root_n`` must already be the output of ``_norm_real``. Used in the
+    per-file hot loop of ``list_photo_files`` so a large tree doesn't pay
+    for re-resolving the (unchanging) root once per candidate file.
+    """
+    path_n = _norm_real(path)
+    if path_n == root_n:
+        return True
+    return path_n.startswith(root_n + os.sep)
+
+
 def list_photo_files(
     root: str,
     *,
@@ -84,35 +110,64 @@ def list_photo_files(
 
     exts = {e.lower() for e in get_supported_extensions()}
     root_n = _norm_real(root)
-    out: list[str] = []
+    cap = int(limit) if limit is not None and int(limit) > 0 else 0
+    heap: list[_LexMax] = []
+    all_paths: list[str] = []
+
+    def _consider(path: str) -> None:
+        if cap:
+            if len(heap) < cap:
+                heapq.heappush(heap, _LexMax(path))
+            elif path < heap[0].s:
+                heapq.heapreplace(heap, _LexMax(path))
+        else:
+            all_paths.append(path)
 
     if pattern:
         matches = _glob(os.path.join(root_n, pattern), recursive=True)
-        candidates = []
         for m in matches:
-            if os.path.isfile(m) and is_within_root(root_n, m):
-                candidates.append(m)
-        candidates.sort()
-    else:
-        candidates = []
-        for dirpath, dirnames, filenames in os.walk(root_n, followlinks=False):
-            if not is_within_root(root_n, dirpath):
-                dirnames[:] = []
+            ext = os.path.splitext(m)[1].lower()
+            if ext not in exts:
                 continue
-            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
-            for name in filenames:
-                candidates.append(os.path.join(dirpath, name))
-        candidates.sort()
+            if os.path.isfile(m) and _is_under_normalized_root(root_n, m):
+                _consider(m)
+    else:
+        # Manual scandir recursion: filter by extension (and skip hidden
+        # dirs) before paying for any stat/realpath work, instead of
+        # os.walk's collect-everything-then-filter pattern. With ``limit``,
+        # only k paths are kept (heap) so RAM stays O(k); the tree is still
+        # walked so "first N in sorted order" stays correct.
+        def _walk(dirpath: str) -> None:
+            try:
+                entries = list(os.scandir(dirpath))
+            except OSError:
+                return
+            for entry in entries:
+                name = entry.name
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir:
+                    if name.startswith("."):
+                        continue
+                    _walk(entry.path)
+                    continue
+                ext = os.path.splitext(name)[1].lower()
+                if ext not in exts:
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                if not _is_under_normalized_root(root_n, entry.path):
+                    continue
+                _consider(entry.path)
 
-    for path in candidates:
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in exts:
-            continue
-        if not os.path.isfile(path):
-            continue
-        if not is_within_root(root_n, path):
-            continue
-        out.append(path)
-        if limit is not None and limit > 0 and len(out) >= int(limit):
-            break
-    return out
+        _walk(root_n)
+
+    if cap:
+        return sorted(item.s for item in heap)
+    all_paths.sort()
+    return all_paths

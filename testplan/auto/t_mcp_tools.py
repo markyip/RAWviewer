@@ -83,6 +83,20 @@ def main() -> int:
     check("glob jpeg only", globbed and all(p.lower().endswith(".jpg") for p in globbed))
     limited = list_photo_files(root, limit=1)
     check("limit 1", len(limited) == 1)
+    names_sorted = sorted(names)
+    limited_name = os.path.basename(limited[0]) if limited else ""
+    check("limit 1 is first in sorted order", limited_name == names_sorted[0], limited_name)
+
+    from rawviewer_mcp.preview import LinearBaseCache
+
+    lru = LinearBaseCache(maxsize=3)
+    extra_c = os.path.join(inside, "c.jpg")
+    extra_d = os.path.join(inside, "d.jpg")
+    _tiny_jpeg(extra_c)
+    _tiny_jpeg(extra_d)
+    for p in (jpeg_path, other, extra_c, extra_d):
+        lru.get(p, decode_fn=fake_decode)
+    check("linear cache bounded", len(lru._store) == 3, str(len(lru._store)))
 
     exp = clamp_adjustment_value("Exposure2012", 99.0)
     check("clamp exposure high", abs(exp - 5.0) < 1e-6, f"got {exp}")

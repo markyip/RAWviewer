@@ -26,7 +26,7 @@ import traceback
 import threading
 import weakref
 from datetime import datetime
-from typing import List, Optional, Tuple, Any, cast, Set
+from typing import Callable, List, Optional, Tuple, Any, cast, Set
 
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
@@ -2163,7 +2163,10 @@ class _AIMaskWorker(QRunnable):
                 )
             elif self.kind == "bokeh":
                 alpha = raw_ai_masks.prepare_background_blur_matte(
-                    self.rgb, self.target_hw, focus_xy=self.focus_xy
+                    self.rgb,
+                    self.target_hw,
+                    focus_xy=self.focus_xy,
+                    image_key=self.file_path,
                 )
             elif self.kind == "depth":
                 alpha = raw_ai_masks.estimate_depth(self.rgb, self.target_hw)
@@ -2179,6 +2182,94 @@ class _AIMaskWorker(QRunnable):
             )
             alpha = None
         self.signals.finished.emit(self.token, self.file_path, self.kind, alpha)
+
+
+class _CatalogBatchSignals(QObject):
+    """Marshals a batch XMP catalog write (label/keywords) back to the UI thread."""
+
+    # applied_paths, status_message
+    finished = pyqtSignal(list, str)
+
+
+class _CatalogBatchWorker(QRunnable):
+    """Write an XMP catalog field (color label, keywords, ...) for many files
+    off the UI thread.
+
+    Batch rating/label/keyword actions used to call the per-file XMP writer
+    synchronously in a loop on the GUI thread, which freezes the UI for the
+    sum of all the writes on a large multi-select -- the same class of stall
+    as a synchronous RAW decode loop, just with sidecar I/O instead. This
+    mirrors the existing _AIMaskWorker/_AdjustExportWorker shape: do the
+    file I/O here, then hand the result back via a signal.
+    """
+
+    def __init__(
+        self,
+        members: List[str],
+        apply_fn: Callable[[str], None],
+        status_fn: Callable[[List[str]], str],
+        signals: _CatalogBatchSignals,
+    ):
+        super().__init__()
+        self.members = list(members)
+        self.apply_fn = apply_fn
+        self.status_fn = status_fn
+        self.signals = signals
+
+    def run(self) -> None:
+        applied: List[str] = []
+        for member in self.members:
+            try:
+                self.apply_fn(member)
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "[CATALOG] batch write failed for %s", member, exc_info=True
+                )
+                continue
+            applied.append(member)
+        try:
+            status = self.status_fn(applied)
+        except Exception:
+            status = ""
+        self.signals.finished.emit(applied, status)
+
+
+class _AiSharePreviewSignals(QObject):
+    # new_items (list of (src, preview) tuples), failed_count
+    finished = pyqtSignal(list, int)
+
+
+class _AiSharePreviewWorker(QRunnable):
+    """Bake AI-share preview JPEGs off the UI thread.
+
+    Only the RAW/PIL decode path (bake_preview_jpeg) runs here. Any src
+    that matched the already-displayed QPixmap was baked synchronously on
+    the main thread before this worker was queued -- QPixmap is not usable
+    off the GUI thread. Ticket building, agent launch, and clipboard access
+    all happen back on the main thread in the finished-signal handler.
+    """
+
+    def __init__(self, pending: List[tuple], signals: _AiSharePreviewSignals):
+        super().__init__()
+        self.pending = list(pending)
+        self.signals = signals
+
+    def run(self) -> None:
+        from rawviewer_share_agent import bake_preview_jpeg
+
+        items: List[tuple] = []
+        failed = 0
+        for src, preview in self.pending:
+            try:
+                ok = bake_preview_jpeg(src, preview)
+            except Exception:
+                ok = False
+            if ok:
+                items.append((src, preview))
+            else:
+                _share_log(logging.WARNING, "AI share preview failed: %s", src)
+                failed += 1
+        self.signals.finished.emit(items, failed)
 
 
 class _AdjustPreviewSignals(QObject):
@@ -2579,6 +2670,28 @@ class _StitchSignals(QObject):
     finished = pyqtSignal(bool, str, list)  # success, out_path-or-error, warnings
 
 
+def _serialize_live_masks_in_adj(adj: dict) -> dict:
+    """PNG-serialize dodge/burn and heal objects. Safe off the UI thread."""
+    adj = dict(adj or {})
+    try:
+        from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
+        from raw_spot_heal import (
+            MASK_KEY as HEAL_MASK_KEY,
+            MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
+        )
+        from raw_spot_heal import serialize_mask as serialize_heal_mask
+
+        mask_obj = adj.pop(MASK_OBJ_KEY, None)
+        if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
+            adj[MASK_KEY] = serialize_mask(mask_obj)
+        heal_obj = adj.pop(HEAL_MASK_OBJ_KEY, None)
+        if heal_obj is not None and not getattr(heal_obj, "is_empty", True):
+            adj[HEAL_MASK_KEY] = serialize_heal_mask(heal_obj)
+    except Exception:
+        pass
+    return adj
+
+
 class _AdjustExportWorker(QRunnable):
     """Full-res export: baked TIFF/JPEG/WebP/DNG or RAW copy + XMP settings."""
 
@@ -2598,6 +2711,7 @@ class _AdjustExportWorker(QRunnable):
         watermark_font: str = "",
         watermark_corner: str = "",
         copy_metadata: bool = True,
+        load_adj_from_sidecar: bool = False,
     ):
         super().__init__()
         self.file_path = file_path
@@ -2617,6 +2731,7 @@ class _AdjustExportWorker(QRunnable):
         self.watermark_font = str(watermark_font or "")
         self.watermark_corner = str(watermark_corner or "")
         self.copy_metadata = bool(copy_metadata)
+        self.load_adj_from_sidecar = bool(load_adj_from_sidecar)
         # Set from the export progress dialog's Cancel button (main thread);
         # polled between export stages and between NN-denoise tiles.
         import threading as _threading
@@ -2633,10 +2748,34 @@ class _AdjustExportWorker(QRunnable):
         )
         err = None
         xmp_warning = None
+        base = None
         try:
-            from raw_adjustments import resolve_xmp_path, write_xmp_adjustments_for_file
+            from raw_adjustments import (
+                load_adjustments_for_file,
+                resolve_xmp_path,
+                write_xmp_adjustments_for_file,
+            )
             from raw_edit_pipeline import export_adjusted_image
             from unified_image_processor import UnifiedImageProcessor
+
+            live_overlay = dict(self.adj or {})
+            if self.load_adj_from_sidecar:
+                try:
+                    loaded = load_adjustments_for_file(self.file_path) or {}
+                except Exception:
+                    loaded = {}
+                try:
+                    from raw_dodge_burn import MASK_OBJ_KEY as _DB_OBJ
+                    from raw_spot_heal import MASK_OBJ_KEY as _HEAL_OBJ
+
+                    if _DB_OBJ in live_overlay:
+                        loaded[_DB_OBJ] = live_overlay[_DB_OBJ]
+                    if _HEAL_OBJ in live_overlay:
+                        loaded[_HEAL_OBJ] = live_overlay[_HEAL_OBJ]
+                except Exception:
+                    pass
+                self.adj = loaded
+            self.adj = _serialize_live_masks_in_adj(self.adj)
 
             # Best-effort: keep the source file's sidecar in sync with what's
             # being baked/copied. This must NOT block the export itself -- the
@@ -2769,6 +2908,8 @@ class _AdjustExportWorker(QRunnable):
                     pass
             else:
                 logger.error("[EXPORT] Worker failed", exc_info=True)
+        finally:
+            base = None
         logger.info(
             "[EXPORT] Worker finished: err=%s xmp_warning=%s — emitting finished signal",
             err,
@@ -2987,6 +3128,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._raw_jpeg_pair_covers = {}
         self._export_queue = []
         self._export_queue_running = False
+        self._export_queue_failed = []
         self._comparison_session = None
         self._compare_sync_mode = "A"
         self._compare_sync_paused = False
@@ -5740,14 +5882,27 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not self._is_raw_jpeg_pairing_enabled():
             self._raw_jpeg_path_to_pair = {}
             self._raw_jpeg_pair_covers = {}
+            self._raw_jpeg_pairs_fingerprint = None
+            return
+        # _rebuild_burst_groups() calls this unconditionally on every
+        # folder-list touch, including metadata-trickle-in ticks that never
+        # actually change image_files or the rejected set. Skip the O(n)
+        # pairs_for_folder() scan when neither has changed since last time
+        # (identity + length: cheap, and a same-identity/length reorder
+        # yields the same pairing groups anyway).
+        raw_files = getattr(self, "image_files", None) or []
+        rejected_src = getattr(self, "_burst_rejected_paths", None) or set()
+        fingerprint = (id(raw_files), len(raw_files), id(rejected_src), len(rejected_src))
+        if fingerprint == getattr(self, "_raw_jpeg_pairs_fingerprint", None):
             return
         from raw_jpeg_pairing import pairs_for_folder
 
-        files = list(getattr(self, "image_files", []) or [])
-        rejected = set(getattr(self, "_burst_rejected_paths", set()) or set())
+        files = list(raw_files)
+        rejected = set(rejected_src)
         path_to_pair, covers = pairs_for_folder(files, rejected=rejected)
         self._raw_jpeg_path_to_pair = path_to_pair
         self._raw_jpeg_pair_covers = covers
+        self._raw_jpeg_pairs_fingerprint = fingerprint
 
     def _raw_jpeg_collapsed_gallery_paths(self, files: List[str]) -> List[str]:
         from raw_jpeg_pairing import build_collapsed_display_paths
@@ -6194,6 +6349,10 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if not raw:
             return set()
         if getattr(self, "_burst_group_view_active", False):
+            return raw
+        if not getattr(self, "_burst_groups", None) and not getattr(
+            self, "_raw_jpeg_path_to_pair", None
+        ):
             return raw
         expanded: set = set()
         processed_groups: set = set()
@@ -20272,8 +20431,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self._full_exif_queued_norm = None
             self._last_manager_exif_was_minimal = False
             self._schedule_ttfr_watchdog(file_path, load_start)
-            self._adjust_preview_base_rgb = None
-            self._adjust_preview_base_rgb_fast = None
+            self._drop_adjust_preview_bases()
             self._adjust_edit_base_path = None
             self._adjust_edit_base_loading_norm = None
             self._adjust_panel_loaded_norm = None
@@ -22204,10 +22362,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self._map_overlay_visible = True
                 self._sync_location_map()
             if not self._adjust_overlay_visible:
-                self._adjust_preview_base_rgb = None
-                self._adjust_preview_base_rgb_fast = None
+                self._drop_adjust_preview_bases()
                 self._adjust_edit_base_path = None
                 self._reset_adjust_compare_state()
+                try:
+                    from raw_ai_masks import release_mask_runtime
+
+                    release_mask_runtime(sessions=True)
+                except Exception:
+                    pass
             if bar is not None:
                 bar.setEnabled(True)
                 if getattr(self, "_filmstrip_hidden_for_adjust", False):
@@ -22872,6 +23035,31 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sync_adjust_panel_for_current_file(force=True)
         self._begin_adjust_editing_session(path)
 
+    def _drop_adjust_preview_bases(self) -> None:
+        """Drop edit-base buffers and the stage caches that pin extra ndarrays."""
+        self._adjust_preview_base_rgb = None
+        self._adjust_preview_base_rgb_fast = None
+        for attr in ("_adjust_preview_stage_cache", "_adjust_preview_stage_cache_fast"):
+            cache = getattr(self, attr, None)
+            if cache is not None and hasattr(cache, "reset"):
+                try:
+                    cache.reset()
+                except Exception:
+                    pass
+
+    def _purge_heavy_caches_for_export(self) -> None:
+        """Free browse full/preview/pixmap RAM before a full-res export decode.
+
+        Do not keep the file being exported: that is the duplicate the purge
+        is meant to drop. Gallery thumb/grid tiers stay.
+        """
+        cache = getattr(self, "image_cache", None)
+        if cache is not None and hasattr(cache, "clear_heavy_memory_tiers"):
+            try:
+                cache.clear_heavy_memory_tiers(keep_path=None)
+            except Exception:
+                pass
+
     def _begin_adjust_editing_session(self, file_path: str) -> None:
         """Cancel competing decodes and load a fresh LibRaw half-res edit base."""
         if not file_path:
@@ -22891,8 +23079,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.loading_overlay.hide_loading()
         self._defer_sensor_full_decode_path = None
         self._sensor_full_decode_queued_norm = None
-        self._adjust_preview_base_rgb = None
-        self._adjust_preview_base_rgb_fast = None
+        self._drop_adjust_preview_bases()
         self._adjust_edit_base_path = None
         self._adjust_edit_base_loading_norm = None
         self._reset_adjust_compare_state()
@@ -23105,8 +23292,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         from common_image_loader import is_raw_file
 
         if not file_path:
-            self._adjust_preview_base_rgb = None
-            self._adjust_preview_base_rgb_fast = None
+            self._drop_adjust_preview_bases()
             self._adjust_edit_base_path = None
             self._sync_adjust_panel_burst_members("")
             return
@@ -23123,8 +23309,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         if getattr(self, "_adjust_edit_base_loading_norm", None) == norm:
             return
         self._adjust_edit_base_loading_norm = norm
-        self._adjust_preview_base_rgb = None
-        self._adjust_preview_base_rgb_fast = None
+        self._drop_adjust_preview_bases()
         self._adjust_edit_base_path = None
         if hasattr(self, "status_bar"):
             self.status_bar.showMessage(
@@ -24521,6 +24706,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._sam_predictor_path = None
         self._sam_points = []
         self._sam_layer = None
+        try:
+            from raw_ai_masks import release_bokeh_sam_predictor
+
+            release_bokeh_sam_predictor()
+        except Exception:
+            pass
 
     def _show_status(self, message: str, timeout: int = 3000) -> None:
         bar = getattr(self, "status_bar", None)
@@ -27485,27 +27676,12 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         # adj comes straight from the panel's export_requested signal, which
         # (like every other adjustments snapshot) has no knowledge of the
         # dodge/burn / heal masks -- without this, exported files would
-        # silently drop local brush work. See _dodge_burn_overlay_adj.
-        # Export may run in a process pool, so replace the live mask object
-        # with a PNG serial the worker can pickle/deserialize.
+        # silently drop local brush work. PNG serialize happens in the worker.
         try:
-            from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
-            from raw_spot_heal import (
-                MASK_KEY as HEAL_MASK_KEY,
-                MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
-            )
-            from raw_spot_heal import serialize_mask as serialize_heal_mask
-
-            adj = self._dodge_burn_overlay_adj(adj)
-            adj = dict(adj)
-            mask_obj = adj.pop(MASK_OBJ_KEY, None)
-            if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
-                adj[MASK_KEY] = serialize_mask(mask_obj)
-            heal_obj = adj.pop(HEAL_MASK_OBJ_KEY, None)
-            if heal_obj is not None and not getattr(heal_obj, "is_empty", True):
-                adj[HEAL_MASK_KEY] = serialize_heal_mask(heal_obj)
+            adj = dict(self._dodge_burn_overlay_adj(adj))
         except Exception:
-            pass
+            adj = dict(adj or {})
+        self._purge_heavy_caches_for_export()
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
         worker = _AdjustExportWorker(
             path,
@@ -27618,10 +27794,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                             f"Export of {name} failed (while viewing another image): {msg}",
                             7000,
                         )
-                        try:
-                            self.show_error("Export failed", f"{name}: {msg}")
-                        except Exception:
-                            pass
+                        if not getattr(self, "_export_queue_running", False):
+                            try:
+                                self.show_error("Export failed", f"{name}: {msg}")
+                            except Exception:
+                                pass
                 else:
                     self.status_bar.showMessage(
                         f"Exported {name} to {os.path.basename(output_path)}"
@@ -27629,13 +27806,15 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                         7000,
                     )
                     self.register_new_file(output_path)
-            self._finish_export_queue_item(source_path, success=err is None)
+            self._finish_export_queue_item(
+                source_path, success=err is None, cancelled=type(err).__name__ == "ExportCancelled" if err is not None else False
+            )
             return
         if err is not None:
             if type(err).__name__ == "ExportCancelled":
                 if hasattr(self, "status_bar"):
                     self.status_bar.showMessage("Export cancelled", 4000)
-                self._finish_export_queue_item(source_path, success=False)
+                self._finish_export_queue_item(source_path, success=False, cancelled=True)
                 return
             msg = str(err) or repr(err)
             if isinstance(err, (PermissionError, OSError)) and getattr(err, "errno", None) in (
@@ -27655,12 +27834,14 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                     f"{msg}\n\n"
                     "Choose a writable folder (Desktop, Pictures, or Downloads) and try again."
                 )
+            queue_running = bool(getattr(self, "_export_queue_running", False))
             if hasattr(self, "status_bar"):
                 self.status_bar.showMessage(f"Export failed: {msg}", 7000)
-            try:
-                self.show_error("Export failed", msg)
-            except Exception:
-                pass
+            if not queue_running:
+                try:
+                    self.show_error("Export failed", msg)
+                except Exception:
+                    pass
             self._finish_export_queue_item(source_path, success=False)
             return
         fmt = (export_format or "tiff16").strip().lower()
@@ -27697,8 +27878,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         self._add_paths_to_export_queue(paths)
 
     def _add_paths_to_export_queue(self, paths: List[str]) -> None:
-        # Paths only — loading XMP here freezes the gallery on fat mask sidecars.
-        # Adjustments are read in _pump_export_queue immediately before launch.
+        # Paths only — sidecar adj and mask PNG serialize run in the export worker.
         queue = list(getattr(self, "_export_queue", []) or [])
         seen = {_norm_path(item["path"]) for item in queue}
         added = 0
@@ -27740,6 +27920,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         save_export_prefs(self.get_settings(), prefs)
         self._export_queue_prefs = prefs
         self._export_queue_seq = 1
+        self._export_queue_failed = []
         self._export_queue_running = True
         self._pump_export_queue()
 
@@ -27751,8 +27932,17 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         queue = list(getattr(self, "_export_queue", []) or [])
         if not queue:
             self._export_queue_running = False
+            failed = list(getattr(self, "_export_queue_failed", []) or [])
             if hasattr(self, "status_bar"):
-                self.status_bar.showMessage("Export queue finished", 4000)
+                if failed:
+                    names = ", ".join(os.path.basename(p) for p in failed[:4])
+                    extra = f" (+{len(failed) - 4} more)" if len(failed) > 4 else ""
+                    self.status_bar.showMessage(
+                        f"Export queue finished — {len(failed)} failed ({names}{extra})",
+                        8000,
+                    )
+                else:
+                    self.status_bar.showMessage("Export queue finished", 4000)
             return
         # Keep the current item until export succeeds. Popping here dropped
         # the job on _launch_export_job early-return and on failure/cancel.
@@ -27760,12 +27950,6 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         prefs = getattr(self, "_export_queue_prefs", None) or {}
         self._pending_export_opts = prefs
         path = item.get("path")
-        from raw_adjustments import load_adjustments_for_file
-
-        try:
-            adj = load_adjustments_for_file(path) or {}
-        except Exception:
-            adj = {}
         fmt = str(prefs.get("queue_format") or "jpeg")
         seq = int(getattr(self, "_export_queue_seq", 1) or 1)
         from export_options import format_export_filename, template_context_for_path
@@ -27785,59 +27969,82 @@ class RAWImageViewer(SessionMixin, QMainWindow):
         while os.path.exists(output_path):
             output_path = f"{base}_{n}{ext}"
             n += 1
-        if not self._launch_export_job(path, output_path, adj, fmt):
+        if not self._launch_export_job(
+            path,
+            output_path,
+            fmt,
+            load_adj_from_sidecar=True,
+            use_ai_denoise=bool(prefs.get("queue_ai_denoise")),
+            use_ai_upscale=bool(prefs.get("queue_ai_upscale")),
+        ):
             return
         self._export_queue_seq = seq + 1
 
-    def _finish_export_queue_item(self, source_path: str, *, success: bool) -> None:
-        """Pop the head item only after a successful export; keep it on failure."""
+    def _finish_export_queue_item(
+        self, source_path: str, *, success: bool, cancelled: bool = False
+    ) -> None:
+        """Advance the queue after a job ends.
+
+        Success or skip-after-failure pops the head and pumps the next item.
+        Cancel keeps the head in the queue and stops the run so the user can
+        retry without losing remaining jobs.
+        """
         if not getattr(self, "_export_queue_running", False):
             return
-        if success:
-            queue = list(getattr(self, "_export_queue", []) or [])
-            if queue and _norm_path(queue[0].get("path")) == _norm_path(source_path):
-                queue.pop(0)
-                self._export_queue = queue
-            QTimer.singleShot(0, self._pump_export_queue)
+        if cancelled:
+            self._export_queue_running = False
             return
-        self._export_queue_running = False
+        queue = list(getattr(self, "_export_queue", []) or [])
+        if queue and _norm_path(queue[0].get("path")) == _norm_path(source_path):
+            queue.pop(0)
+            self._export_queue = queue
+        if not success:
+            failed = list(getattr(self, "_export_queue_failed", []) or [])
+            failed.append(source_path)
+            self._export_queue_failed = failed
+        QTimer.singleShot(0, self._pump_export_queue)
 
-    def _launch_export_job(self, path: str, output_path: str, adj: dict, raw_fmt: str) -> bool:
+    def _launch_export_job(
+        self,
+        path: str,
+        output_path: str,
+        raw_fmt: str,
+        *,
+        adj: dict | None = None,
+        load_adj_from_sidecar: bool = False,
+        use_ai_denoise: bool = False,
+        use_ai_upscale: bool = False,
+    ) -> bool:
         """Shared start path for Adjust export and the export queue."""
         if getattr(self, "_adjust_export_in_progress", False):
             return False
         self._adjust_export_in_progress = True
         self._adjust_export_format = raw_fmt
-        try:
-            from raw_dodge_burn import MASK_KEY, MASK_OBJ_KEY, serialize_mask
-            from raw_spot_heal import (
-                MASK_KEY as HEAL_MASK_KEY,
-                MASK_OBJ_KEY as HEAL_MASK_OBJ_KEY,
-            )
-            from raw_spot_heal import serialize_mask as serialize_heal_mask
-
-            adj = self._dodge_burn_overlay_adj(adj)
-            adj = dict(adj)
-            mask_obj = adj.pop(MASK_OBJ_KEY, None)
-            if mask_obj is not None and not getattr(mask_obj, "is_empty", True):
-                adj[MASK_KEY] = serialize_mask(mask_obj)
-            heal_obj = adj.pop(HEAL_MASK_OBJ_KEY, None)
-            if heal_obj is not None and not getattr(heal_obj, "is_empty", True):
-                adj[HEAL_MASK_KEY] = serialize_heal_mask(heal_obj)
-        except Exception:
-            pass
+        packed = dict(adj or {})
+        # Live editor masks only apply to the photo currently open. Queue
+        # items load sidecar adj in the worker; overlay objects are merged
+        # onto that load so unsaved brushes on the current file still bake.
+        if _norm_path(path) == _norm_path(getattr(self, "current_file_path", None) or ""):
+            try:
+                packed = dict(self._dodge_burn_overlay_adj(packed))
+            except Exception:
+                pass
+        self._purge_heavy_caches_for_export()
         opts = getattr(self, "_pending_export_opts", {}) or {}
         pool = getattr(getattr(self, "image_manager", None), "_process_pool", None)
         worker = _AdjustExportWorker(
             path,
             output_path,
-            adj,
+            packed,
             raw_fmt,
             pool,
             self._adjust_export_signals,
+            use_ai_denoise=use_ai_denoise,
+            use_ai_upscale=use_ai_upscale,
             strip_gps=bool(opts.get("strip_gps", True)),
             **self._export_watermark_kwargs(opts),
             copy_metadata=bool(opts.get("copy_metadata", True)),
+            load_adj_from_sidecar=load_adj_from_sidecar,
         )
         _get_bg_thread_pool().start(worker)
         return True
@@ -28279,39 +28486,128 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "AI description template saved (insert it when sharing)", 3000
             )
 
-    def _bake_ai_share_preview(self, src_path: str, dest_path: str) -> bool:
-        from rawviewer_share_agent import bake_preview_jpeg, is_jpeg_file, strip_jpeg_gps
+    def _ai_share_preview_from_current_pixmap(self, src_path: str, dest_path: str) -> bool:
+        """Fast path: reuse the already-decoded, currently-displayed QPixmap.
+
+        Must run on the GUI thread -- QPixmap is not usable off it. This
+        only ever applies to (at most) one of the shared paths, the one
+        currently on screen; returning False here means the caller should
+        fall back to a real decode (bake_preview_jpeg), which is safe to
+        run on a worker thread.
+        """
+        from rawviewer_share_agent import is_jpeg_file, strip_jpeg_gps
 
         current = getattr(self, "current_file_path", None)
         pixmap = getattr(self, "current_pixmap", None)
-        if (
+        if not (
             current
             and pixmap is not None
             and not pixmap.isNull()
             and _norm_path(current) == _norm_path(src_path)
         ):
-            try:
-                if pixmap.save(dest_path, "JPEG", 90):
-                    strip_jpeg_gps(dest_path)
-                    if is_jpeg_file(dest_path):
-                        return True
-            except Exception:
-                pass
-        return bake_preview_jpeg(src_path, dest_path)
+            return False
+        try:
+            if pixmap.save(dest_path, "JPEG", 90):
+                strip_jpeg_gps(dest_path)
+                if is_jpeg_file(dest_path):
+                    return True
+        except Exception:
+            pass
+        return False
 
-    def _share_paths_to_ai_agent(self, paths: List[str]) -> None:
+    def _finish_ai_share(self, items: List[tuple], ctx: dict) -> None:
+        """Ticket-build + launch the agent. Always runs on the GUI thread:
+        launch_agent / clipboard access are not safe to assume thread-safe
+        off it (e.g. macOS share-sheet style hand-off)."""
         from rawviewer_share_agent import (
             SharePathError,
             build_batch_ticket,
             build_share_tickets,
-            description_template_from_store,
-            folder_root_for_photos,
             launch_agent,
-            new_share_dir,
             persist_share_descriptions,
             write_ticket_sidecars,
         )
+
+        if not items:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(
+                    "Could not bake a preview JPEG for the agent", 4000
+                )
+            return
+        try:
+            tickets = build_share_tickets(
+                items,
+                description=ctx["description"],
+                folder_root=ctx["root"],
+                mode=ctx["share_mode"],
+            )
+            batch = tickets[0] if len(tickets) == 1 else build_batch_ticket(tickets)
+            paths_written = write_ticket_sidecars(batch, ctx["dest"])
+        except SharePathError as exc:
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(str(exc), 4000)
+            return
+        persist_share_descriptions(
+            [src for src, _prev in items],
+            ctx["description"],
+            save_on_photos=ctx["save_on"],
+        )
+        launched = launch_agent(
+            batch,
+            prompt_path=paths_written["prompt_path"],
+            preview_path=[p for _s, p in items],
+        )
+        if launched.get("ok"):
+            n = len(items)
+            msg = (
+                f"Shared {n} photo{'s' if n != 1 else ''} to AI agent"
+                if launched.get("method") != "clipboard"
+                else "Shared to AI agent"
+            )
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 4000)
+            return
+        prompt_text = str(launched.get("prompt") or "")
+        try:
+            QApplication.clipboard().setText(prompt_text)
+        except Exception:
+            pass
+        if hasattr(self, "status_bar") and self.status_bar:
+            self.status_bar.showMessage(
+                "Preview saved — description and paths copied for the agent",
+                5000,
+            )
+
+    def _on_ai_share_previews_ready(self, new_items: List[tuple], failed: int) -> None:
+        self._ai_share_signals = None
+        ctx = getattr(self, "_pending_ai_share_ctx", None)
+        self._pending_ai_share_ctx = None
+        if ctx is None:
+            return
+        items = list(ctx.get("items") or []) + list(new_items)
+        self._finish_ai_share(items, ctx)
+
+    def _share_paths_to_ai_agent(self, paths: List[str]) -> None:
+        from rawviewer_share_agent import (
+            SharePathError,
+            description_template_from_store,
+            folder_root_for_photos,
+            new_share_dir,
+        )
         from rawviewer_ui.share_agent_dialog import ShareToAgentDialog
+
+        if getattr(self, "_pending_ai_share_ctx", None) is not None:
+            # A previous share is still baking previews on a worker thread.
+            # self._pending_ai_share_ctx/_ai_share_signals hold state for
+            # exactly one in-flight request; starting a second one here
+            # would overwrite it out from under _on_ai_share_previews_ready,
+            # mismatching one request's images with the other's destination
+            # and silently dropping whichever finishes second.
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(
+                    "Still preparing the previous AI agent share…", 2500
+                )
+            return
 
         valid = [
             os.path.abspath(p)
@@ -28344,58 +28640,47 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 self.status_bar.showMessage(str(exc), 4000)
             return
         dest = new_share_dir(os.path.splitext(os.path.basename(valid[0]))[0])
+
+        # Split: the (at most one) src matching the already-displayed
+        # QPixmap bakes instantly right here on the GUI thread (in-memory
+        # JPEG encode, no RAW decode -- and QPixmap must stay on this
+        # thread). Everything else needs bake_preview_jpeg's real RAW/PIL
+        # decode (~40-450ms/file per prior GIL-stall history), which moves
+        # to a worker so sharing a multi-select doesn't freeze the UI for
+        # the sum of every decode.
         items: List[tuple] = []
+        pending: List[tuple] = []
         for i, src in enumerate(valid, start=1):
             preview = os.path.join(dest, f"preview_{i:02d}.jpg")
-            if not self._bake_ai_share_preview(src, preview):
-                _share_log(logging.WARNING, "AI share preview failed: %s", src)
-                continue
-            items.append((src, preview))
-        if not items:
-            if hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage("Could not bake a preview JPEG for the agent", 4000)
+            if self._ai_share_preview_from_current_pixmap(src, preview):
+                items.append((src, preview))
+            else:
+                pending.append((src, preview))
+
+        ctx = {
+            "dest": dest,
+            "description": description,
+            "root": root,
+            "share_mode": share_mode,
+            "save_on": save_on,
+            "items": items,
+        }
+
+        if not pending:
+            self._finish_ai_share(items, ctx)
             return
-        try:
-            tickets = build_share_tickets(
-                items,
-                description=description,
-                folder_root=root,
-                mode=share_mode,
-            )
-            batch = tickets[0] if len(tickets) == 1 else build_batch_ticket(tickets)
-            paths_written = write_ticket_sidecars(batch, dest)
-        except SharePathError as exc:
-            if hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage(str(exc), 4000)
-            return
-        persist_share_descriptions(
-            [src for src, _prev in items], description, save_on_photos=save_on
-        )
-        launched = launch_agent(
-            batch,
-            prompt_path=paths_written["prompt_path"],
-            preview_path=[p for _s, p in items],
-        )
-        if launched.get("ok"):
-            n = len(items)
-            msg = (
-                f"Shared {n} photo{'s' if n != 1 else ''} to AI agent"
-                if launched.get("method") != "clipboard"
-                else "Shared to AI agent"
-            )
-            if hasattr(self, "status_bar") and self.status_bar:
-                self.status_bar.showMessage(msg, 4000)
-            return
-        prompt_text = str(launched.get("prompt") or "")
-        try:
-            QApplication.clipboard().setText(prompt_text)
-        except Exception:
-            pass
+
         if hasattr(self, "status_bar") and self.status_bar:
+            n = len(pending)
             self.status_bar.showMessage(
-                "Preview saved — description and paths copied for the agent",
-                5000,
+                f"Preparing {n} preview{'s' if n != 1 else ''} for the AI agent…", 0
             )
+        self._pending_ai_share_ctx = ctx
+        signals = _AiSharePreviewSignals()
+        signals.finished.connect(self._on_ai_share_previews_ready)
+        self._ai_share_signals = signals  # keep alive until finished fires
+        worker = _AiSharePreviewWorker(pending, signals)
+        _get_bg_thread_pool().start(worker)
 
     def _populate_stitch_actions(self, menu, paths: List[str]) -> None:
         """Stitch & Merge submenu. Only meaningful for a multi-photo selection."""
@@ -33632,8 +33917,11 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             exif_data["exif_data"] = exif_data["exif_data"].copy()
             exif_data["exif_data"]["color_label"] = label
         self.image_cache.put_exif(path, exif_data)
-        if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
-            self._gallery_bulk_metadata.setdefault(path, {})["color_label"] = label
+        # _gallery_bulk_metadata is updated by the caller instead of here:
+        # this runs on a background QThreadPool thread for large selections
+        # (see label_gallery_selection), and that dict is read/iterated on
+        # the UI thread (gallery_view.set_images), so mutating it off-thread
+        # would race.
         try:
             from raw_adjustments import write_label_for_file
 
@@ -33644,6 +33932,16 @@ class RAWImageViewer(SessionMixin, QMainWindow):
                 "Failed to write color label to XMP sidecar for %s", path, exc_info=True
             )
             return False
+
+    def _set_gallery_bulk_color_label(self, path: str, label: str) -> None:
+        """Update _gallery_bulk_metadata's color label. Main-thread only:
+
+        that dict is also read/iterated by gallery_view.set_images on the UI
+        thread, so it must never be mutated from a background thread (see
+        _apply_label_to_path).
+        """
+        if hasattr(self, "_gallery_bulk_metadata") and self._gallery_bulk_metadata is not None:
+            self._gallery_bulk_metadata.setdefault(path, {})["color_label"] = label
 
     def label_current_image(self, label: str) -> None:
         path = getattr(self, "current_file_path", None)
@@ -33661,6 +33959,7 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             label = ""
         for member in self._catalog_paths_for_action(path):
             self._apply_label_to_path(member, label)
+            self._set_gallery_bulk_color_label(member, label)
         self._refresh_rating_visuals_for_paths(self._catalog_paths_for_action(path))
         self.status_bar.showMessage(
             f"Color label: {label}" if label else "Color label cleared", 2000
@@ -33675,20 +33974,77 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             self.status_bar.showMessage("No images selected in gallery", 2500)
             return
         seen = set()
-        applied = []
+        members: List[str] = []
         for path in paths:
             for member in self._catalog_paths_for_action(path):
                 key = _norm_path(member)
                 if key in seen:
                     continue
                 seen.add(key)
-                self._apply_label_to_path(member, label)
-                applied.append(member)
-        self._refresh_rating_visuals_for_paths(applied)
+                members.append(member)
+        if not members:
+            self.status_bar.showMessage("No images selected in gallery", 2500)
+            return
+
+        def _status(applied: List[str]) -> str:
+            return (
+                f"Color label {label or 'cleared'} on "
+                f"{len(applied)} photo{'s' if len(applied) != 1 else ''}"
+            )
+
+        # Small selections (the common case) apply inline -- no worker/
+        # thread-pool overhead for a handful of sidecar writes. Larger
+        # multi-selects move the write loop off the UI thread so it doesn't
+        # freeze while writing dozens/hundreds of XMP sidecars.
+        if len(members) <= 8:
+            applied = list(members)
+            for m in members:
+                self._apply_label_to_path(m, label)
+                self._set_gallery_bulk_color_label(m, label)
+            self._refresh_rating_visuals_for_paths(applied)
+            self.status_bar.showMessage(_status(applied), 2500)
+            return
+
         self.status_bar.showMessage(
-            f"Color label {label or 'cleared'} on {len(applied)} photo{'s' if len(applied) != 1 else ''}",
-            2500,
+            f"Applying color label to {len(members)} photos…", 0
         )
+        signals = _CatalogBatchSignals()
+        signals.finished.connect(
+            lambda applied, status, lbl=label: self._on_label_batch_finished(applied, status, lbl)
+        )
+        self._catalog_batch_signals = signals  # keep alive until finished fires
+        worker = _CatalogBatchWorker(
+            members,
+            lambda m: self._apply_label_to_path(m, label),
+            _status,
+            signals,
+        )
+        _get_bg_thread_pool().start(worker)
+
+    def _on_label_batch_finished(self, applied: List[str], status: str, label: str) -> None:
+        self._catalog_batch_signals = None
+        # _gallery_bulk_metadata is updated here, on the UI thread (this slot
+        # runs via a queued connection since it's emitted from the batch
+        # worker's thread), not inside the worker -- see _apply_label_to_path.
+        for path in applied:
+            self._set_gallery_bulk_color_label(path, label)
+        self._refresh_rating_visuals_for_paths(applied)
+        if status:
+            self.status_bar.showMessage(status, 2500)
+
+    def _on_keywords_batch_finished(self, applied: List[str], status: str) -> None:
+        self._catalog_batch_signals = None
+        if status:
+            self.status_bar.showMessage(status, 2500)
+
+    def _apply_keywords_to_path(self, path: str, words: List[str]) -> None:
+        from raw_adjustments import write_keywords_for_file
+
+        write_keywords_for_file(path, words)
+        exif_data = self.image_cache.get_exif(path) or {}
+        exif_data = dict(exif_data)
+        exif_data["keywords"] = words
+        self.image_cache.put_exif(path, exif_data)
 
     def _prompt_keywords_for_current(self) -> None:
         paths = []
@@ -33715,28 +34071,47 @@ class RAWImageViewer(SessionMixin, QMainWindow):
             return
         words = parse_keywords_text(dlg.text())
         seen = set()
+        members: List[str] = []
         for path in paths:
             for member in self._catalog_paths_for_action(path):
                 key = _norm_path(member)
                 if key in seen:
                     continue
                 seen.add(key)
-                try:
-                    from raw_adjustments import write_keywords_for_file
+                members.append(member)
+        if not members:
+            return
 
-                    write_keywords_for_file(member, words)
-                    exif_data = self.image_cache.get_exif(member) or {}
-                    exif_data = dict(exif_data)
-                    exif_data["keywords"] = words
-                    self.image_cache.put_exif(member, exif_data)
+        status_text = f"Keywords saved ({len(words)})" if words else "Keywords cleared"
+
+        # Same rationale as label_gallery_selection: a handful of sidecar
+        # writes is cheap enough to do inline, but a large multi-select
+        # (potentially hundreds of members) must not freeze the UI thread
+        # for the sum of every write.
+        if len(members) <= 8:
+            for member in members:
+                try:
+                    self._apply_keywords_to_path(member, words)
                 except Exception:
                     logging.getLogger(__name__).warning(
                         "Failed to write keywords for %s", member, exc_info=True
                     )
+            self.status_bar.showMessage(status_text, 2500)
+            return
+
         self.status_bar.showMessage(
-            f"Keywords saved ({len(words)})" if words else "Keywords cleared",
-            2500,
+            f"Saving keywords on {len(members)} photos…", 0
         )
+        signals = _CatalogBatchSignals()
+        signals.finished.connect(self._on_keywords_batch_finished)
+        self._catalog_batch_signals = signals  # keep alive until finished fires
+        worker = _CatalogBatchWorker(
+            members,
+            lambda m: self._apply_keywords_to_path(m, words),
+            lambda _applied: status_text,
+            signals,
+        )
+        _get_bg_thread_pool().start(worker)
 
     def _restore_keyboard_focus(self) -> None:
         """Return keyboard focus to the active view surface (gallery or single image)."""

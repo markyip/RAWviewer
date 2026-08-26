@@ -116,6 +116,28 @@ def main() -> int:
     check("strip gps attr", "GPSLatitude" not in stripped)
     check("keep label", "Label" in stripped)
 
+    from export_options import load_export_prefs, queue_ai_export_availability, save_export_prefs
+
+    denoise_ready, upscale_ready = queue_ai_export_availability()
+    check("ai availability is bool pair", isinstance(denoise_ready, bool) and isinstance(upscale_ready, bool))
+
+    class _MemSettings:
+        def __init__(self):
+            self._d = {}
+
+        def value(self, key, default=None):
+            return self._d.get(key, default)
+
+        def setValue(self, key, value):
+            self._d[key] = value
+
+    s = _MemSettings()
+    save_export_prefs(s, {"queue_ai_denoise": True, "queue_ai_upscale": False, "queue_format": "webp"})
+    loaded = load_export_prefs(s)
+    check("prefs persist queue ai denoise", loaded["queue_ai_denoise"] is True)
+    check("prefs persist queue ai upscale", loaded["queue_ai_upscale"] is False)
+    check("prefs persist queue format", loaded["queue_format"] == "webp")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} failed")
         return 1

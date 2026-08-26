@@ -8,9 +8,7 @@ from typing import Any, Callable
 from raw_adjustments import (
     DEFAULT_ADJUSTMENTS,
     load_adjustments_for_file,
-    load_keywords_for_file,
-    load_label_for_file,
-    load_rating_for_file,
+    load_catalog_for_file,
     write_keywords_for_file,
     write_label_for_file,
     write_rating_for_file,
@@ -92,14 +90,24 @@ class RawviewerMcpService:
     def _adj(self, path: str) -> dict:
         return load_adjustments_for_file(path)
 
+    def _catalog_dict(self, path: str) -> dict[str, Any]:
+        """Rating, label, and keywords from a single XMP sidecar parse."""
+        rating, label, keywords = load_catalog_for_file(path)
+        return {
+            "rating": int(rating or 0),
+            "label": label or "",
+            "keywords": list(keywords or []),
+        }
+
     def _lens_flag(self, adj: dict) -> bool:
         try:
             return float(adj.get("LensCorrectionEnabled", 0.0) or 0.0) > 0.5
         except (TypeError, ValueError):
             return False
 
-    def _base(self, path: str, *, full: bool = False):
-        adj = self._adj(path)
+    def _base(self, path: str, *, full: bool = False, adj: dict | None = None):
+        if adj is None:
+            adj = self._adj(path)
         return self.cache.get(
             path,
             use_full_resolution=full,
@@ -119,15 +127,14 @@ class RawviewerMcpService:
     def get_photo(self, path: str) -> dict[str, Any]:
         photo = self._photo(path)
         adj = self._adj(photo)
-        return {
+        out: dict[str, Any] = {
             "path": os.path.relpath(photo, self.root),
             "abs_path": photo,
             "exif": _exif_summary(photo),
-            "rating": int(load_rating_for_file(photo) or 0),
-            "label": load_label_for_file(photo) or "",
-            "keywords": list(load_keywords_for_file(photo) or []),
             "adjustments": public_adjustments(adj),
         }
+        out.update(self._catalog_dict(photo))
+        return out
 
     def get_preview(
         self,
@@ -137,7 +144,7 @@ class RawviewerMcpService:
     ) -> dict[str, Any]:
         photo = self._photo(path)
         adj = self._adj(photo)
-        base = self._base(photo, full=False)
+        base = self._base(photo, full=False, adj=adj)
         jpeg, w, h = render_preview_jpeg(base, adj, long_edge=int(long_edge or 1000))
         return {
             "path": os.path.relpath(photo, self.root),
@@ -170,7 +177,7 @@ class RawviewerMcpService:
 
         photo = self._photo(path)
         adj = dict(self._adj(photo))
-        base = self._base(photo, full=False)
+        base = self._base(photo, full=False, adj=adj)
         lin = _linear_float_from_buffer(base)
         updates: dict[str, float] = {}
         skipped: list[str] = []
@@ -236,13 +243,12 @@ class RawviewerMcpService:
         if AS_SHOT_TEMP_KEY in current:
             reset[AS_SHOT_TEMP_KEY] = current[AS_SHOT_TEMP_KEY]
         write_xmp_adjustments_for_file(photo, reset)
-        return {
+        out: dict[str, Any] = {
             "path": os.path.relpath(photo, self.root),
-            "rating": int(load_rating_for_file(photo) or 0),
-            "label": load_label_for_file(photo) or "",
-            "keywords": list(load_keywords_for_file(photo) or []),
             "adjustments": public_adjustments(self._adj(photo)),
         }
+        out.update(self._catalog_dict(photo))
+        return out
 
     def apply_preset(self, path: str, name: str) -> dict[str, Any]:
         from raw_xmp_presets import load_preset_adjustments
@@ -320,12 +326,9 @@ class RawviewerMcpService:
             else:
                 words = [str(w).strip() for w in keywords if str(w).strip()]
             write_keywords_for_file(photo, words)
-        return {
-            "path": os.path.relpath(photo, self.root),
-            "rating": int(load_rating_for_file(photo) or 0),
-            "label": load_label_for_file(photo) or "",
-            "keywords": list(load_keywords_for_file(photo) or []),
-        }
+        out: dict[str, Any] = {"path": os.path.relpath(photo, self.root)}
+        out.update(self._catalog_dict(photo))
+        return out
 
     def export_jpeg(
         self,
@@ -348,14 +351,13 @@ class RawviewerMcpService:
             ):
                 raise PathSandboxError("Could not create export directory under root")
         adj = self._adj(photo)
-        base = self._base(photo, full=True)
+        base = self._base(photo, full=True, adj=adj)
         extra: dict[str, Any] = {
             "output_path": dest_path,
             "rgb_linear": base,
             "adj": adj,
             "strip_gps": bool(strip_gps),
             "watermark_text": "",
-            "watermark_image": "",
             "source_path": photo,
             "copy_metadata": True,
         }

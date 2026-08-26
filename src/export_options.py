@@ -500,7 +500,36 @@ def load_export_prefs(settings) -> dict[str, Any]:
         "watermark_corner": normalize_watermark_corner(_s("watermark_corner", DEFAULT_WATERMARK_CORNER)),
         "last_directory": _s("last_directory", ""),
         "queue_format": _s("queue_format", "jpeg"),
+        "queue_ai_denoise": _b("queue_ai_denoise", False),
+        "queue_ai_upscale": _b("queue_ai_upscale", False),
     }
+
+
+def queue_ai_export_availability() -> tuple[bool, bool]:
+    """(denoise_ready, upscale_ready) for queue checkboxes. Same edition+model gate as Adjust."""
+    try:
+        from rawviewer_profile import ai_export_enabled
+
+        ai_allowed = ai_export_enabled()
+    except Exception:
+        ai_allowed = False
+    denoise_ready = False
+    upscale_ready = False
+    if not ai_allowed:
+        return False, False
+    try:
+        from onnx_scunet import scunet_model_path
+
+        denoise_ready = os.path.exists(scunet_model_path())
+    except Exception:
+        denoise_ready = False
+    try:
+        from onnx_realesrgan import realesrgan_model_available
+
+        upscale_ready = realesrgan_model_available()
+    except Exception:
+        upscale_ready = False
+    return bool(denoise_ready), bool(upscale_ready)
 
 
 def watermark_kwargs_from_prefs(prefs: dict[str, Any]) -> dict[str, str]:
