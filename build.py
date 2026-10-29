@@ -1634,7 +1634,14 @@ def main():
         ])
         
         add_data_args.append('--add-data "src;src"')
-    
+        # AI denoise models (scunet.onnx, nafnet.onnx, rawrefinery_deep_128.onnx).
+        # onnx_scunet._models_dir() resolves to src/../models, which in the built
+        # app is <bundle>/models. Without this, the Adjust panel hides the AI
+        # denoise button because ai_denoise_model_present() can't find a model.
+        models_dir = REPO_ROOT / "models"
+        if models_dir.is_dir():
+            add_data_args.append(f'--add-data "{models_dir}{add_data_sep}models"')
+
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")
