@@ -1741,7 +1741,7 @@ def recommended_preview_cache_items(available_gb: float | None = None) -> int:
     """Preview LRU capacity from free RAM, preview resolution, and build profile."""
     explicit = os.environ.get("RAWVIEWER_PREVIEW_CACHE_ITEMS", "").strip()
     if explicit:
-        return _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS", 10, minimum=6, maximum=64)
+        return _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS", 10, minimum=6, maximum=128)
 
     if not _preview_cache_adaptive_enabled():
         return 10
@@ -1755,35 +1755,37 @@ def recommended_preview_cache_items(available_gb: float | None = None) -> int:
     edge = memory_preview_max_edge()
     preview_mb = max(6.0, (edge / 1920.0) ** 2 * 12.0)
 
-    budget_fraction = 0.08
-    budget_cap_mb = 1200.0
+    budget_fraction = 0.12  # Increased from 0.08 for more cache on modern systems
+    budget_cap_mb = 2400.0  # Increased from 1200
     try:
         from rawviewer_profile import indexing_loads_compete, is_lite_build
 
         if not indexing_loads_compete():
-            budget_fraction = 0.12
-            budget_cap_mb = 1600.0
+            budget_fraction = 0.18
+            budget_cap_mb = 3200.0
         if is_lite_build():
-            budget_fraction = max(budget_fraction, 0.14)
-            budget_cap_mb = 1800.0
+            budget_fraction = max(budget_fraction, 0.20)
+            budget_cap_mb = 3600.0
     except Exception:
         pass
 
     budget_mb = min(float(available_gb) * 1024.0 * budget_fraction, budget_cap_mb)
     items = int(budget_mb / preview_mb)
 
-    if available_gb >= 24:
-        floor = 20
+    if available_gb >= 32:
+        floor = 32
+    elif available_gb >= 24:
+        floor = 24
     elif available_gb >= 16:
-        floor = 16
+        floor = 20
     elif available_gb >= 10:
-        floor = 14
+        floor = 16
     elif available_gb >= 6:
-        floor = 12
+        floor = 14
     elif available_gb >= 3:
-        floor = 8
+        floor = 10
     else:
-        floor = 6
+        floor = 8
 
     min_items = _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS_MIN", 6, minimum=4, maximum=32)
     max_items = _env_int("RAWVIEWER_PREVIEW_CACHE_ITEMS_MAX", 64, minimum=8, maximum=128)
@@ -1836,10 +1838,10 @@ class MemoryMonitor:
             "RAWVIEWER_MEMORY_PRESSURE_AVAILABLE_GB_CRITICAL", 2.0, minimum=0.25, maximum=32.0
         )
         elev_pct = _env_float(
-            "RAWVIEWER_MEMORY_PRESSURE_PERCENT_ELEVATED", 85.0, minimum=50.0, maximum=98.0
+            "RAWVIEWER_MEMORY_PRESSURE_PERCENT_ELEVATED", 90.0, minimum=50.0, maximum=98.0
         )
         elev_avail_gb = _env_float(
-            "RAWVIEWER_MEMORY_PRESSURE_AVAILABLE_GB_ELEVATED", 4.0, minimum=0.5, maximum=64.0
+            "RAWVIEWER_MEMORY_PRESSURE_AVAILABLE_GB_ELEVATED", 2.0, minimum=0.5, maximum=64.0
         )
 
         if percent_used >= crit_pct or available_gb <= crit_avail_gb:
@@ -1853,8 +1855,10 @@ class MemoryMonitor:
         memory_info = self.get_memory_info()
         available_gb = memory_info['system_available_gb']
 
-        # Conservative approach: use up to 25% of available memory for caching
-        cache_budget_gb = min(available_gb * 0.25, 4.0)
+        # Use up to 40% of available memory for caching (was 25%), higher cap
+        # for modern systems with 16GB+ RAM. The byte budget (_enforce_numpy_cache_byte_budget)
+        # still provides the real limit; this just raises the count ceiling.
+        cache_budget_gb = min(available_gb * 0.40, 8.0)
 
         # Estimate memory per image (conservative)
         # Full image: ~100MB, Thumbnail: ~1MB
@@ -1862,9 +1866,9 @@ class MemoryMonitor:
         thumbnail_mb = 1
 
         max_full_images = max(
-            5, int((cache_budget_gb * 1024 * 0.8) / full_image_mb))
+            8, int((cache_budget_gb * 1024 * 0.8) / full_image_mb))
         max_thumbnails = max(
-            50, int((cache_budget_gb * 1024 * 0.2) / thumbnail_mb))
+            100, int((cache_budget_gb * 1024 * 0.2) / thumbnail_mb))
 
         preview_items = recommended_preview_cache_items(available_gb)
 
@@ -1882,18 +1886,18 @@ class MemoryMonitor:
             # binds first (5) and correctly, which is the case the 8 was meant
             # to protect and does not need it.
             #
-            # So the RAM-derived figure stands on its own now, with maximum=32
+            # So the RAM-derived figure stands on its own now, with maximum=64
             # as a sanity bound rather than the operative one. Memory is still
             # bounded by bytes; it is simply bounded ONCE, by the limit that
             # knows how large these buffers actually are.
             'full_images': _env_int(
                 "RAWVIEWER_FULL_IMAGE_CACHE_ITEMS",
                 max_full_images,
-                minimum=2,
-                maximum=32,
+                minimum=4,
+                maximum=64,
             ),
-            'thumbnails': min(max_thumbnails, 1000),
-            'preview_images': min(preview_items, 16),
+            'thumbnails': min(max_thumbnails, 2000),
+            'preview_images': min(preview_items, 32),
             'cache_budget_mb': int(cache_budget_gb * 1024)
         }
 

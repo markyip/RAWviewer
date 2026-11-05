@@ -17,6 +17,7 @@ The import itself still runs on the main thread (OpenMP constraint), but
 callers can pass a ``pump`` callback (typically QApplication.processEvents)
 between heavy stages so paints/timers can flush mid-import.
 """
+import os
 import threading
 from typing import Callable, Optional
 
@@ -55,6 +56,33 @@ def import_gpu_backend_on_main_thread(
         # Prefer CuPy (torch-free Windows CUDA product path). Optional torch/
         # kornia is for macOS MPS or a local dev env that still has them.
         cupy_ok = False
+        # Auto-detect CUDA_PATH if not set (Windows NVIDIA toolkit default location).
+        # CuPy needs this to find the CUDA runtime; without it the import succeeds
+        # but cupy.cuda.Device() fails and the backend falls back to CPU-only.
+        if "CUDA_PATH" not in os.environ:
+            _cuda_base = os.path.join(
+                os.environ.get("ProgramFiles", r"C:\Program Files"),
+                "NVIDIA GPU Computing Toolkit",
+                "CUDA",
+            )
+            if os.path.isdir(_cuda_base):
+                try:
+                    _candidates = [
+                        os.path.join(_cuda_base, _e)
+                        for _e in os.listdir(_cuda_base)
+                        if os.path.isdir(os.path.join(_cuda_base, _e))
+                        and os.path.isfile(
+                            os.path.join(_cuda_base, _e, "bin", "nvcc.exe")
+                        )
+                    ]
+                    if _candidates:
+                        _candidates.sort(reverse=True)
+                        os.environ["CUDA_PATH"] = _candidates[0]
+                        _bin = os.path.join(_candidates[0], "bin")
+                        if _bin not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+                except OSError:
+                    pass
         try:
             import cupy  # noqa: F401
 

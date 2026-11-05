@@ -54,6 +54,15 @@ set RAWVIEWER_PERF_V2=1
 set RAWVIEWER_MOBILECLIP_VARIANT=b
 set RAWVIEWER_USE_PROCESS_POOL=
 
+REM Temporary testing: show only full-res images (no low-res interim). Uncomment to enable.
+REM set RAWVIEWER_FULL_RES_ONLY=1
+    for /d %%D in ("C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*") do (
+        set "CUDA_PATH=%%D"
+        goto :cuda_path_set
+    )
+)
+:cuda_path_set
+
 if /I "%MODE%"=="lite" goto :mode_lite
 if /I "%MODE%"=="directml" goto :mode_directml
 if /I "%MODE%"=="cuda" goto :mode_cuda

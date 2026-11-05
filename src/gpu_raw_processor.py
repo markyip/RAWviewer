@@ -111,6 +111,35 @@ try:
 except ImportError:
     _HAS_TORCH = False
 
+# Auto-detect CUDA_PATH if not set (Windows NVIDIA toolkit default location).
+# CuPy needs this to find the CUDA runtime; without it the import succeeds but
+# cupy.cuda.Device() fails and the backend falls back to CPU-only demosaic.
+if "CUDA_PATH" not in os.environ:
+    _cuda_candidates = []
+    _base = os.path.join(
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        "NVIDIA GPU Computing Toolkit",
+        "CUDA",
+    )
+    if os.path.isdir(_base):
+        try:
+            for _entry in os.listdir(_base):
+                _full = os.path.join(_base, _entry)
+                if os.path.isdir(_full) and os.path.isfile(
+                    os.path.join(_full, "bin", "nvcc.exe")
+                ):
+                    _cuda_candidates.append(_full)
+        except OSError:
+            pass
+    if _cuda_candidates:
+        # Prefer the highest version (lexicographic sort works for v12.9 etc.)
+        _cuda_candidates.sort(reverse=True)
+        os.environ["CUDA_PATH"] = _cuda_candidates[0]
+        # Also extend PATH so the runtime DLLs are discoverable.
+        _bin = os.path.join(_cuda_candidates[0], "bin")
+        if _bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+
 try:
     import cupy
     _HAS_CUPY = True

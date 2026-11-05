@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import QLabel, QApplication, QSlider
 from PyQt6.QtCore import (
-    pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData, QPointF, QRect,
+    pyqtSignal, Qt, QObject, QPoint, QUrl, QMimeData, QPointF, QRect, QRectF,
 )
 from PyQt6.QtGui import (
     QPixmap, QDrag, QPainter, QColor, QPolygonF, QPen,
@@ -36,12 +36,19 @@ class ThumbnailLabel(QLabel):
     _STYLE_DEFAULT = "ThumbnailLabel { background: transparent; }"
     _CHECK_MARGIN = 6
     _CHECK_SIZE = 20
+    _COPY_MARGIN = 6
+    _COPY_SIZE = 20
 
     def __init__(self, parent=None, pixmap=None):
         super().__init__(parent)
         self.original_pixmap = None
         self._gallery_selected = False
         self._check_hover = False
+        self._tile_hovered = False
+        self._copy_hover = False
+        self._press_on_copy_path = False
+        self._copy_icon_pixmap = None
+        self._copy_icon_size = 0
         self.setMouseTracking(True)  # hover updates for the selection ring
         self._gallery_edited = False
         self._gallery_rating = 0
@@ -156,6 +163,71 @@ class ThumbnailLabel(QLabel):
             self._check_hover = hovered
             self.update()
 
+    def copy_path_rect(self) -> QRect:
+        """Bottom-right circle where the copy-path button is drawn / clicked."""
+        s = self._COPY_SIZE
+        return QRect(
+            self.width() - s - self._COPY_MARGIN,
+            self.height() - s - self._COPY_MARGIN,
+            s,
+            s,
+        )
+
+    def hits_copy_path_button(self, pos) -> bool:
+        """True when *pos* (local QPoint) is over the copy-path button."""
+        rect = self.copy_path_rect()
+        cx = rect.center()
+        dx = pos.x() - cx.x()
+        dy = pos.y() - cx.y()
+        # Slightly larger hit target than the drawn circle (fingers/tracks).
+        radius = rect.width() / 2 + 4
+        return dx * dx + dy * dy <= radius * radius
+
+    def _set_tile_hovered(self, hovered: bool) -> None:
+        if hovered != self._tile_hovered:
+            self._tile_hovered = hovered
+            self.update()
+
+    def _set_copy_hover(self, hovered: bool) -> None:
+        if hovered != self._copy_hover:
+            self._copy_hover = hovered
+            self.update()
+
+    def _copy_icon(self, size: int) -> QPixmap:
+        """Cached copy glyph. qtawesome when available, painted fallback otherwise."""
+        size = max(1, int(size))
+        if self._copy_icon_pixmap is not None and self._copy_icon_size == size:
+            return self._copy_icon_pixmap
+        pm = None
+        try:
+            import qtawesome as qta
+
+            pm = qta.icon("fa5s.copy", color=theme.INK).pixmap(size, size)
+        except Exception:
+            pm = None
+        if pm is None or pm.isNull():
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(QPen(QColor(theme.INK), max(1.2, size * 0.09)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            inset = size * 0.18
+            radius = size * 0.14
+            side = size - 2 * inset - size * 0.16
+            painter.drawRoundedRect(
+                QRectF(inset, inset, side, side), radius, radius
+            )
+            painter.drawRoundedRect(
+                QRectF(inset + size * 0.16, inset + size * 0.16, side, side),
+                radius,
+                radius,
+            )
+            painter.end()
+        self._copy_icon_pixmap = pm
+        self._copy_icon_size = size
+        return pm
+
     def paintEvent(self, event):
         super().paintEvent(event)
         painter = QPainter(self)
@@ -189,9 +261,26 @@ class ThumbnailLabel(QLabel):
             painter.setBrush(QColor(0, 0, 0, 0))
             painter.drawEllipse(rect.adjusted(1, 1, -1, -1))
 
+        # Copy-path button: only while the tile is hovered and has real pixels.
+        if self.file_path and self._thumb_pixels_ready() and self._tile_hovered:
+            copy_rect = self.copy_path_rect()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150 if self._copy_hover else 110))
+            painter.drawEllipse(copy_rect)
+            icon_size = max(10, int(self._COPY_SIZE * 0.62))
+            painter.drawPixmap(
+                copy_rect.center().x() - icon_size // 2,
+                copy_rect.center().y() - icon_size // 2,
+                icon_size,
+                icon_size,
+                self._copy_icon(icon_size),
+            )
+
     def mouseMoveEvent(self, event):
         try:
-            self._set_check_hover(self.hits_selection_check(event.position().toPoint()))
+            pos = event.position().toPoint()
+            self._set_check_hover(self.hits_selection_check(pos))
+            self._set_copy_hover(self.hits_copy_path_button(pos))
         except Exception:
             pass
         if not (event.buttons() & Qt.MouseButton.LeftButton) or not self.file_path:
@@ -207,13 +296,18 @@ class ThumbnailLabel(QLabel):
 
     def enterEvent(self, event):
         try:
-            self._set_check_hover(self.hits_selection_check(event.position().toPoint()))
+            pos = event.position().toPoint()
+            self._set_check_hover(self.hits_selection_check(pos))
+            self._set_copy_hover(self.hits_copy_path_button(pos))
+            self._set_tile_hovered(True)
         except Exception:
             pass
         super().enterEvent(event)
 
     def leaveEvent(self, event):
         self._set_check_hover(False)
+        self._set_copy_hover(False)
+        self._set_tile_hovered(False)
         super().leaveEvent(event)
 
     def set_gallery_edited(self, edited: bool) -> None:

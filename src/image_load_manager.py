@@ -1626,8 +1626,66 @@ class ImageLoadManager(QObject):
         self._active_raw_tasks = len(self._raw_slot_holders)
 
     def _reconcile_raw_slots_locked(self) -> None:
-        """Recount from the holder set. Under ``_queue_lock``."""
-        self._active_raw_tasks = len(self._raw_slot_holders)
+        """Recount from the holder set, purging orphaned holders. Under ``_queue_lock``.
+
+        A holder that is no longer in ``_active_tasks`` (e.g. cancelled while
+        its demosaic was stuck in an uninterruptible GPU/CPU call, or
+        re-queued under a new task object) would otherwise keep its slot
+        forever. ``_task_finished`` only releases slots for tasks that actually
+        finish, so this purge is the only thing that unblocks every later heavy
+        decode once a slot has leaked.
+        """
+        holders = getattr(self, "_raw_slot_holders", None)
+        if holders is None:
+            self._raw_slot_holders = set()
+            holders = self._raw_slot_holders
+        orphaned = set()
+        _stale_threshold_s = 60.0
+        _now = time.time()
+        for t in list(holders):
+            if t is None:
+                orphaned.add(t)
+                continue
+            try:
+                if getattr(t, "is_cancelled", lambda: False)():
+                    orphaned.add(t)
+                    continue
+                # Keep only holders still tracked as active tasks.
+                still_active = False
+                for active in self._active_tasks.values():
+                    if active is t:
+                        still_active = True
+                        break
+                if not still_active:
+                    orphaned.add(t)
+                    continue
+                # Stale-holder purge: a task that has been holding a slot for
+                # far too long is almost certainly stuck in an uninterruptible
+                # decode. Purge it (and cancel) so later heavies are not starved
+                # forever. _task_finished would have released it on completion.
+                enq = getattr(t, "_enqueue_ts", None)
+                if enq is not None and (_now - float(enq)) > _stale_threshold_s:
+                    try:
+                        t.cancel()
+                    except Exception:
+                        pass
+                    orphaned.add(t)
+            except Exception:
+                orphaned.add(t)
+        for t in orphaned:
+            holders.discard(t)
+            try:
+                if getattr(t, "_counted_raw_slot", False):
+                    t._counted_raw_slot = False
+            except Exception:
+                pass
+            # Best-effort cancellation so a stuck worker stops chewing CPU/GPU.
+            try:
+                if t is not None and hasattr(t, "cancel"):
+                    t.cancel()
+            except Exception:
+                pass
+        self._active_raw_tasks = len(holders)
 
     def _release_raw_slot_locked(self, task: Optional["ImageLoadTask"]) -> None:
         """Drop a heavy RAW slot immediately when cancelling a counted task.
@@ -1971,7 +2029,22 @@ class ImageLoadManager(QObject):
                     self._task_keys_by_path.pop(task.file_path, None)
             # Pairs with the claim through the holder set, so a task cancelled
             # while still running cannot decrement a second time.
+            slot_before = int(self._active_raw_tasks or 0)
             self._release_raw_slot_locked(task)
+            # Also purge any orphaned holders that were never released (a
+            # cancelled demosaic stuck in an uninterruptible call). Without this
+            # the holder set can grow forever and starve every later heavy decode.
+            self._reconcile_raw_slots_locked()
+            slot_after = int(self._active_raw_tasks or 0)
+            if slot_before != slot_after:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "[LOAD] _task_finished for %s: raw slots %d -> %d",
+                    getattr(task, "file_path", "<unknown>"),
+                    slot_before,
+                    slot_after,
+                )
             inflight = getattr(self, "_demosaic_in_flight", None)
             if inflight is not None:
                 inflight.discard(task)
@@ -2280,7 +2353,18 @@ class ImageLoadManager(QObject):
                 # From the holder set: _active_tasks excludes tasks cancelled
                 # while their demosaic is still running, and counting it
                 # dropped their slots on the floor.
+                pre_count = int(self._active_raw_tasks or 0)
                 self._reconcile_raw_slots_locked()
+                post_count = int(self._active_raw_tasks or 0)
+                if pre_count != post_count:
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "[LOAD] Reconciled raw slots: %d -> %d (purged %d orphaned holders)",
+                        pre_count,
+                        post_count,
+                        pre_count - post_count,
+                    )
                 if int(self._active_raw_tasks or 0) > 0:
                     tmp = []
                     while not self._work_queue.empty():

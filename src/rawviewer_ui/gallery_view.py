@@ -951,6 +951,9 @@ class JustifiedGallery(QWidget):
         widget.clear()
         widget.original_pixmap = None
         widget.setText("")
+        widget._tile_hovered = False
+        widget._copy_hover = False
+        widget._press_on_copy_path = False
 
     def _scale_crop_to_fit(self, pixmap: QPixmap, target_size, fast: bool = False):
         """Scale pixmap to fully cover target_size, then center-crop to exact size."""
@@ -3682,6 +3685,21 @@ class JustifiedGallery(QWidget):
                                     elif hasattr(pv, "_gallery_toggle_path_selection"):
                                         pv._gallery_toggle_path_selection(target_path)
                                     return
+                                if _w.hits_copy_path_button(e.position().toPoint()):
+                                    # Copy-path button: copy the file path and
+                                    # swallow the click so the image never opens
+                                    # and no drag/selection starts.
+                                    _w._press_on_copy_path = True
+                                    _w._drag_start_pos = None
+                                    try:
+                                        pv._copy_paths_to_clipboard([target_path])
+                                        if getattr(pv, "status_bar", None) is not None:
+                                            pv.status_bar.showMessage(
+                                                "Path copied to clipboard", 2500
+                                            )
+                                    except Exception:
+                                        pass
+                                    return
                                 _w._press_on_check = False
                                 mods = (
                                     pv._gallery_event_modifiers(e)
@@ -3716,6 +3734,13 @@ class JustifiedGallery(QWidget):
                         # Press handled the check toggle; swallow the release so
                         # the plain-click path (open image / re-toggle) never runs.
                         _w._press_on_check = False
+                        _w._drag_start_pos = None
+                        _w._drag_started = False
+                        e.accept()
+                        return
+                    if getattr(_w, "_press_on_copy_path", False):
+                        # Press handled the copy-path button; same swallow.
+                        _w._press_on_copy_path = False
                         _w._drag_start_pos = None
                         _w._drag_started = False
                         e.accept()
