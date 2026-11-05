@@ -1945,10 +1945,11 @@ class ImageCache(QObject):
         self._full_cache_reasons: OrderedDict = OrderedDict()
 
         def _note_full_evicted(key):
-            self._note_full_cache_reason(key, "evicted (capacity %d)" % cache_sizes['full_images'])
+            self._note_full_cache_reason(key, "evicted (capacity 10)")
 
+        # Phase 4: Simplified to fixed LRU(10) for full images
         self.full_image_cache = LRUCache(
-            max_size=cache_sizes['full_images'], on_evict=_note_full_evicted
+            max_size=10, on_evict=_note_full_evicted
         )
         self.pixmap_cache = LRUCache(max_size=cache_sizes['full_images'])
         self.libraw_preview_paths: set = set()
@@ -2866,12 +2867,6 @@ class ImageCache(QObject):
                 np.ascontiguousarray(image) if not copy else image.copy()
             )
             self.full_image_cache.put(file_path, stored)
-            self._enforce_numpy_cache_byte_budget(
-                self.full_image_cache,
-                fraction=0.55,
-                min_keep=2,
-                label="full-image",
-            )
 
     def mark_full_image_source(self, file_path: str, *, is_embedded_jpeg: bool) -> None:
         """Track whether the cached full_image entry is an embedded-JPEG
@@ -2965,15 +2960,6 @@ class ImageCache(QObject):
         except Exception:
             logger.warning("%s byte-budget enforcement failed", label, exc_info=True)
 
-    def _enforce_full_image_byte_budget(self) -> None:
-        """Backward-compatible alias for full-image RAM budget."""
-        self._enforce_numpy_cache_byte_budget(
-            self.full_image_cache,
-            fraction=0.55,
-            min_keep=2,
-            label="full-image",
-        )
-
     def apply_pressure_budget_scale(self, scale: float, *, min_mb: int = 128) -> int:
         """Shrink the full-image byte budget for the rest of the session.
 
@@ -2988,7 +2974,6 @@ class ImageCache(QObject):
             self.full_image_cache.shrink_to_size(min(self.full_image_cache.max_size, new_full))
         except Exception:
             pass
-        self._enforce_full_image_byte_budget()
         return int(self.max_memory_mb)
 
     def get_pixmap(self, file_path: str) -> Optional[QPixmap]:
