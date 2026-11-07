@@ -32,7 +32,7 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication([])
 
-    from rawviewer_ui.gallery_view import JustifiedGallery
+    from rawviewer_ui.widgets.gallery import JustifiedGallery
 
     class _StubGallery:
         """Only what the bubble methods actually reach for."""

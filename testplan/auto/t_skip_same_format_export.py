@@ -17,7 +17,7 @@ def check(name, ok, detail=""):
 
 def main() -> int:
     import threading
-    from rawviewer_app.batch_ops import (
+    from rawviewer_app.services.batch import (
         _should_skip_reencode,
         _BYPASS_EXT,
         export_one_file,

@@ -27,7 +27,7 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
     import main as mainmod
-    import unified_image_processor as uip
+    import processing.unified as uip
 
     src = inspect.getsource(mainmod.RAWImageViewer._editing_supported_for_file)
     check(

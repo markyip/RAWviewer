@@ -1,10 +1,9 @@
 """Folder load and session persistence (mixin for RAWImageViewer)."""
+import contextlib
 import logging
 import os
-import time
-import traceback
 
-from PyQt6.QtCore import QRunnable, QThreadPool, QTimer
+from PyQt6.QtCore import QRunnable, QThreadPool
 
 from rawviewer_app.env import _env_int, _norm_path
 from rawviewer_app.signals import FolderLoadSignals
@@ -13,7 +12,6 @@ from rawviewer_app.signals import FolderLoadSignals
 class SessionMixin:
     def load_folder_images(self, folder_path, start_file=None, start_view=None):
         """Load images from a folder without blocking the UI during scan/sort."""
-        import logging
         logger = logging.getLogger(__name__)
         folder_path = os.path.abspath(folder_path)
         if hasattr(self, "image_manager") and self.image_manager is not None:
@@ -24,7 +22,7 @@ class SessionMixin:
             self.image_manager.prime_volume_speed_async(folder_path, start_file)
         same_folder = bool(
             getattr(self, "current_folder", None)
-            and _norm_path(getattr(self, "current_folder")) == _norm_path(folder_path)
+            and _norm_path(self.current_folder) == _norm_path(folder_path)
         )
         fast_open = self._should_fast_open_single_file(start_file, start_view)
         preserve_folder_index = bool(
@@ -103,9 +101,8 @@ class SessionMixin:
                     # Hide single view immediately so gallery mode never stacks two panes.
                     self._show_gallery_view()
                 else:
-                    if hasattr(self, 'loading_overlay'):
-                        if not fast_open:
-                            self.loading_overlay.show_loading("Scanning folder...")
+                    if hasattr(self, 'loading_overlay') and not fast_open:
+                        self.loading_overlay.show_loading("Scanning folder...")
                     if hasattr(self, 'image_label') and not fast_open:
                         self.image_label.clear()
 
@@ -130,7 +127,6 @@ class SessionMixin:
 
                 def run(self_inner):
                     import time
-                    from datetime import datetime
                     try:
                         scan_start = time.time()
                         image_files = []
@@ -146,7 +142,6 @@ class SessionMixin:
                         sort_start = time.time()
                         bulk_metadata = {}
                         if image_files:
-                            from common_image_loader import capture_timestamp_for_sort
 
                             if self_inner.start_file:
                                 image_files = viewer._mtime_sort_image_files(
@@ -163,7 +158,7 @@ class SessionMixin:
                                     meta = bulk_metadata.get(fp)
                                     mtime = file_stats.get(fp, (0, 0))[1]
                                     probed_ts = probed_timestamps.get(fp, 0.0)
-                                    from common_image_loader import resolve_folder_sort_timestamp, is_raw_file
+                                    from common_image_loader import is_raw_file, resolve_folder_sort_timestamp
                                     _has_capture, timestamp, _source = resolve_folder_sort_timestamp(
                                         fp,
                                         metadata=meta,
@@ -293,27 +288,23 @@ class SessionMixin:
         if 0 <= i < len(self.image_files) and self.image_files[i] == file_path:
             del self.image_files[i]
             return
-        try:
+        with contextlib.suppress(ValueError):
             self.image_files.remove(file_path)
-        except ValueError:
-            pass
 
     def _drop_discarded_from_semantic_corpus(self, file_path: str) -> None:
         lst = getattr(self, "_semantic_search_corpus_files", None)
         if not lst:
             return
-        try:
+        with contextlib.suppress(ValueError):
             lst.remove(file_path)
-        except ValueError:
-            pass
 
     def save_session_state(self):
         settings = self.get_settings()
-        
+
         # Always save window geometry and state
         settings.setValue("window_geometry", self.saveGeometry())
         settings.setValue("window_state", self.saveState())
-        
+
         if self.current_folder and self.current_file_index >= 0 and self.image_files:
             filename = os.path.basename(
                 self.image_files[self.current_file_index])
@@ -375,13 +366,12 @@ class SessionMixin:
 
     def restore_session_state(self):
         """Restore the last session's folder and file, with error handling for unavailable drives"""
-        import logging
         logger = logging.getLogger(__name__)
-        
+
         settings = self.get_settings()
         folder = settings.value("last_session_folder", None)
         file = settings.value("last_session_file", None)
-        
+
         if folder and file:
             try:
                 # Check if folder exists and is accessible
@@ -391,7 +381,7 @@ class SessionMixin:
                     settings.remove("last_session_folder")
                     settings.remove("last_session_file")
                     return False
-                
+
                 # Try to list files in the folder
                 # listdir doubles as the accessibility probe: a vanished drive
                 # raises and clears the session below.
@@ -461,6 +451,6 @@ class SessionMixin:
                 except Exception:
                     pass
                 return False
-        
+
         return False
 

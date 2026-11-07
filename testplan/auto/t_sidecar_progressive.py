@@ -28,7 +28,7 @@ def main() -> int:
         DEFAULT_ADJUSTMENTS,
         write_xmp_adjustments_for_file,
     )
-    from unified_image_processor import UnifiedImageProcessor
+    from processing.unified import UnifiedImageProcessor
 
     os.environ["RAWVIEWER_ENABLE_EDITING"] = "1"
     os.environ["RAWVIEWER_SIDECAR_ADJUST"] = "1"

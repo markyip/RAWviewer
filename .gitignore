@@ -76,6 +76,10 @@ test_*.py
 !testplan/auto/
 !testplan/auto/**
 
+# Python bytecode is never tracked, even under the un-ignored test tree.
+testplan/**/__pycache__/
+testplan/**/*.pyc
+
 # Debug and development files
 debug_*.py
 *_debug.py

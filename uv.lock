@@ -1,0 +1,8 @@
+version = 1
+revision = 3
+requires-python = ">=3.10, <3.13"
+
+[[package]]
+name = "rawviewer"
+version = "3.1.0"
+source = { virtual = "." }

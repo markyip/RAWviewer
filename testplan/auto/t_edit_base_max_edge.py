@@ -20,7 +20,7 @@ def check(name, ok, detail=""):
 
 
 def main() -> int:
-    from unified_image_processor import cap_working_edit_base
+    from processing.unified import cap_working_edit_base
 
     img = np.zeros((3000, 4500, 3), dtype=np.float32)
     os.environ.pop("RAWVIEWER_EDIT_BASE_MAX_EDGE", None)

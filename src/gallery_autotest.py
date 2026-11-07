@@ -30,6 +30,7 @@ Metrics:
   first paint / confirmed gallery mode (not merely a toggle attempt).
 """
 
+import contextlib
 import os
 import time
 
@@ -83,10 +84,8 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
 
     def _quit_app(reason: str) -> None:
         safe_print(f"[GALLERYTEST] quit: {reason}", flush=True, force=True)
-        try:
+        with contextlib.suppress(Exception):
             viewer.close()
-        except Exception:
-            pass
         app = QApplication.instance()
         if app is not None:
             QTimer.singleShot(500, app.quit)
@@ -293,7 +292,7 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
             if dump_path:
                 import faulthandler
 
-                state["stack_dump_fh"] = open(dump_path, "w")
+                state["stack_dump_fh"] = open(dump_path, "w")  # noqa: SIM115  # Intentional: must stay open for faulthandler
                 faulthandler.dump_traceback_later(
                     0.4, repeat=True, file=state["stack_dump_fh"]
                 )
@@ -361,10 +360,9 @@ def run_gallery_autotest(viewer, *, safe_print) -> None:
             return
 
         sort_ready = _exif_sort_ready()
-        if not sort_ready:
-            # v2.5: toggle is a no-op until capture-time sort finishes.
-            # v3: still enters on provisional order ??try toggle below anyway.
-            if state["enter_attempts"] % 25 == 0:
+        # v2.5: toggle is a no-op until capture-time sort finishes.
+        # v3: still enters on provisional order — try toggle below anyway.
+        if not sort_ready and state["enter_attempts"] % 25 == 0:
                 safe_print(
                     f"[GALLERYTEST] waiting for EXIF sort (files={n_files} "
                     f"elapsed_s={waited:.1f})",

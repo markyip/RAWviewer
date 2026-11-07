@@ -22,7 +22,7 @@ def main() -> int:
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
 
     # --- Dialog UI wiring ---
-    from rawviewer_app.widgets import BatchExportDialog
+    from rawviewer_app.core.widgets import BatchExportDialog
 
     dlg = BatchExportDialog(count=3)
     dlg.show()
@@ -73,7 +73,7 @@ def main() -> int:
     # --- export_one_file override ---
     import tempfile
     import threading
-    from rawviewer_app.batch_ops import export_one_file
+    from rawviewer_app.services.batch import export_one_file
 
     tmp = tempfile.mkdtemp()
     # A real RAW decode isn't available in the test env, so stub the pipeline.
@@ -88,7 +88,7 @@ def main() -> int:
     def _fake_load_adj(path):
         return {"AIDenoiseAmount": 100.0, "Exposure2012": 0.1}
 
-    import rawviewer_app.batch_ops as bo
+    import rawviewer_app.services.batch as bo
     orig_load = bo.load_adjustments_for_file if hasattr(bo, "load_adjustments_for_file") else None
 
     err, _ = export_one_file(

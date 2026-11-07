@@ -25,14 +25,14 @@ run() {
 }
 
 run "compile check" -m py_compile \
-  src/main.py src/fast_raw_decode.py src/unified_image_processor.py \
-  src/raw_pv2012.py src/raw_adjustments.py src/raw_edit_pipeline.py \
-  src/image_cache.py src/image_load_manager.py src/gpu_raw_processor.py \
-  src/perf_metrics.py src/enhanced_raw_processor.py src/common_image_loader.py src/torch_bootstrap.py \
+  src/main.py src/fast_raw_decode.py src/processing/unified.py \
+  src/raw_pv2012.py src/raw_adjustments/__init__.py src/raw_edit_pipeline.py \
+  src/image_cache.py src/image_load_manager/__init__.py src/gpu_raw_processor.py \
+  src/perf_metrics.py src/enhanced_raw_processor/__init__.py src/common_image_loader/__init__.py src/torch_bootstrap.py \
   src/raw_detail_enhance.py src/raw_tone_recovery.py src/raw_auto_adjust.py src/raw_lut.py \
-  src/display_brightness.py src/memory_pressure.py src/rawviewer_ui/adjust_panel.py \
+  src/display_brightness.py src/memory_pressure.py src/rawviewer_ui/widgets/adjust.py \
   src/startup_splash.py src/color_calibration.py src/dpreview_samples.py \
-  src/rawviewer_ui/color_calibration_dialog.py src/rawviewer_ui/color_checker_overlay.py
+  src/rawviewer_ui/dialogs/color_calibration_dialog.py src/rawviewer_ui/overlays/color_checker_overlay.py
 
 run "tone engine invariants" testplan/auto/t_tone_engine.py
 run "xmp round-trip" testplan/auto/t_xmp_roundtrip.py
@@ -106,3 +106,5 @@ if [ ${#FAILED[@]} -eq 0 ]; then
 fi
 echo "FAILED SUITES: ${FAILED[*]}"
 exit 1
+
+

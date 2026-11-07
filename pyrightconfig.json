@@ -3,7 +3,7 @@
   "stubPath": "typings",
   "extraPaths": ["typings"],
   "pythonVersion": "3.12",
-  "typeCheckingMode": "basic",
+  "typeCheckingMode": "strict",
   "reportMissingImports": "none",
   "reportMissingModuleSource": "none",
   "reportSelfClsParameterName": "none"

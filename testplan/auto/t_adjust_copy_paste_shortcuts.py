@@ -84,8 +84,8 @@ def main() -> int:
 
     # Test 2: Paste settings via Ctrl+V
     # We must seed the clipboard so Paste is executed
-    from rawviewer_ui.adjust_panel import _EDIT_SETTINGS_CLIPBOARD
-    import rawviewer_ui.adjust_panel as ap
+    from rawviewer_ui.widgets.adjust import _EDIT_SETTINGS_CLIPBOARD
+    import rawviewer_ui.widgets.adjust as ap
     ap._EDIT_SETTINGS_CLIPBOARD = {"Exposure2012": 1.0}
 
     evt_paste_ctrl = MockEvent(Qt.Key.Key_V, Qt.KeyboardModifier.ControlModifier)

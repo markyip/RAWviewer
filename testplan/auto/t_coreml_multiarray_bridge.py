@@ -35,7 +35,7 @@ class _FakeMultiArray:
 
 
 def main() -> int:
-    from semantic_search import (
+    from search import (
         copy_bgra_into_cvpixelbuffer,
         copy_numpy_into_mlmultiarray,
         mlmultiarray_to_numpy_f32,

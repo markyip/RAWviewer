@@ -21,7 +21,7 @@ class _FakeUnpacked:
 
 def main() -> int:
     os.environ["RAWVIEWER_UNPACK_STASH_SLOTS"] = "2"
-    from unified_image_processor import UnifiedImageProcessor
+    from processing.unified import UnifiedImageProcessor
 
     # Fresh instance; slots must be OrderedDict-backed LRU.
     proc = UnifiedImageProcessor()

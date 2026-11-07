@@ -1,0 +1,1 @@
+"""Generic image processing operations."""

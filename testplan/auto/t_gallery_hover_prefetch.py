@@ -21,7 +21,7 @@ def main() -> int:
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(_sys.argv)  # noqa: F841
-    import rawviewer_ui.gallery_view as gv
+    import rawviewer_ui.widgets.gallery as gv
 
     class FakeWidget:
         def __init__(self, path):

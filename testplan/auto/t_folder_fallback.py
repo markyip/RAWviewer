@@ -185,8 +185,9 @@ def main() -> int:
         check("out-of-scope: empty root", not mainmod._is_in_folder_scope(child, ""))
 
     # --- 11. source-level pins against backsliding ---
-    src = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "main.py"),
-               encoding="utf-8").read()
+    from _source_utils import window_source
+
+    src = window_source()
     check(
         "no top-level-only inline scan left in scan_folder_for_images",
         "_scan_folder_image_paths(" in src,

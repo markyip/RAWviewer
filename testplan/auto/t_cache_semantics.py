@@ -22,7 +22,7 @@ def main() -> int:
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
-    from unified_image_processor import UnifiedImageProcessor
+    from processing.unified import UnifiedImageProcessor
     from raw_adjustments import (
         AS_SHOT_TEMP_KEY,
         DEFAULT_ADJUSTMENTS,

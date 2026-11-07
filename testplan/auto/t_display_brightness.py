@@ -87,8 +87,9 @@ def test_fake_backend_roundtrip():
 
 
 def test_adjust_wiring_in_main():
-    src = os.path.join(os.path.dirname(__file__), "..", "..", "src", "main.py")
-    text = open(src, encoding="utf-8").read()
+    from _source_utils import main_source
+
+    text = main_source()
     check(
         "enter Adjust raises brightness",
         "self._maybe_maximize_brightness_for_adjust(True)" in text,

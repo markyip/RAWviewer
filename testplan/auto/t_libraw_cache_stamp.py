@@ -22,7 +22,7 @@ def check(name, ok, detail=""):
 
 def main() -> int:
     from image_cache import ImageCache, _libraw_native_search_dirs, libraw_runtime_stamp
-    import unified_image_processor as uip
+    import processing.unified as uip
 
     stamp = libraw_runtime_stamp()
     check("libraw_runtime_stamp is non-empty when rawpy imports", bool(stamp))

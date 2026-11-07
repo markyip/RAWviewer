@@ -49,7 +49,7 @@ def main() -> int:
     from PyQt6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
-    from rawviewer_ui.gpu_image_view import GpuImageView
+    from rawviewer_ui.widgets.gpu import GpuImageView
 
     view = GpuImageView()
     view.resize(800, 600)

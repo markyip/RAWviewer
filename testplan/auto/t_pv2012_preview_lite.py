@@ -63,11 +63,9 @@ def main() -> int:
         "render_adjust_preview_uint8 lite is uint8",
         out is not None and out.dtype == np.uint8,
     )
-    main_py = os.path.join(
-        os.path.dirname(__file__), "..", "..", "src", "main.py"
-    )
-    with open(main_py, "r", encoding="utf-8") as f:
-        main_src = f.read()
+    from _source_utils import window_source
+
+    main_src = window_source()
     check(
         "_ADJUST_FAST_PREVIEW_MAX_EDGE is 640",
         "_ADJUST_FAST_PREVIEW_MAX_EDGE = 640" in main_src,

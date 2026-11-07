@@ -60,7 +60,7 @@ dependencies, no new files at runtime, no changes to the clipboard helper.
 - If `file_path and _thumb_pixels_ready() and _tile_hovered`: draw translucent
   backing circle + centered copy icon (icon = `_COPY_SIZE * 0.62`)
 
-### 2. `src/rawviewer_ui/gallery_view.py`
+### 2. `src/rawviewer_ui/widgets/gallery.py`
 
 - **`_clear_widget_thumbnail`** (line 949): reset `widget._tile_hovered = False`,
   `_copy_hover = False`, `_press_on_copy_path = False`

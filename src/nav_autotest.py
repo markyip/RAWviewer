@@ -61,6 +61,7 @@ Env vars:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 
@@ -409,10 +410,8 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
             if not cur_path:
                 return
             exif = None
-            try:
+            with contextlib.suppress(Exception):
                 exif = viewer.image_cache.get_exif(cur_path)
-            except Exception:
-                pass
             if not image_covers_sensor_resolution(w, h, exif):
                 # Below sensor res: arm/refresh the settle probe so a file
                 # whose pipeline ends here doesn't wait out the hard ceiling.
@@ -555,7 +554,7 @@ def run_nav_autotest(viewer, *, safe_print, image_covers_sensor_resolution):
             # Pair each warm revisit with its cold counterpart (same file, same
             # position in the revisit prefix) to show the reload delta directly.
             safe_print("[AUTOTEST] ----- cold vs warm (same file) -----", flush=True, force=True)
-            for i, (w_name, w_w, w_h, w_t, w_np) in enumerate(warm):
+            for i, (w_name, _w_w, _w_h, w_t, w_np) in enumerate(warm):
                 if i < len(cold):
                     c_name, c_w, c_h, c_t, c_np = cold[i]
                     safe_print(
