@@ -4,17 +4,21 @@
 # Sony ARWs (ILCE-7M5 / ARW6). LibRaw master in third_party/ includes the
 # decoder; we swap only the DLL so the Cython extension stays the PyPI wheel.
 #
-# Requires: VS 2017+ (nmake), cmake, zlib + libjpeg (vcpkg x64-windows-static
-# is bootstrapped under .cache/libraw_vcpkg when CMAKE_PREFIX_PATH is unset).
+# Requires: Visual Studio 2017+ with the C++ toolset (MSVC + nmake) and cmake.
+# VS is discovered via vswhere (any edition/version, including VS 2022 and VS
+# 2026); set RAWVIEWER_VSDEVCMD to override a non-standard install.
+# zlib + libjpeg (vcpkg x64-windows-static) is bootstrapped under
+# .cache/libraw_vcpkg when CMAKE_PREFIX_PATH is unset.
 #
 # Usage (from repo root, after rawpy is installed into the target interpreter):
 #   powershell -ExecutionPolicy Bypass -File scripts\libraw\build_libraw_windows.ps1
 #   powershell ... -File scripts\libraw\build_libraw_windows.ps1 -PythonExe path\to\python.exe
 #
 # Env:
-#   RAWVIEWER_LIBRAW_SKIP=1   — no-op
-#   RAWVIEWER_LIBRAW_FORCE=1  — rebuild even if cache matches
-#   CMAKE_PREFIX_PATH         — override vcpkg prefix
+#   RAWVIEWER_LIBRAW_SKIP=1   - no-op
+#   RAWVIEWER_LIBRAW_FORCE=1  - rebuild even if cache matches
+#   RAWVIEWER_VSDEVCMD        - override path to VsDevCmd.bat
+#   CMAKE_PREFIX_PATH         - override vcpkg prefix
 
 [CmdletBinding()]
 param(
@@ -25,7 +29,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ($env:RAWVIEWER_LIBRAW_SKIP -eq "1") {
-    Write-Host "[libraw] RAWVIEWER_LIBRAW_SKIP=1 — leaving stock LibRaw in place."
+    Write-Host "[libraw] RAWVIEWER_LIBRAW_SKIP=1 - leaving stock LibRaw in place."
     exit 0
 }
 
@@ -45,31 +49,118 @@ function Get-PinnedLibRaw {
 }
 
 function Initialize-VS {
-    $candidates = @(
-        "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat",
-        "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat",
-        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat",
-        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"
-    )
-    $vs = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $vs) {
-        throw "Visual Studio VsDevCmd.bat not found (need MSVC + nmake)."
+    $vsDevCmd = $null
+    $vsInstall = $null
+
+    if ($env:RAWVIEWER_VSDEVCMD) {
+        if (-not (Test-Path $env:RAWVIEWER_VSDEVCMD)) {
+            throw "RAWVIEWER_VSDEVCMD does not exist: $($env:RAWVIEWER_VSDEVCMD)"
+        }
+        $vsDevCmd = (Resolve-Path $env:RAWVIEWER_VSDEVCMD).Path
     }
-    Write-Host "[libraw] VS env: $vs"
-    & "${env:COMSPEC}" /s /c "`"$vs`" -arch=x64 -no_logo && set" | ForEach-Object {
+
+    if (-not $vsDevCmd) {
+        $installs = @()
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (-not (Test-Path $vswhere)) {
+            $vswhereCmd = Get-Command vswhere -ErrorAction SilentlyContinue
+            if ($vswhereCmd) { $vswhere = $vswhereCmd.Source }
+        }
+        if ($vswhere -and (Test-Path $vswhere)) {
+            # Prefer installs that actually include the MSVC C++ toolset.
+            $installs = @(
+                & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null |
+                    Where-Object { $_ }
+            )
+            if ($installs.Count -eq 0) {
+                # Still inspect installs without C++ so the error below is actionable.
+                $installs = @(
+                    & $vswhere -products * -property installationPath 2>$null |
+                        Where-Object { $_ }
+                )
+            }
+        }
+
+        foreach ($install in $installs) {
+            foreach ($bat in @("VsDevCmd.bat", "LaunchDevCmd.bat")) {
+                $candidate = Join-Path $install "Common7\Tools\$bat"
+                if (Test-Path $candidate) {
+                    $vsInstall = $install
+                    $vsDevCmd = $candidate
+                    break
+                }
+            }
+            if ($vsDevCmd) { break }
+        }
+    }
+
+    if (-not $vsDevCmd) {
+        # Last resort for machines without vswhere / non-standard layouts.
+        $roots = @(
+            (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\2022"),
+            (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\2022"),
+            (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\18"),
+            (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\18")
+        )
+        foreach ($root in $roots) {
+            foreach ($edition in @("Community", "Professional", "Enterprise", "BuildTools")) {
+                $candidate = Join-Path $root "$edition\Common7\Tools\VsDevCmd.bat"
+                if (Test-Path $candidate) {
+                    $vsDevCmd = $candidate
+                    $vsInstall = Join-Path $root $edition
+                    break
+                }
+            }
+            if ($vsDevCmd) { break }
+        }
+    }
+
+    if (-not $vsDevCmd) {
+        throw ("Visual Studio with C++ tools not found (need MSVC + nmake).`n" +
+            "  Install the 'Desktop development with C++' workload in Visual Studio 2017+`n" +
+            "  (VS 2022 and 2026 are both supported), or set RAWVIEWER_VSDEVCMD to VsDevCmd.bat.")
+    }
+
+    Write-Host "[libraw] VS env: $vsDevCmd"
+    & "${env:COMSPEC}" /s /c "`"$vsDevCmd`" -arch=x64 -no_logo && set" | ForEach-Object {
         $name, $value = $_ -split "=", 2
         if ($name) {
             try { Set-Item -Path "env:$name" -Value $value } catch {}
         }
     }
+
     if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
-        throw "cl.exe not on PATH after VsDevCmd — install MSVC C++ tools."
+        $where = if ($vsInstall) { " ($vsInstall)" } else { "" }
+        throw ("cl.exe not on PATH after VsDevCmd$where - install the C++ toolset.`n" +
+            "  Visual Studio Installer -> Modify -> 'Desktop development with C++'.")
     }
     if (-not (Get-Command nmake -ErrorAction SilentlyContinue)) {
         throw "nmake.exe not on PATH after VsDevCmd."
     }
+
     if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-        throw "cmake.exe not on PATH."
+        $cmakeDirs = @()
+        if ($vsInstall) {
+            $cmakeDirs += Join-Path $vsInstall "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+        }
+        $cmakeDirs += @(
+            (Join-Path ${env:ProgramFiles} "CMake\bin"),
+            (Join-Path ${env:ProgramFiles(x86)} "CMake\bin"),
+            (Join-Path $env:LOCALAPPDATA "Programs\CMake\bin")
+        )
+        foreach ($dir in $cmakeDirs) {
+            $exe = Join-Path $dir "cmake.exe"
+            if (Test-Path $exe) {
+                $env:PATH = "$dir;$env:PATH"
+                Write-Host "[libraw] cmake: $exe"
+                break
+            }
+        }
+    }
+    if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+        throw ("cmake.exe not on PATH.`n" +
+            "  Install CMake (winget install Kitware.CMake) or add the 'C++ CMake tools for Windows'`n" +
+            "  component in the Visual Studio Installer, then reopen the shell.")
     }
 }
 
@@ -95,7 +186,7 @@ function Ensure-Submodules {
         }
     }
     if (-not (Test-Path (Join-Path $LibRaw "src\decoders\sony_arw6.cpp"))) {
-        throw "third_party/LibRaw missing sony_arw6.cpp — run: git submodule update --init --recursive"
+        throw "third_party/LibRaw missing sony_arw6.cpp - run: git submodule update --init --recursive"
     }
     if (-not (Test-Path (Join-Path $LibRawCmake "CMakeLists.txt"))) {
         throw "third_party/LibRaw-cmake missing CMakeLists.txt"
@@ -181,13 +272,13 @@ function Build-LibRawDll {
 function Install-IntoRawpy([string]$Py) {
     $rawpyDir = & $Py -c "import rawpy, os; print(os.path.dirname(rawpy.__file__))"
     if (-not $rawpyDir -or -not (Test-Path $rawpyDir)) {
-        throw "rawpy not importable with $Py — pip install rawpy first."
+        throw "rawpy not importable with $Py - pip install rawpy first."
     }
     $dest = Join-Path $rawpyDir.Trim() "raw_r.dll"
     $bak = "$dest.stock"
     if ((Test-Path $dest) -and -not (Test-Path $bak)) {
         Copy-Item -Force $dest $bak
-        Write-Host "[libraw] Backed up stock DLL → $bak"
+        Write-Host "[libraw] Backed up stock DLL -> $bak"
     }
     Copy-Item -Force $CachedDll $dest
     # OpenMP runtime often needed beside the DLL (same as rawpy wheels).
@@ -200,7 +291,7 @@ function Install-IntoRawpy([string]$Py) {
             Write-Host "[libraw] Bundled $($hits.Name)"
         }
     }
-    Write-Host "[libraw] Installed raw_r.dll → $dest"
+    Write-Host "[libraw] Installed raw_r.dll -> $dest"
 }
 
 function Test-Rawpy([string]$Py) {
@@ -236,4 +327,4 @@ if ($needBuild) {
 
 Install-IntoRawpy $py
 Test-Rawpy $py
-Write-Host "[libraw] OK — packaging LibRaw (ARW6-capable) is in place."
+Write-Host "[libraw] OK - packaging LibRaw (ARW6-capable) is in place."

@@ -47,7 +47,7 @@ def main() -> None:
     out_dir = sys.argv[2] if len(sys.argv) > 2 else "/tmp/shadow_sweep"
     os.makedirs(out_dir, exist_ok=True)
 
-    from unified_image_processor import UnifiedImageProcessor
+    from processing.unified import UnifiedImageProcessor
     from raw_adjustments import DEFAULT_ADJUSTMENTS
     import raw_pv2012 as pv
 

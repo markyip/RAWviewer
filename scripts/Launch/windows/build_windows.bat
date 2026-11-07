@@ -8,10 +8,32 @@ echo RAWviewer Windows Build Script (Unified Installer)
 echo ==================================================
 echo Output:  dist\%SETUP_EXE%
 echo.
+echo Dependency manager: uv when available, otherwise pip.
+echo   Force pip:    set RAWVIEWER_USE_UV=0
+echo   Require uv:   set RAWVIEWER_USE_UV=1
+echo.
+
+set "RAWVIEWER_VENV_USE_UV=1"
+if /I "%RAWVIEWER_USE_UV%"=="0" set "RAWVIEWER_VENV_USE_UV=0"
 
 if not exist "rawviewer_env" (
-    echo Creating virtual environment...
-    python -m venv rawviewer_env
+    if "%RAWVIEWER_VENV_USE_UV%"=="0" (
+        echo Creating virtual environment with python -m venv...
+        python -m venv rawviewer_env
+    ) else (
+        where uv >nul 2>nul
+        if errorlevel 1 (
+            echo Creating virtual environment with python -m venv...
+            python -m venv rawviewer_env
+        ) else (
+            echo Creating virtual environment with uv...
+            uv venv rawviewer_env --seed
+            if errorlevel 1 (
+                echo [WARNING] uv venv failed; falling back to python -m venv.
+                python -m venv rawviewer_env
+            )
+        )
+    )
     echo Virtual environment created.
 )
 

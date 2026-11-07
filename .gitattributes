@@ -1,0 +1,9 @@
+# AI denoise / upscale weights are stored via Git LFS.
+# Upstream tracks these files as LFS pointers but does not ship this file, so a
+# plain clone leaves the pointer text in the working tree and the app treats it
+# as a downloaded model. Explicit attributes let `git lfs pull` / checkout
+# materialize the real weights and keep `git status` clean.
+models/nafnet.onnx filter=lfs diff=lfs merge=lfs -text
+models/scunet.onnx filter=lfs diff=lfs merge=lfs -text
+models/realesrgan_x2.onnx filter=lfs diff=lfs merge=lfs -text
+models/rawrefinery_deep_128.onnx filter=lfs diff=lfs merge=lfs -text

@@ -89,6 +89,7 @@ Copied into `dist/RAWviewer-v*-macOS*.zip` by `build_macos.sh`:
 
 ## Notes
 
+- **Dependency manager:** `build.py` / `build_windows.bat` use **uv** when it is on `PATH` (`uv pip install --python …`, `uv venv --seed`) and fall back to **pip** (`python -m pip install`, `python -m venv`). Force one with `RAWVIEWER_USE_UV=0` (pip) or `RAWVIEWER_USE_UV=1` (uv), or pass `build.py --pip` / `build.py --uv`.
 - Env-var reference for memory / GPU / session: [`docs/DEVELOPING.md`](../../docs/DEVELOPING.md).
 - Day-to-day: `pixi run start`, or `launch_dev_full` on your platform.
 - **clear_cache** does not uninstall the app; use `uninstall.bat` (Windows install folder) or `uninstall_macos_app.sh` (release zip).

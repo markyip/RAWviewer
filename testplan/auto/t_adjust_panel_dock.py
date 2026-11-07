@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import QApplication, QSplitter, QWidget  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
 
-from rawviewer_ui.adjust_panel import (  # noqa: E402
+from rawviewer_ui.widgets.adjust import (  # noqa: E402
     ADJUST_DOCK_DEFAULT,
     ADJUST_DOCK_SETTINGS_KEY,
     ImageAdjustPanelWidget,

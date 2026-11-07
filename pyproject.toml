@@ -1,0 +1,116 @@
+[project]
+name = "rawviewer"
+version = "3.1.0"
+description = "RAWviewer - Professional RAW Image Viewer with Semantic Search"
+requires-python = ">=3.10,<3.13"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",  # Line length handled by formatter
+    "UP040", # PEP 695 `type` keyword requires Python 3.12; project supports 3.10+
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.per-file-ignores]
+"src/search/indexer/__init__.py" = ["F401"]
+"src/raw_adjustments/__init__.py" = ["F401"]
+"src/bootstrap_pkg/__init__.py" = ["F401"]
+"src/enhanced_raw_processor/__init__.py" = ["F401"]
+"src/rawviewer_ui/widgets/gpu/__init__.py" = ["F401"]
+"src/cache/image_cache/__init__.py" = ["F401"]
+"src/rawviewer_app/processing/__init__.py" = ["F401"]
+"src/main.py" = ["E402"]
+"src/raw_adjustments/pipeline.py" = ["E402"]
+"src/core/release_update.py" = ["E402"]
+"src/common_image_loader/loaders.py" = ["E402"]
+"src/common_image_loader/mipmap.py" = ["E402"]
+"src/metadata/backend.py" = ["E402"]
+"src/processing/unified/helpers.py" = ["E402"]
+"src/rawviewer_app/window/mixins/metadata_part2.py" = ["E402"]
+"src/rawviewer_ui/widgets/adjust/adjust_part4.py" = ["E402"]
+"src/bootstrap_pkg/helpers.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+allow_subclassing_any = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "scripts.*"]
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "PyQt6.*",
+    "objc",
+    "AppKit",
+    "CoreML",
+    "Foundation",
+    "Quartz",
+]
+ignore_missing_imports = true
+
+# Qt UI modules: PyQt6 lacks comprehensive stubs, so many errors are false positives
+[[tool.mypy.overrides]]
+module = [
+    "rawviewer_ui.*",
+    "rawviewer_app.*",
+]
+disable_error_code = [
+    "attr-defined",
+    "misc",
+    "no-any-return",
+    "no-untyped-call",
+    "no-untyped-def",
+    "union-attr",
+    "operator",
+    "call-arg",
+    "has-type",
+    "type-arg",
+    "unused-ignore",
+    "assignment",
+]
+
+# Autotest utilities: use dynamic attributes and PyQt6 test APIs
+[[tool.mypy.overrides]]
+module = [
+    "gallery_autotest",
+    "nav_autotest",
+]
+disallow_untyped_defs = false
+disable_error_code = ["attr-defined", "misc", "operator", "no-untyped-call", "assignment"]
+
+# Platform-specific modules with missing stub coverage
+[[tool.mypy.overrides]]
+module = [
+    "platform.windows_share",
+    "platform.display_brightness",
+    "platform.win_launcher",
+    "bootstrap_pkg.worker",
+    "bootstrap_pkg.constants",
+]
+ignore_missing_imports = true
+disable_error_code = ["attr-defined", "misc", "assignment", "no-untyped-def"]
+
+

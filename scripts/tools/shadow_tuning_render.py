@@ -43,7 +43,7 @@ def darkest_crop_box(lum: np.ndarray, size: int) -> tuple[int, int]:
 
 
 def main() -> None:
-    from unified_image_processor import UnifiedImageProcessor
+    from processing.unified import UnifiedImageProcessor
     from raw_adjustments import DEFAULT_ADJUSTMENTS
     from raw_edit_pipeline import process_linear_edit_buffer, linear_to_display_uint8
     import raw_pv2012 as pv

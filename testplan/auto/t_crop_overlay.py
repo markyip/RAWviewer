@@ -37,7 +37,7 @@ def main() -> int:
     check("crop shrinks width", out.shape[1] < img.shape[1], f"{out.shape}")
     check("crop shrinks height", out.shape[0] < img.shape[0], f"{out.shape}")
 
-    from rawviewer_ui.crop_overlay import CropOverlayItem
+    from rawviewer_ui.overlays.crop_overlay import CropOverlayItem
 
     item = CropOverlayItem()
     item.set_image_size(200, 100)

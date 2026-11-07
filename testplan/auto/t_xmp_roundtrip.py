@@ -48,6 +48,7 @@ def main() -> int:
             "Vibrance": 15.0, "Sharpness": 40.0, "Clarity2012": 8.0,
             "ColorNoiseReduction": 50.0, "DenoiseMethod": 1.0,
             "DenoiseDetail": 75.0,
+            "AIDenoiseAmount": 30.0,
             "LensCorrectionEnabled": 1.0,
             TONE_CURVE_SERIAL_KEY: "0,0;64,80;255,255",
             TONE_CURVE_RED_KEY: "0,0;128,150;255,255",
@@ -133,6 +134,24 @@ def main() -> int:
             "DenoiseDetail-only round-trip",
             abs(float(back_detail.get("DenoiseDetail", 50.0)) - 20.0) < 0.51,
             f"loaded {back_detail.get('DenoiseDetail')!r}",
+        )
+
+        # AIDenoiseAmount-only: same contract (persisted, but not "edited").
+        amount_only = dict(DEFAULT_ADJUSTMENTS)
+        amount_only[AS_SHOT_TEMP_KEY] = 5500.0
+        amount_only["Temperature"] = 5500.0
+        amount_only["AIDenoiseAmount"] = 30.0
+        check(
+            "AIDenoiseAmount-only stays is_default",
+            is_default_adjustments(amount_only),
+        )
+        write_xmp_adjustments_for_file(img, amount_only)
+        check("AIDenoiseAmount-only keeps sidecar", os.path.isfile(resolve_xmp_path(img)))
+        back_amount = load_adjustments_for_file(img)
+        check(
+            "AIDenoiseAmount-only round-trip",
+            abs(float(back_amount.get("AIDenoiseAmount", 100.0)) - 30.0) < 0.51,
+            f"loaded {back_amount.get('AIDenoiseAmount')!r}",
         )
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)

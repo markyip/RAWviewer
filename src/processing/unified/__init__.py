@@ -1,0 +1,78 @@
+"""Processing unified pipeline package (Phase 4 split)."""
+from .helpers import (
+    _EDIT_BASE_INFLIGHT,
+    _EDIT_BASE_INFLIGHT_LOCK,
+    _EDIT_BASE_LRU,
+    _EDIT_BASE_LRU_LOCK,
+    _EDIT_BASE_LRU_MAX,
+    _LIBRAW_UNSUPPORTED_PATHS,
+    EXIFExtractor,
+    OptimizedRAWProcessor,
+    ThumbnailExtractor,
+    _edit_base_lru_max,
+    _edit_base_max_edge,
+    _verbose_orientation_logs,
+    array_matches_exif_display,
+    cap_working_edit_base,
+    decode_raw_file,
+    disk_preview_max_edge,
+    get_image_cache,
+    image_covers_sensor_resolution,
+    is_raw_file,
+    load_pixmap_safe,
+    memory_preview_max_edge,
+    prune_libraw_unsupported_paths,
+    release_adjusted_full_cache,
+    release_edit_base_cache,
+    release_unpacked_raw_cache,
+    trim_edit_base_lru,
+    use_full_embedded_raw_preview,
+    use_libraw_consistent_preview_first,
+)
+from .processor import UnifiedImageProcessor
+from .unified_part1 import UnifiedPart1
+from .unified_part2 import UnifiedPart2
+from .unified_part3 import UnifiedPart3
+from .unified_part4 import UnifiedPart4
+from .unified_part5 import UnifiedPart5
+from .unified_part6 import UnifiedPart6
+from .unified_part7 import UnifiedPart7
+
+__all__ = [
+    "_EDIT_BASE_INFLIGHT",
+    "_EDIT_BASE_INFLIGHT_LOCK",
+    "_EDIT_BASE_LRU",
+    "_EDIT_BASE_LRU_LOCK",
+    "_EDIT_BASE_LRU_MAX",
+    "_LIBRAW_UNSUPPORTED_PATHS",
+    "EXIFExtractor",
+    "OptimizedRAWProcessor",
+    "ThumbnailExtractor",
+    "UnifiedImageProcessor",
+    "UnifiedPart1",
+    "UnifiedPart2",
+    "UnifiedPart3",
+    "UnifiedPart4",
+    "UnifiedPart5",
+    "UnifiedPart6",
+    "UnifiedPart7",
+    "array_matches_exif_display",
+    "cap_working_edit_base",
+    "decode_raw_file",
+    "disk_preview_max_edge",
+    "get_image_cache",
+    "image_covers_sensor_resolution",
+    "is_raw_file",
+    "load_pixmap_safe",
+    "memory_preview_max_edge",
+    "prune_libraw_unsupported_paths",
+    "release_adjusted_full_cache",
+    "release_edit_base_cache",
+    "release_unpacked_raw_cache",
+    "trim_edit_base_lru",
+    "use_full_embedded_raw_preview",
+    "use_libraw_consistent_preview_first",
+    "_verbose_orientation_logs",
+    "_edit_base_max_edge",
+    "_edit_base_lru_max",
+]

@@ -132,7 +132,9 @@ def main() -> int:
         "_show_created_file exists to replace it",
         hasattr(mainmod.RAWImageViewer, "_show_created_file"),
     )
-    src = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "main.py"), encoding="utf-8").read()
+    from _source_utils import main_source
+
+    src = main_source()
     check(
         "nothing calls the missing _open_file any more",
         "self._open_file(" not in src,

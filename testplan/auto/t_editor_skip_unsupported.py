@@ -21,7 +21,7 @@ def main() -> int:
 
     app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
     import main as mainmod
-    from unified_image_processor import _LIBRAW_UNSUPPORTED_PATHS
+    from processing.unified import _LIBRAW_UNSUPPORTED_PATHS
 
     key = os.path.normcase(os.path.abspath("/tmp/a.CR3"))
 

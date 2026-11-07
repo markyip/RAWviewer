@@ -9,6 +9,7 @@ Verbose details go to [INFO] log lines only.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -97,6 +98,28 @@ def _download_url_with_progress(
     emit(stage_end)
 
 
+def _materialize_cached_file(src: str, dst: Path) -> None:
+    """Link/copy a file from the shared Hugging Face cache to *dst*.
+
+    ``hf_hub_download`` is called without ``local_dir`` so each file is stored
+    once in ``HF_HUB_CACHE`` and later runs are served from that cache instead
+    of being downloaded again.
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        if os.path.samefile(src, dst):
+            return
+        dst.unlink()
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    tmp = dst.with_suffix(dst.suffix + ".tmp")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dst)
+
+
 def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
     from mobileclip_download_progress import (
@@ -139,27 +162,21 @@ def main() -> int:
             tqdm_class = make_byte_progress_tqdm(
                 stage_start, stage_end, emit_installer_progress, silent=True
             )
-            hf_hub_download(
+            cached_path = hf_hub_download(
                 repo_id=REPO_ID,
                 filename=remote_path,
-                local_dir=str(MODELS_DIR),
                 tqdm_class=tqdm_class,
             )
-            downloaded_path = MODELS_DIR / remote_path
-            target_path = MODELS_DIR / local_name
-            if downloaded_path.exists():
-                if target_path.exists():
-                    target_path.unlink()
-                downloaded_path.rename(target_path)
+            _materialize_cached_file(str(cached_path), MODELS_DIR / local_name)
             emit_installer_progress(stage_end)
 
         rc = _download_with_retry(f"{local_name}", _fetch)
         if rc != 0:
             return rc
 
+    # Remove the layout left by older versions that downloaded with
+    # ``local_dir`` (files are now served from the shared HF cache).
     if (MODELS_DIR / "onnx").exists():
-        import shutil
-
         shutil.rmtree(MODELS_DIR / "onnx")
 
     tokenizer_path = MODELS_DIR / "bpe_simple_vocab_16e6.txt.gz"

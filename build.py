@@ -45,7 +45,7 @@ def _using_pixi_build_env() -> bool:
 def _build_skip_deps() -> bool:
     if _env_flag("RAWVIEWER_BUILD_SKIP_DEPS"):
         return True
-    # build_macos.sh uses pixi with a locked env; pip --upgrade every run is wasted time.
+    # build_macos.sh uses pixi with a locked env; reinstalling deps every run is wasted time.
     if _using_pixi_build_env() and _env_flag("RAWVIEWER_USE_SYSTEM_PYTHON_BUILD"):
         return True
     return False
@@ -53,6 +53,57 @@ def _build_skip_deps() -> bool:
 
 def _build_incremental() -> bool:
     return _env_flag("RAWVIEWER_BUILD_INCREMENTAL")
+
+
+_UV_SETTING_TRUE = ("1", "true", "yes", "on", "uv")
+_UV_SETTING_FALSE = ("0", "false", "no", "off", "pip")
+
+
+def _uv_requested() -> bool:
+    """True when RAWVIEWER_USE_UV explicitly asks for uv."""
+    return os.environ.get("RAWVIEWER_USE_UV", "").strip().lower() in _UV_SETTING_TRUE
+
+
+def _uv_path() -> str | None:
+    """Return the uv executable when dependency installs should use it.
+
+    ``RAWVIEWER_USE_UV=0`` forces pip. Otherwise uv is used automatically when
+    it is on PATH; set ``RAWVIEWER_USE_UV=1`` to make uv mandatory.
+    """
+    setting = os.environ.get("RAWVIEWER_USE_UV", "").strip().lower()
+    if setting in _UV_SETTING_FALSE:
+        return None
+    uv = shutil.which("uv")
+    if uv:
+        return uv
+    if setting in _UV_SETTING_TRUE:
+        print(
+            "[ERROR] RAWVIEWER_USE_UV=1 but 'uv' is not on PATH.\n"
+            "  Install it from https://docs.astral.sh/uv/ or set RAWVIEWER_USE_UV=0."
+        )
+    return None
+
+
+def _dependency_install_command(*packages: str, upgrade: bool = True) -> list[str]:
+    """pip-equivalent install command routed through uv when available."""
+    uv = _uv_path()
+    if uv:
+        cmd = [uv, "pip", "install", "--python", sys.executable]
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd.extend(packages)
+        return cmd
+    cmd = [sys.executable, "-m", "pip", "install"]
+    if upgrade:
+        cmd.append("--upgrade")
+    cmd.extend(packages)
+    return cmd
+
+
+def install_python_packages(*packages: str, upgrade: bool = True) -> bool:
+    """Install PyPI packages with uv (preferred) or pip."""
+    return run_command(_dependency_install_command(*packages, upgrade=upgrade))
+
 
 _WINDOWS_LITE_PIXI_SKIP = (
     "huggingface_hub",
@@ -197,25 +248,37 @@ def ensure_project_venv_and_reexec() -> None:
         if platform.system() == "Darwin":
             venv_msg = (
                 "[INFO] Creating ./rawviewer_env — macOS builds default to an isolated venv "
-                "(reliable pip/PyInstaller vs Homebrew Python). "
+                "(reliable pip/uv + PyInstaller vs Homebrew Python). "
                 "Set RAWVIEWER_USE_SYSTEM_PYTHON_BUILD=1 to opt out."
             )
         else:
             venv_msg = (
                 "[INFO] Creating ./rawviewer_env — system Python is PEP 668 externally managed; "
-                "pip cannot install into it."
+                "dependencies must be installed into an isolated environment."
             )
         print(venv_msg)
-        rc = subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir)],
-            check=False,
-        ).returncode
+        uv = _uv_path()
+        if uv:
+            print("[INFO] Creating venv with uv...")
+            rc = subprocess.run(
+                [uv, "venv", str(venv_dir), "--python", sys.executable, "--seed"],
+                check=False,
+            ).returncode
+            if rc != 0:
+                print("[WARNING] `uv venv` failed; falling back to python -m venv.")
+        else:
+            rc = 1
+        if rc != 0:
+            rc = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_dir)],
+                check=False,
+            ).returncode
         if rc != 0 or not vpy.is_file():
             print(
                 "[ERROR] Could not create ./rawviewer_env. From the repo root try:\n"
-                "  ./scripts/Launch/macos/build_macos.sh\n"
-                "or:  python3 -m venv rawviewer_env && ./rawviewer_env/bin/python3 -m pip install -U pip && "
-                "./rawviewer_env/bin/python3 build.py"
+                f"  {vpy} -m venv rawviewer_env && {vpy} -m pip install -U pip && {vpy} build.py\n"
+                f"or with uv:  uv venv rawviewer_env --seed && "
+                f"uv pip install --python {vpy} -U pip && {vpy} build.py"
             )
             sys.exit(1)
     script = Path(__file__).resolve()
@@ -387,11 +450,13 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
     lite = profile.strip().lower() == "lite"
     if _build_skip_deps():
         _build_log(
-            "Skipping pip install (pixi/locked env or RAWVIEWER_BUILD_SKIP_DEPS=1)"
+            "Skipping dependency install (pixi/locked env or RAWVIEWER_BUILD_SKIP_DEPS=1)"
         )
         return True
 
-    print("Installing/upgrading dependencies...")
+    uv = _uv_path()
+    installer = "uv pip install" if uv else "pip install"
+    print(f"Installing/upgrading dependencies with {installer}...")
     system_name = platform.system()
     dependencies = [
         'PyQt6',
@@ -445,19 +510,17 @@ def install_dependencies(windows_accel: str = "cuda", *, profile: str = "full"):
 
     for dep in dependencies:
         print(f"Installing {dep}...")
-        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", dep]):
+        if not install_python_packages(dep):
             print(f"[ERROR] Failed to install {dep}")
             return False
 
     if system_name == "Darwin":
         print("Installing pyobjc-framework-Cocoa (macOS share sheet)...")
-        if not run_command(
-            [sys.executable, "-m", "pip", "install", "--upgrade", "pyobjc-framework-Cocoa"]
-        ):
+        if not install_python_packages("pyobjc-framework-Cocoa"):
             print("[WARNING] pyobjc-framework-Cocoa install failed; Share may not work in the built app.")
     elif system_name == "Windows":
         print("Installing pywin32 (Windows Share verb)...")
-        if not run_command([sys.executable, "-m", "pip", "install", "--upgrade", "pywin32"]):
+        if not install_python_packages("pywin32"):
             print("[WARNING] pywin32 install failed; Share may not work in the built app.")
 
     print("Dependencies installed successfully!")
@@ -1091,7 +1154,20 @@ def main():
     parser.add_argument(
         "--skip-deps",
         action="store_true",
-        help="Skip pip install/upgrade (fast rebuild when the env is already ready).",
+        help="Skip dependency install/upgrade (fast rebuild when the env is already ready).",
+    )
+    parser.add_argument(
+        "--uv",
+        dest="use_uv",
+        action="store_true",
+        default=None,
+        help="Install dependencies with uv (must be on PATH).",
+    )
+    parser.add_argument(
+        "--pip",
+        dest="use_uv",
+        action="store_false",
+        help="Install dependencies with pip even when uv is available.",
     )
     parser.add_argument(
         "--incremental",
@@ -1111,10 +1187,15 @@ def main():
         print(f"[SUCCESS] Version artifacts synced to {VERSION}")
         sys.exit(0)
 
+    if args.use_uv is not None:
+        os.environ["RAWVIEWER_USE_UV"] = "1" if args.use_uv else "0"
     if args.skip_deps:
         os.environ["RAWVIEWER_BUILD_SKIP_DEPS"] = "1"
     if args.incremental:
         os.environ["RAWVIEWER_BUILD_INCREMENTAL"] = "1"
+
+    if not args.skip_deps and _uv_requested() and _uv_path() is None:
+        sys.exit(1)
 
     ensure_project_venv_and_reexec()
 
@@ -1142,7 +1223,7 @@ def main():
         print("[ERROR] Dependency installation failed.")
         sys.exit(1)
 
-    # After rawpy is present (pip or pixi), swap in the packaging LibRaw.
+    # After rawpy is present (pip/uv or pixi), swap in the packaging LibRaw.
     # Runs even when RAWVIEWER_BUILD_SKIP_DEPS=1 so incremental builds keep ARW6.
     if not ensure_packaged_libraw():
         print("[ERROR] Packaged LibRaw install failed.")
@@ -1384,9 +1465,9 @@ def main():
         "--noconfirm",
         "--windowed",
         "--paths", src_path,
-        "--hidden-import", "rawviewer_ui.gallery_view",
+        "--hidden-import", "rawviewer_ui.widgets.gallery",
         "--hidden-import", "rawviewer_ui.widgets",
-        "--hidden-import", "rawviewer_ui.mobileclip_download_dialog",
+        "--hidden-import", "rawviewer_ui.dialogs.mobileclip_download_dialog",
         "--hidden-import", "natsort",
         "--hidden-import", "send2trash",
         "--hidden-import", "metadata_backend",
@@ -1553,7 +1634,14 @@ def main():
         ])
         
         add_data_args.append('--add-data "src;src"')
-    
+        # AI denoise models (scunet.onnx, nafnet.onnx, rawrefinery_deep_128.onnx).
+        # onnx_scunet._models_dir() resolves to src/../models, which in the built
+        # app is <bundle>/models. Without this, the Adjust panel hides the AI
+        # denoise button because ai_denoise_model_present() can't find a model.
+        models_dir = REPO_ROOT / "models"
+        if models_dir.is_dir():
+            add_data_args.append(f'--add-data "{models_dir}{add_data_sep}models"')
+
     if platform.system() == 'Darwin':
         cmd_base.append("--onedir")
         macos_pool_hook = os.path.join(src_path, "pyi_rth_macos_process_pool.py")

@@ -54,7 +54,7 @@ class _Host:
 
 
 def main() -> int:
-    from rawviewer_ui.gallery_view import JustifiedGallery as G
+    from rawviewer_ui.widgets.gallery import JustifiedGallery as G
 
     # --- pruning keeps what is still on show, drops the rest ---
     host = _Host(10000)

@@ -40,7 +40,7 @@ _app = QApplication.instance() or QApplication([])
 def main() -> int:
     import cv2
 
-    import unified_image_processor as uip
+    import processing.unified as uip
     from common_image_loader import load_qimage_safe
 
     with tempfile.TemporaryDirectory() as d:
@@ -111,7 +111,7 @@ def main() -> int:
 
     check("manager exposes qimage_ready", hasattr(ilm.ImageLoadManager, "qimage_ready"))
     check("host has the converting slot", hasattr(mainmod.RAWImageViewer, "on_manager_qimage_ready"))
-    src = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "image_load_manager.py"), encoding="utf-8").read()
+    src = open(os.path.join(os.path.dirname(__file__), "..", "..", "src", "image_load_manager", "worker.py"), encoding="utf-8").read()
     check("the worker emits QImage buffers rather than dropping them", "qimage_ready.emit" in src)
 
     # --- the conversion must not be paid for a photo already navigated away ---

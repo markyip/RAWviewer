@@ -28,7 +28,7 @@ def main() -> int:
     app = QApplication.instance() or QApplication([])
 
     from image_histogram import ImageHistogramWidget
-    from rawviewer_ui.adjust_panel import (
+    from rawviewer_ui.widgets.adjust import (
         _GLOBAL_SECTION_DEFAULT_ORDER,
         _GLOBAL_SECTION_ORDER_SETTING,
         ImageAdjustPanelWidget,
