@@ -310,7 +310,7 @@ def _share_windows_via_winrt(path: str, owner_hwnd: int) -> bool:
     if not owner_hwnd:
         return False
     try:
-        from platform.windows_share import share_file_windows
+        from platform_support.windows_share import share_file_windows
 
         return bool(share_file_windows(path, owner_hwnd))
     except Exception:

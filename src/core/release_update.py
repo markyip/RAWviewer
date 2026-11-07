@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from app_version import APP_VERSION
+from core.app_version import APP_VERSION
 
 GITHUB_REPO = "markyip/RAWviewer"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
