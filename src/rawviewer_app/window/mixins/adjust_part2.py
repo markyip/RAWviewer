@@ -847,7 +847,7 @@ class AdjustPart2:
             if getattr(self, "_adjust_brightness_saved", None) is not None:
                 return
             try:
-                from platform.display_brightness import get_brightness, set_brightness
+                from platform_support.display_brightness import get_brightness, set_brightness
 
                 hwnd = self._display_brightness_hwnd()
                 current = get_brightness(hwnd=hwnd)
@@ -870,7 +870,7 @@ class AdjustPart2:
         if saved is None:
             return
         try:
-            from platform.display_brightness import set_brightness
+            from platform_support.display_brightness import set_brightness
 
             set_brightness(float(saved), hwnd=self._display_brightness_hwnd())
         except Exception:

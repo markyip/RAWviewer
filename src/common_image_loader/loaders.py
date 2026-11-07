@@ -22,8 +22,6 @@ except ImportError:
 
 import contextlib
 
-from processing.raw_decode.gil import rawpy_imread_warm
-
 from .edr import (
     hlg_to_linear,
     is_macos_edr_enabled,
@@ -474,6 +472,9 @@ def get_image_aspect_ratio(file_path: str) -> float:
 
         try:
             # σÅ¬Φ«ÇσÅû Metadata∩╝îΣ╕ìΦÖòτÉåσ£ûσâÅ
+            # Lazy: a module-level import of processing.* creates a cycle.
+            from processing.raw_decode.gil import rawpy_imread_warm
+
             with rawpy_imread_warm(file_path) as raw:
                 sizes = raw.sizes
                 # Use iwidth and iheight as they already account for orientation (rotation)
